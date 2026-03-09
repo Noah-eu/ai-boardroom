@@ -12,6 +12,17 @@ function formatAttachmentSize(size?: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function buildImageAiStatusKeys(attachment: ProjectAttachment): Array<Parameters<typeof translate>[1]> {
+  const keys: Array<Parameters<typeof translate>[1]> = ['attachments.aiStatus.uploaded'];
+  if (attachment.ingestion?.linkedToAi || attachment.ingestion?.includedInContext) {
+    keys.push('attachments.aiStatus.linked');
+  }
+  if (attachment.ingestion?.analyzedAt || attachment.ingestion?.lastIncludedAt) {
+    keys.push('attachments.aiStatus.analyzed');
+  }
+  return keys;
+}
+
 export function PreviewPanel() {
   const {
     state,
@@ -320,6 +331,19 @@ export function PreviewPanel() {
                             <span className="ml-auto text-[10px] text-gray-500">{formatAttachmentSize(attachment.size)}</span>
                           )}
                         </div>
+
+                        {attachment.kind === 'image' && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {buildImageAiStatusKeys(attachment).map((key) => (
+                              <span
+                                key={`${attachment.id}-${key}`}
+                                className="rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-[10px] text-slate-200"
+                              >
+                                {t(key)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
 
                         {attachment.ingestion?.excerpt && (
                           <p className="mt-1 text-[10px] text-gray-400 leading-relaxed">{attachment.ingestion.excerpt}</p>

@@ -25,6 +25,7 @@ const requestSchema = z.object({
           z.object({
             url: z.string().url(),
             title: z.string().min(1),
+            source: z.enum(['project', 'message']).optional(),
           })
         )
         .default([]),
@@ -91,6 +92,23 @@ function json(statusCode: number, payload: Record<string, unknown>): NetlifyResu
   };
 }
 
+function normalizeRemoteImageUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
   if (event.httpMethod !== 'POST') {
     return json(405, { error: 'Method not allowed' });
@@ -114,10 +132,19 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
     const languageInstruction = language === 'cz' ? 'Respond in Czech language.' : 'Respond in English.';
 
     const client = new OpenAI({ apiKey });
-    const imageInputs = (attachmentContext?.images ?? []).slice(0, 8).map((image) => ({
-      type: 'input_image' as const,
-      image_url: image.url,
-    }));
+    const requestedImages = attachmentContext?.images ?? [];
+    const invalidImageCount = requestedImages.filter((image) => !normalizeRemoteImageUrl(image.url)).length;
+    const imageInputs = requestedImages
+      .map((image) => normalizeRemoteImageUrl(image.url))
+      .filter((url): url is string => Boolean(url))
+      .slice(0, 8)
+      .map((url) => ({
+        type: 'input_image' as const,
+        image_url: url,
+      }));
+    if (requestedImages.length > 0 && imageInputs.length === 0) {
+      console.warn('[netlify/ai-respond] Images requested but none were server-reachable for OpenAI input_image.');
+    }
     const requestInput = [
         {
           role: 'system',
@@ -166,6 +193,12 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
       meta: {
         model: response.model,
         usage: extractUsage(response),
+        imageContext: {
+          requested: requestedImages.length,
+          included: imageInputs.length,
+          dropped: Math.max(0, requestedImages.length - imageInputs.length),
+          invalid: invalidImageCount,
+        },
       },
     });
   } catch (error) {

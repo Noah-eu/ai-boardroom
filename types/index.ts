@@ -89,6 +89,9 @@ export interface AttachmentIngestion {
   zipKeyFiles?: Array<{ path: string; content: string }>;
   error?: string;
   includedInContext?: boolean;
+  linkedToAi?: boolean;
+  linkedToAiAt?: Date;
+  analyzedAt?: Date;
   lastIncludedAt?: Date;
 }
 

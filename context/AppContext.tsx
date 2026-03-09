@@ -106,7 +106,7 @@ type AiRespondPayload = {
   inputText: string;
   context?: unknown;
   attachmentContext?: {
-    images?: Array<{ url: string; title: string }>;
+    images?: Array<{ url: string; title: string; source?: 'project' | 'message' }>;
   };
 };
 
@@ -119,6 +119,12 @@ type AiUsageMeta = {
 type AiRespondMeta = {
   model: string;
   usage: AiUsageMeta;
+  imageContext?: {
+    requested: number;
+    included: number;
+    dropped: number;
+    invalid: number;
+  };
 };
 
 type AiRespondResult = {
@@ -185,6 +191,29 @@ function detectFileKind(file: File): ProjectAttachmentKind {
     return 'zip';
   }
   return 'file';
+}
+
+function normalizeAiImageUrl(value?: string): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolveAttachmentImageUrl(attachment: ProjectAttachment): string | null {
+  return normalizeAiImageUrl(attachment.downloadUrl) ?? normalizeAiImageUrl(attachment.sourceUrl);
 }
 
 type Action =
@@ -903,15 +932,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const messageAttachments = project.attachments.filter((attachment) => (attachment.source ?? 'message') === 'message');
     const includedAttachmentIds: string[] = [];
     const textSections: Array<{ title: string; kind: ProjectAttachmentKind; source: 'project' | 'message'; text: string }> = [];
-    const images: Array<{ url: string; title: string; source: 'project' | 'message' }> = [];
+    const images: Array<{ url: string; title: string; source: 'project' | 'message'; attachmentId: string }> = [];
+    const droppedImageAttachments: Array<{ attachmentId: string; title: string; source: 'project' | 'message' }> = [];
 
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
       let included = false;
 
-      if (attachment.kind === 'image' && attachment.downloadUrl) {
-        images.push({ url: attachment.downloadUrl, title: attachment.title, source });
+      const hasValidImageUrl = attachment.kind === 'image' ? resolveAttachmentImageUrl(attachment) : null;
+      if (attachment.kind === 'image') {
+        if (hasValidImageUrl) {
+          images.push({
+            url: hasValidImageUrl,
+            title: attachment.title,
+            source,
+            attachmentId: attachment.id,
+          });
+          included = true;
+        } else {
+          droppedImageAttachments.push({
+            attachmentId: attachment.id,
+            title: attachment.title,
+            source,
+          });
+        }
+      }
+
+      if (attachment.kind === 'image' && hasValidImageUrl) {
         included = true;
       }
 
@@ -963,6 +1011,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       })),
       textSections,
       images,
+      droppedImageAttachments,
       includedAttachmentIds,
     };
   }, []);
@@ -972,6 +1021,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const role = payload.agentRole;
       const project = stateRef.current.projects.find((candidate) => candidate.id === payload.projectId);
       const attachmentContext = project ? buildAttachmentContext(project) : null;
+      const imageContextByUrl = new Map<
+        string,
+        {
+          url: string;
+          title: string;
+          source: 'project' | 'message';
+          attachmentIds: string[];
+        }
+      >();
+
+      if (attachmentContext) {
+        attachmentContext.images.forEach((image) => {
+          const existing = imageContextByUrl.get(image.url);
+          if (existing) {
+            if (!existing.attachmentIds.includes(image.attachmentId)) {
+              existing.attachmentIds.push(image.attachmentId);
+            }
+            return;
+          }
+          imageContextByUrl.set(image.url, {
+            url: image.url,
+            title: image.title,
+            source: image.source,
+            attachmentIds: [image.attachmentId],
+          });
+        });
+      }
+
+      const aiImages = Array.from(imageContextByUrl.values()).slice(0, 8);
       const requestPayload: AiRespondPayload = {
         ...payload,
         context: {
@@ -990,9 +1068,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             : null,
         },
         attachmentContext: {
-          images: attachmentContext
-            ? attachmentContext.images.map((image) => ({ url: image.url, title: image.title }))
-            : [],
+          images: aiImages.map((image) => ({
+            url: image.url,
+            title: image.title,
+            source: image.source,
+          })),
         },
       };
 
@@ -1003,6 +1083,56 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           agent: logContext.agent,
           message: translateProjectWithVars(payload.language, 'workflow.openai.callStart', { role }),
         });
+
+        if (aiImages.length > 0) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: logContext.agent,
+            message: `Image attachment included in AI context (${aiImages.length})`,
+          });
+        }
+
+        if (attachmentContext && attachmentContext.images.length > aiImages.length) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: logContext.agent,
+            message: `Image context truncated to ${aiImages.length} item(s) for OpenAI request limit.`,
+          });
+        }
+
+        if (
+          attachmentContext &&
+          attachmentContext.droppedImageAttachments.length > 0
+        ) {
+          const droppedTitles = attachmentContext.droppedImageAttachments
+            .map((image) => image.title)
+            .slice(0, 3)
+            .join(', ');
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: logContext.agent,
+            message:
+              `Image attachment warning: ${attachmentContext.droppedImageAttachments.length} image(s) ` +
+              `could not be linked to AI (missing server-reachable URL).` +
+              (droppedTitles ? ` Example: ${droppedTitles}` : ''),
+          });
+        }
+
+        const totalImageAttachments = project
+          ? project.attachments.filter((attachment) => attachment.kind === 'image').length
+          : 0;
+        if (totalImageAttachments > 0 && aiImages.length === 0) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: logContext.agent,
+            message:
+              'Image attachment warning: no image was available to the OpenAI request. Agents may not analyze the photo.',
+          });
+        }
       }
 
       try {
@@ -1037,6 +1167,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           throw new Error(`AI request failed.${detail}`);
         }
 
+        if (logContext && data.meta?.imageContext) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: logContext.agent,
+            message: `Image attachment included in AI context: ${data.meta.imageContext.included}`,
+          });
+          if (data.meta.imageContext.requested > 0 && data.meta.imageContext.included === 0) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'warning',
+              agent: logContext.agent,
+              message:
+                'Image attachment warning: no image reached OpenAI input. Verify uploaded attachment download URLs.',
+            });
+          }
+        }
+
         if (logContext) {
           dispatch({
             type: 'ADD_LOG',
@@ -1047,6 +1195,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (project && attachmentContext && attachmentContext.includedAttachmentIds.length > 0) {
+          const linkedImageAttachmentIds = new Set(aiImages.flatMap((image) => image.attachmentIds));
           attachmentContext.includedAttachmentIds.forEach((attachmentId) => {
             dispatch({
               type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
@@ -1055,6 +1204,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               ingestion: {
                 status: 'included',
                 includedInContext: true,
+                linkedToAi: linkedImageAttachmentIds.has(attachmentId),
+                linkedToAiAt: linkedImageAttachmentIds.has(attachmentId) ? new Date() : undefined,
+                analyzedAt: linkedImageAttachmentIds.has(attachmentId) ? new Date() : undefined,
                 lastIncludedAt: new Date(),
               },
             });
@@ -2123,6 +2275,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           size: Number.isFinite(file.size) ? file.size : undefined,
           storagePath,
           downloadUrl,
+          sourceUrl: downloadUrl,
           ingestion: { status: 'uploaded', summary: 'File uploaded, waiting for ingestion.' },
           createdAt,
         };
