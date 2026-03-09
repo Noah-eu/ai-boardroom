@@ -207,7 +207,8 @@ export function createProject(
   simulationMode = true,
   debateRounds = 3,
   debateMode: DebateMode = 'auto',
-  maxWordsPerAgent = 180
+  maxWordsPerAgent = 180,
+  projectId?: string
 ): Project {
   const now = new Date();
   const normalizedRounds = Math.min(3, Math.max(1, debateRounds));
@@ -225,7 +226,7 @@ export function createProject(
     },
   };
   return {
-    id: generateId(),
+    id: projectId ?? generateId(),
     name,
     description,
     language,

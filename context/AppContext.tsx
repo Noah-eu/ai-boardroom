@@ -136,6 +136,45 @@ type AiRespondLogContext = {
   agent?: AgentName;
 };
 
+type AttachmentContextSnapshot = {
+  projectAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
+  messageAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
+  textSections: Array<{
+    title: string;
+    kind: ProjectAttachmentKind;
+    source: 'project' | 'message';
+    text: string;
+  }>;
+  images: Array<{
+    url: string;
+    title: string;
+    source: 'project' | 'message';
+    attachmentId: string;
+  }>;
+  droppedImageAttachments: Array<{ attachmentId: string; title: string; source: 'project' | 'message' }>;
+  includedAttachmentIds: string[];
+};
+
+type AttachmentTypeCounts = {
+  images: number;
+  pdfs: number;
+  urls: number;
+  zips: number;
+};
+
+function getAttachmentTypeCounts(attachments: ProjectAttachment[]): AttachmentTypeCounts {
+  return attachments.reduce<AttachmentTypeCounts>(
+    (acc, attachment) => {
+      if (attachment.kind === 'image') acc.images += 1;
+      if (attachment.kind === 'pdf') acc.pdfs += 1;
+      if (attachment.kind === 'url') acc.urls += 1;
+      if (attachment.kind === 'zip') acc.zips += 1;
+      return acc;
+    },
+    { images: 0, pdfs: 0, urls: 0, zips: 0 }
+  );
+}
+
 type DraftAttachmentInput =
   | { kind: 'image' | 'pdf' | 'zip' | 'file'; file: File; source?: 'project' | 'message' }
   | { kind: 'url'; url: string; source?: 'project' | 'message' };
@@ -278,6 +317,7 @@ function getFirebaseErrorMessage(error: unknown): string {
 type Action =
   | {
       type: 'CREATE_PROJECT';
+      projectId?: string;
       name: string;
       description: string;
       language: AppLanguage;
@@ -331,7 +371,7 @@ type Action =
       type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION';
       projectId: string;
       attachmentId: string;
-      ingestion: AttachmentIngestion;
+      ingestion: Partial<AttachmentIngestion>;
     }
   | { type: 'RESET' };
 
@@ -406,7 +446,8 @@ function appReducer(state: AppState, action: Action): AppState {
         action.simulationMode,
         action.debateRounds,
         action.debateMode,
-        action.maxWordsPerAgent
+        action.maxWordsPerAgent,
+        action.projectId
       );
       return {
         ...state,
@@ -764,13 +805,23 @@ function appReducer(state: AppState, action: Action): AppState {
         ...project,
         attachments: project.attachments.map((attachment) =>
           attachment.id === action.attachmentId
-            ? {
-                ...attachment,
-                ingestion: {
+            ? (() => {
+                const merged = {
                   ...attachment.ingestion,
                   ...action.ingestion,
-                },
-              }
+                };
+                const mergedStatus = merged.status;
+                if (!mergedStatus) {
+                  return attachment;
+                }
+                return {
+                  ...attachment,
+                  ingestion: {
+                    ...merged,
+                    status: mergedStatus,
+                  },
+                };
+              })()
             : attachment
         ),
         updatedAt: new Date(),
@@ -811,7 +862,7 @@ interface AppContextValue {
     debateMode: DebateMode,
     maxWordsPerAgent: number,
     autoStartDebate?: boolean
-  ) => void;
+  ) => string;
   selectProject: (id: string) => void;
   startDebate: (task: string) => void;
   agentSpeak: (agent: AgentName, content: string) => void;
@@ -869,6 +920,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const checkpointHitRef = useRef<Record<string, { approval: boolean; integrator: boolean }>>({});
   const deadlockSignatureRef = useRef<Record<string, string>>({});
   const debateRunsRef = useRef<Record<string, boolean>>({});
+  const debateRoundStateRef = useRef<Record<string, { isRunning: boolean; currentRound: number }>>({});
   const projectPhaseRef = useRef<Record<string, WorkflowPhase>>({});
   const firebaseConnectedLoggedRef = useRef(false);
   const firebaseErrorLoggedRef = useRef(false);
@@ -1006,7 +1058,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return '/api/ai/respond';
   }, []);
 
-  const buildAttachmentContext = useCallback((project: Project) => {
+  const buildAttachmentContext = useCallback((project: Project): AttachmentContextSnapshot => {
     const projectAttachments = project.attachments.filter((attachment) => (attachment.source ?? 'message') === 'project');
     const messageAttachments = project.attachments.filter((attachment) => (attachment.source ?? 'message') === 'message');
     const includedAttachmentIds: string[] = [];
@@ -1096,10 +1148,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const callAiRespond = useCallback(
-    async (payload: AiRespondPayload, logContext?: AiRespondLogContext): Promise<AiRespondResult> => {
+    async (
+      payload: AiRespondPayload,
+      logContext?: AiRespondLogContext,
+      attachmentSnapshot?: AttachmentContextSnapshot
+    ): Promise<AiRespondResult> => {
       const role = payload.agentRole;
       const project = stateRef.current.projects.find((candidate) => candidate.id === payload.projectId);
-      const attachmentContext = project ? buildAttachmentContext(project) : null;
+      const attachmentContext = attachmentSnapshot ?? (project ? buildAttachmentContext(project) : null);
       const imageContextByUrl = new Map<
         string,
         {
@@ -1419,8 +1475,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       maxWordsPerAgent: number,
       autoStartDebate = true
     ) => {
+      const projectId = generateId();
       dispatch({
         type: 'CREATE_PROJECT',
+        projectId,
         name,
         description,
         language: projectLanguage,
@@ -1433,6 +1491,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (autoStartDebate) {
         dispatch({ type: 'START_DEBATE', task: description });
       }
+      return projectId;
     },
     []
   );
@@ -2290,8 +2349,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
 
       if (!project) {
-        throw new Error('No active project for attachment upload.');
+        throw new Error(`Attachment upload failed: project not found for id ${projectId}.`);
       }
+
+      const maybeQueueForNextRound = (attachmentId: string) => {
+        const debateRoundState = debateRoundStateRef.current[projectId];
+        if (!debateRoundState?.isRunning) {
+          return;
+        }
+
+        dispatch({
+          type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+          projectId,
+          attachmentId,
+          ingestion: {
+            queuedForNextRound: true,
+            queuedAtRound: debateRoundState.currentRound,
+          },
+        });
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          message: 'Attachment queued for next round',
+        });
+      };
 
       const persistAttachmentMetadata = async (
         client: NonNullable<ReturnType<typeof getFirebaseClient>>,
@@ -2405,6 +2486,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
           throw error;
         }
+        maybeQueueForNextRound(urlArtifact.id);
         await ingestAttachment(projectId, urlArtifact);
         return urlArtifact;
       }
@@ -2554,6 +2636,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
           throw error;
         }
+        maybeQueueForNextRound(uploadedArtifact.id);
         await ingestAttachment(projectId, uploadedArtifact);
         return uploadedArtifact;
       } catch (error) {
@@ -2725,6 +2808,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               : 'You must respond to at least one specific point from another agent in round 1 and explicitly name that agent.';
 
           for (let round = 1; round <= rounds; round += 1) {
+            debateRoundStateRef.current[projectId] = { isRunning: true, currentRound: round };
             dispatch({
               type: 'ADD_LOG',
               level: 'info',
@@ -2733,12 +2817,47 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
             const previousRoundMessages = roundMessages.filter((message) => message.round === round - 1);
             const roundOneMessages = roundMessages.filter((message) => message.round === 1);
+            const projectAtRoundStart = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+            if (!projectAtRoundStart || projectAtRoundStart.status !== 'debating') {
+              return;
+            }
+
+            const roundAttachmentSnapshot = buildAttachmentContext(projectAtRoundStart);
+            const roundAttachmentCounts = getAttachmentTypeCounts(projectAtRoundStart.attachments);
+            const snapshotLog =
+              `Round ${round} snapshot: images=${roundAttachmentCounts.images}, ` +
+              `pdfs=${roundAttachmentCounts.pdfs}, urls=${roundAttachmentCounts.urls}, zips=${roundAttachmentCounts.zips}`;
+
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: snapshotLog,
+            });
+
+            roundAttachmentSnapshot.includedAttachmentIds.forEach((attachmentId) => {
+              dispatch({
+                type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+                projectId,
+                attachmentId,
+                ingestion: {
+                  queuedForNextRound: false,
+                  includedInRound: round,
+                },
+              });
+            });
 
             for (const agent of debateAgents) {
               const refreshedProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
               if (!refreshedProject || refreshedProject.status !== 'debating') {
                 return;
               }
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent,
+                message: snapshotLog,
+              });
 
               dispatch({ type: 'UPDATE_AGENT_STATUS', agent, status: 'thinking' });
 
@@ -2825,9 +2944,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                         rounds,
                         previousRoundExcerpts: formatRoundExcerpts(previousRoundMessages),
                         roundOneExcerpts: formatRoundExcerpts(roundOneMessages),
+                        snapshotAttachmentCounts: roundAttachmentCounts,
                       },
                     },
-                    { agent }
+                    { agent },
+                    roundAttachmentSnapshot
                   );
                   content = response.text;
                 } catch {
@@ -2854,6 +2975,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               message: translateProjectWithVars(language, 'workflow.debate.round.finished', { round }),
             });
           }
+
+          debateRoundStateRef.current[projectId] = { isRunning: false, currentRound: 0 };
 
           const refreshedProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
           if (!refreshedProject || refreshedProject.status !== 'debating') {
@@ -2924,7 +3047,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     revisionFeedback,
                   },
                 },
-                {}
+                {},
+                buildAttachmentContext(refreshedProject)
               );
               summary = response.text;
             } catch {
@@ -2974,12 +3098,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             message: translateProjectWithVars(language, 'workflow.openai.callError', { error: message }),
           });
         } finally {
+          debateRoundStateRef.current[projectId] = { isRunning: false, currentRound: 0 };
           debateRunsRef.current[projectId] = false;
         }
       })();
     },
     [
       callAiRespond,
+      buildAttachmentContext,
       buildSimulatedRoundMessage,
       clampDebateRounds,
       formatRoundExcerpts,

@@ -312,11 +312,6 @@ export function ProjectSidebar() {
   } = useApp();
   const [showForm, setShowForm] = useState(false);
   const [buildInfo, setBuildInfo] = useState<{ branch: string; commit: string } | null>(null);
-  const [pendingProjectAttachments, setPendingProjectAttachments] = useState<FormDraftAttachment[] | null>(null);
-  const [pendingProjectIdentity, setPendingProjectIdentity] = useState<{ name: string; description: string } | null>(
-    null
-  );
-  const [isUploadingProjectAttachments, setIsUploadingProjectAttachments] = useState(false);
   const activeProject = state.activeProject;
 
   useEffect(() => {
@@ -338,7 +333,7 @@ export function ProjectSidebar() {
     };
   }, []);
 
-  const handleCreate = (
+  const handleCreate = async (
     name: string,
     description: string,
     projectLanguage: AppLanguage,
@@ -349,9 +344,7 @@ export function ProjectSidebar() {
     maxWordsPerAgent: number,
     attachments: FormDraftAttachment[]
   ) => {
-    setPendingProjectAttachments(attachments.length > 0 ? attachments : null);
-    setPendingProjectIdentity({ name, description });
-    createProject(
+    const projectId = createProject(
       name,
       description,
       projectLanguage,
@@ -360,61 +353,40 @@ export function ProjectSidebar() {
       debateRounds,
       debateMode,
       maxWordsPerAgent,
-      attachments.length === 0
+      false
     );
     setShowForm(false);
-  };
 
-  useEffect(() => {
-    if (isUploadingProjectAttachments) return;
-    if (!pendingProjectAttachments || pendingProjectAttachments.length === 0) return;
-    if (!pendingProjectIdentity) return;
-    if (!activeProject) return;
+    let attachmentUploadFailed = false;
+    try {
+      for (const attachment of attachments) {
+        if (attachment.kind === 'url') {
+          await attachToProject(projectId, {
+            kind: 'url',
+            url: attachment.url,
+            source: 'project',
+          });
+        } else {
+          await attachToProject(projectId, {
+            kind: attachment.kind,
+            file: attachment.file,
+            source: 'project',
+          });
+        }
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Project attachment upload failed.';
+      addLog(detail, 'error');
+      attachmentUploadFailed = true;
+    }
 
-    if (
-      activeProject.name !== pendingProjectIdentity.name ||
-      activeProject.description !== pendingProjectIdentity.description
-    ) {
+    if (attachmentUploadFailed) {
+      addLog('Project debate not started because attachment upload/ingestion failed.', 'error');
       return;
     }
 
-    setIsUploadingProjectAttachments(true);
-    void (async () => {
-      try {
-        for (const attachment of pendingProjectAttachments) {
-          if (attachment.kind === 'url') {
-            await attachToProject(activeProject.id, {
-              kind: 'url',
-              url: attachment.url,
-              source: 'project',
-            });
-          } else {
-            await attachToProject(activeProject.id, {
-              kind: attachment.kind,
-              file: attachment.file,
-              source: 'project',
-            });
-          }
-        }
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : 'Project attachment upload failed.';
-        addLog(detail, 'warning');
-      } finally {
-        startDebate(activeProject.description);
-        setPendingProjectAttachments(null);
-        setPendingProjectIdentity(null);
-        setIsUploadingProjectAttachments(false);
-      }
-    })();
-  }, [
-    activeProject,
-    addLog,
-    attachToProject,
-    isUploadingProjectAttachments,
-    pendingProjectAttachments,
-    pendingProjectIdentity,
-    startDebate,
-  ]);
+    startDebate(description);
+  };
 
   return (
     <div className="h-full flex flex-col bg-gray-950 border-r border-gray-800">

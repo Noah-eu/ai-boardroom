@@ -23,6 +23,31 @@ function buildImageAiStatusKeys(attachment: ProjectAttachment): Array<Parameters
   return keys;
 }
 
+function buildAttachmentStatusChips(
+  attachment: ProjectAttachment,
+  t: ReturnType<typeof useApp>['t'],
+  tf: ReturnType<typeof useApp>['tf']
+): string[] {
+  const chips: string[] = [];
+  chips.push(t(`attachments.status.${attachment.ingestion?.status ?? 'uploaded'}` as Parameters<typeof translate>[1]));
+
+  const ingestion = attachment.ingestion;
+  const isIngested = Boolean(
+    ingestion?.extractedText || ingestion?.excerpt || ingestion?.zipFileTree || ingestion?.pageTitle
+  );
+  if (isIngested) {
+    chips.push(t('attachments.status.ingested'));
+  }
+  if (ingestion?.queuedForNextRound) {
+    chips.push(t('attachments.status.queuedNextRound'));
+  }
+  if (typeof ingestion?.includedInRound === 'number' && ingestion.includedInRound > 0) {
+    chips.push(tf('attachments.status.includedRound', { round: ingestion.includedInRound }));
+  }
+
+  return chips;
+}
+
 export function PreviewPanel() {
   const {
     state,
@@ -319,13 +344,11 @@ export function PreviewPanel() {
                           <span className="text-[10px] text-gray-300">
                             {t(`attachments.kind.${attachment.kind}` as Parameters<typeof translate>[1])}
                           </span>
-                          <span className="rounded border border-gray-700 bg-gray-950 px-1 py-0.5 text-[10px] text-gray-400">
-                            {t(
-                              `attachments.status.${attachment.ingestion?.status ?? 'uploaded'}` as Parameters<
-                                typeof translate
-                              >[1]
-                            )}
-                          </span>
+                          {buildAttachmentStatusChips(attachment, t, tf).map((statusChip) => (
+                            <span key={`${attachment.id}-${statusChip}`} className="rounded border border-gray-700 bg-gray-950 px-1 py-0.5 text-[10px] text-gray-400">
+                              {statusChip}
+                            </span>
+                          ))}
                           <p className="truncate text-[11px] text-gray-100">{attachment.title}</p>
                           {attachment.size && (
                             <span className="ml-auto text-[10px] text-gray-500">{formatAttachmentSize(attachment.size)}</span>

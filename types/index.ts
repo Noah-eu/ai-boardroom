@@ -93,6 +93,9 @@ export interface AttachmentIngestion {
   linkedToAiAt?: Date;
   analyzedAt?: Date;
   lastIncludedAt?: Date;
+  queuedForNextRound?: boolean;
+  queuedAtRound?: number;
+  includedInRound?: number;
 }
 
 export interface ProjectAttachment {
