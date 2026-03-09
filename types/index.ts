@@ -73,6 +73,39 @@ export interface Message {
   agentRole?: string;
 }
 
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface UsagePricingSnapshot {
+  inputPerMillion: number;
+  outputPerMillion: number;
+  estimatedCostUsd: number;
+}
+
+export interface ModelUsageEntry {
+  model: string;
+  calls: number;
+  totals: UsageTotals;
+}
+
+export interface ProjectUsage {
+  totals: UsageTotals;
+  session: UsageTotals;
+  estimatedProjectCostUsd: number;
+  sessionCostUsd: number;
+  activeModel: string | null;
+  models: ModelUsageEntry[];
+  lastUpdatedAt: Date | null;
+  // Prepared for future Firebase sync support.
+  persistence: {
+    lastSyncedAt: Date | null;
+    pendingSync: boolean;
+  };
+}
+
 // Project types
 export type ProjectStatus =
   | 'idle'
@@ -103,6 +136,7 @@ export interface Project {
   taskGraph: TaskGraph | null;
   tasks: Task[];
   messages: Message[];
+  usage: ProjectUsage;
 }
 
 // Orchestrator types

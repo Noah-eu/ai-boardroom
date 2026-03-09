@@ -18,12 +18,14 @@ import {
   AgentStatus,
   DebateMode,
   LogEntry,
+  ProjectUsage,
   OrchestratorState,
   OutputType,
   Project,
   ProjectStatus,
   Task,
   TaskGraph,
+  UsageTotals,
   WorkflowPhase,
 } from '@/types';
 import { z } from 'zod';
@@ -100,9 +102,63 @@ type AiRespondPayload = {
   context?: unknown;
 };
 
+type AiUsageMeta = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+
+type AiRespondMeta = {
+  model: string;
+  usage: AiUsageMeta;
+};
+
+type AiRespondResult = {
+  text: string;
+  meta: AiRespondMeta | null;
+};
+
 type AiRespondLogContext = {
   agent?: AgentName;
 };
+
+const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number }> = {
+  'gpt-4.1': { input: 2.0, output: 8.0 },
+  'gpt-4.1-mini': { input: 0.4, output: 1.6 },
+  'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+  'gpt-4o': { input: 2.5, output: 10.0 },
+  'gpt-4o-mini': { input: 0.15, output: 0.6 },
+};
+
+function resolveModelRates(modelName: string | null): { input: number; output: number } {
+  if (!modelName) {
+    return MODEL_PRICING_PER_MILLION['gpt-4.1-mini'];
+  }
+  return MODEL_PRICING_PER_MILLION[modelName] ?? MODEL_PRICING_PER_MILLION['gpt-4.1-mini'];
+}
+
+function estimateCostUsd(totals: UsageTotals, modelName: string | null): number {
+  const rates = resolveModelRates(modelName);
+  const inputCost = (totals.inputTokens / 1_000_000) * rates.input;
+  const outputCost = (totals.outputTokens / 1_000_000) * rates.output;
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
+function createEmptyUsage(): ProjectUsage {
+  return {
+    totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    session: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    estimatedProjectCostUsd: 0,
+    sessionCostUsd: 0,
+    activeModel: null,
+    models: [],
+    lastUpdatedAt: null,
+    persistence: {
+      lastSyncedAt: null,
+      pendingSync: false,
+    },
+  };
+}
 
 type Action =
   | {
@@ -144,6 +200,12 @@ type Action =
       type: 'SET_PROJECT_DEBATE_ROUNDS';
       projectId: string;
       debateRounds: number;
+    }
+  | {
+      type: 'ADD_PROJECT_USAGE';
+      projectId: string;
+      model: string;
+      usage: AiUsageMeta;
     }
   | { type: 'RESET' };
 
@@ -496,6 +558,73 @@ function appReducer(state: AppState, action: Action): AppState {
       }));
     }
 
+    case 'ADD_PROJECT_USAGE': {
+      return syncProjectById(state, action.projectId, (project) => {
+        const currentUsage = project.usage ?? createEmptyUsage();
+        const nextTotals: UsageTotals = {
+          inputTokens: currentUsage.totals.inputTokens + action.usage.inputTokens,
+          outputTokens: currentUsage.totals.outputTokens + action.usage.outputTokens,
+          totalTokens:
+            currentUsage.totals.totalTokens +
+            (action.usage.totalTokens || action.usage.inputTokens + action.usage.outputTokens),
+        };
+        const nextSession: UsageTotals = {
+          inputTokens: currentUsage.session.inputTokens + action.usage.inputTokens,
+          outputTokens: currentUsage.session.outputTokens + action.usage.outputTokens,
+          totalTokens:
+            currentUsage.session.totalTokens +
+            (action.usage.totalTokens || action.usage.inputTokens + action.usage.outputTokens),
+        };
+        const modelName = action.model || currentUsage.activeModel || null;
+        const modelIndex = currentUsage.models.findIndex((entry) => entry.model === action.model);
+        const nextModels = [...currentUsage.models];
+
+        if (modelIndex >= 0) {
+          const current = nextModels[modelIndex];
+          nextModels[modelIndex] = {
+            ...current,
+            calls: current.calls + 1,
+            totals: {
+              inputTokens: current.totals.inputTokens + action.usage.inputTokens,
+              outputTokens: current.totals.outputTokens + action.usage.outputTokens,
+              totalTokens:
+                current.totals.totalTokens +
+                (action.usage.totalTokens || action.usage.inputTokens + action.usage.outputTokens),
+            },
+          };
+        } else {
+          nextModels.push({
+            model: action.model,
+            calls: 1,
+            totals: {
+              inputTokens: action.usage.inputTokens,
+              outputTokens: action.usage.outputTokens,
+              totalTokens: action.usage.totalTokens || action.usage.inputTokens + action.usage.outputTokens,
+            },
+          });
+        }
+
+        return {
+          ...project,
+          usage: {
+            ...currentUsage,
+            totals: nextTotals,
+            session: nextSession,
+            activeModel: modelName,
+            models: nextModels,
+            estimatedProjectCostUsd: estimateCostUsd(nextTotals, modelName),
+            sessionCostUsd: estimateCostUsd(nextSession, modelName),
+            lastUpdatedAt: new Date(),
+            persistence: {
+              ...currentUsage.persistence,
+              pendingSync: true,
+            },
+          },
+          updatedAt: new Date(),
+        };
+      });
+    }
+
     case 'RESET': {
       return createInitialAppState();
     }
@@ -562,6 +691,7 @@ interface AppContextValue {
   repairDeadlock: () => void;
   pauseExecution: () => void;
   resumeExecution: () => void;
+  stopExecution: () => void;
   stepExecution: () => void;
   reset: () => void;
   runDemo: () => void;
@@ -703,7 +833,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const callAiRespond = useCallback(
-    async (payload: AiRespondPayload, logContext?: AiRespondLogContext): Promise<string> => {
+    async (payload: AiRespondPayload, logContext?: AiRespondLogContext): Promise<AiRespondResult> => {
       const role = payload.agentRole;
       if (logContext) {
         dispatch({
@@ -724,11 +854,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         const contentType = response.headers.get('content-type') ?? '';
         const rawBody = await response.text();
-        let data: { text?: string; error?: string } | null = null;
+        let data: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
 
         if (contentType.includes('application/json')) {
           try {
-            data = JSON.parse(rawBody) as { text?: string; error?: string };
+            data = JSON.parse(rawBody) as { text?: string; error?: string; meta?: AiRespondMeta };
           } catch {
             data = null;
           }
@@ -755,7 +885,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
         }
 
-        return data.text;
+        if (data.meta?.model && data.meta.usage) {
+          dispatch({
+            type: 'ADD_PROJECT_USAGE',
+            projectId: payload.projectId,
+            model: data.meta.model,
+            usage: data.meta.usage,
+          });
+        }
+
+        return {
+          text: data.text,
+          meta: data.meta ?? null,
+        };
       } catch (error) {
         if (logContext) {
           const message = error instanceof Error ? error.message : 'Unknown OpenAI error';
@@ -1439,7 +1581,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           },
         }, { agent: 'Planner' });
 
-        const parsed = plannerTaskGraphSchema.parse(JSON.parse(plannerResponse));
+        const parsed = plannerTaskGraphSchema.parse(JSON.parse(plannerResponse.text));
         return materializePlannerGraph(parsed);
       };
 
@@ -1526,6 +1668,46 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSchedulerPaused(project.id, false, true);
     schedulerTick(project.id);
   }, [schedulerTick, setSchedulerPaused]);
+
+  const stopExecution = useCallback(() => {
+    const project = stateRef.current.activeProject;
+    if (!project?.taskGraph) return;
+
+    const interval = schedulerIntervalsRef.current[project.id];
+    if (interval) {
+      clearInterval(interval);
+      delete schedulerIntervalsRef.current[project.id];
+    }
+
+    const stopReason = translateProject(project.language, 'workflow.scheduler.manualStopReason');
+    project.tasks.forEach((task) => {
+      const taskTimer = taskTimersRef.current[task.id];
+      if (taskTimer) {
+        clearTimeout(taskTimer);
+        delete taskTimersRef.current[task.id];
+      }
+
+      if (task.status !== 'done' && task.status !== 'failed') {
+        dispatch({
+          type: 'UPDATE_TASK',
+          projectId: project.id,
+          taskId: task.id,
+          patch: {
+            status: 'failed',
+            errorMessage: stopReason,
+          },
+        });
+      }
+    });
+
+    setSchedulerPaused(project.id, true, false);
+    dispatch({
+      type: 'ADD_LOG',
+      level: 'warning',
+      message: translateProject(project.language, 'workflow.scheduler.stopped'),
+    });
+    schedulerTick(project.id, true);
+  }, [schedulerTick, setSchedulerPaused, translateProject]);
 
   const stepExecution = useCallback(() => {
     const project = stateRef.current.activeProject;
@@ -1776,7 +1958,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   .join('\n\n');
 
                 try {
-                  content = await callAiRespond(
+                  const response = await callAiRespond(
                     {
                       projectId,
                       language,
@@ -1794,6 +1976,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     },
                     { agent }
                   );
+                  content = response.text;
                 } catch {
                   content = buildSimulatedRoundMessage(language, agent, round, previousRoundMessages);
                 }
@@ -1874,7 +2057,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             ].join('\n\n');
 
             try {
-              summary = await callAiRespond(
+              const response = await callAiRespond(
                 {
                   projectId,
                   language,
@@ -1890,6 +2073,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 },
                 {}
               );
+              summary = response.text;
             } catch {
               summary =
                 language === 'cz'
@@ -2112,6 +2296,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     repairDeadlock,
     pauseExecution,
     resumeExecution,
+    stopExecution,
     stepExecution,
     reset,
     runDemo,

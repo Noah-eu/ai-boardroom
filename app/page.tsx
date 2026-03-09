@@ -6,6 +6,7 @@ import { ChatPanel } from '@/components/chat/ChatPanel';
 import { AgentsPanel } from '@/components/agents/AgentsPanel';
 import { ExecutionLog } from '@/components/layout/ExecutionLog';
 import { PreviewPanel } from '@/components/layout/PreviewPanel';
+import { TopStatusBar } from '@/components/layout/TopStatusBar';
 import { useApp } from '@/context/AppContext';
 
 type MobileTab = 'chat' | 'agents' | 'log' | 'preview' | 'projects';
@@ -52,38 +53,41 @@ export default function DashboardPage() {
     <div className="h-screen flex flex-col bg-gray-950 overflow-hidden">
       {/* Desktop dashboard keeps original layout unchanged */}
       <div className="hidden h-full lg:flex lg:flex-col">
-        <div className="flex overflow-hidden" style={{ height: `calc(100% - ${bottomHeight + 8}px)` }}>
-          <aside className="w-56 flex-shrink-0 flex flex-col overflow-hidden">
-            <ProjectSidebar />
-          </aside>
+        <TopStatusBar />
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex overflow-hidden" style={{ height: `calc(100% - ${bottomHeight + 8}px)` }}>
+            <aside className="w-56 flex-shrink-0 flex flex-col overflow-hidden">
+              <ProjectSidebar />
+            </aside>
 
-          <main className="flex-1 flex flex-col overflow-hidden border-x border-gray-800">
-            <div className="flex-1 overflow-hidden">
-              <ChatPanel />
-            </div>
-          </main>
+            <main className="flex-1 flex flex-col overflow-hidden border-x border-gray-800">
+              <div className="flex-1 overflow-hidden">
+                <ChatPanel />
+              </div>
+            </main>
 
-          <aside className="w-64 flex-shrink-0 flex flex-col overflow-hidden">
-            <AgentsPanel />
-          </aside>
-        </div>
-
-        <div
-          role="separator"
-          aria-label="Resize workspace and output panels"
-          aria-orientation="horizontal"
-          onPointerDown={() => setIsResizing(true)}
-          className="h-2 flex-shrink-0 cursor-row-resize bg-gray-900 hover:bg-blue-900/40 border-t border-b border-gray-800 transition-colors"
-        >
-          <div className="m-auto h-0.5 w-16 rounded bg-gray-700" />
-        </div>
-
-        <div className="flex-shrink-0 flex overflow-hidden border-t border-gray-800" style={{ height: `${bottomHeight}px` }}>
-          <div className="flex-1 overflow-hidden">
-            <ExecutionLog />
+            <aside className="w-64 flex-shrink-0 flex flex-col overflow-hidden">
+              <AgentsPanel />
+            </aside>
           </div>
-          <div className="w-80 flex-shrink-0 overflow-hidden border-l border-gray-800">
-            <PreviewPanel />
+
+          <div
+            role="separator"
+            aria-label="Resize workspace and output panels"
+            aria-orientation="horizontal"
+            onPointerDown={() => setIsResizing(true)}
+            className="h-2 flex-shrink-0 cursor-row-resize bg-gray-900 hover:bg-blue-900/40 border-t border-b border-gray-800 transition-colors"
+          >
+            <div className="m-auto h-0.5 w-16 rounded bg-gray-700" />
+          </div>
+
+          <div className="flex-shrink-0 flex overflow-hidden border-t border-gray-800" style={{ height: `${bottomHeight}px` }}>
+            <div className="flex-1 overflow-hidden">
+              <ExecutionLog />
+            </div>
+            <div className="w-80 flex-shrink-0 overflow-hidden border-l border-gray-800">
+              <PreviewPanel />
+            </div>
           </div>
         </div>
       </div>
@@ -100,6 +104,8 @@ export default function DashboardPage() {
             {t('preview.more')}
           </button>
         </header>
+
+        <TopStatusBar />
 
         {showMobileSettings && (
           <div className="border-b border-gray-800 bg-gray-900/80 px-4 py-3">

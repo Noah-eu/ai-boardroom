@@ -44,6 +44,25 @@ function extractResponseText(response: OpenAI.Responses.Response): string {
   return textParts.join('\n').trim();
 }
 
+function extractUsage(response: OpenAI.Responses.Response): {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+} {
+  const usage = response.usage as
+    | {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+      }
+    | undefined;
+  return {
+    inputTokens: usage?.input_tokens ?? 0,
+    outputTokens: usage?.output_tokens ?? 0,
+    totalTokens: usage?.total_tokens ?? 0,
+  };
+}
+
 export async function POST(request: Request) {
   const apiKey = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
@@ -124,7 +143,13 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ text });
+    return NextResponse.json({
+      text,
+      meta: {
+        model: response.model,
+        usage: extractUsage(response),
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown OpenAI error.';
     return NextResponse.json(

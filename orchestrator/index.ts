@@ -10,6 +10,7 @@ import {
   OrchestratorState,
   OutputType,
   Project,
+  ProjectUsage,
   WorkflowPhase,
 } from '@/types';
 
@@ -208,6 +209,19 @@ export function createProject(
 ): Project {
   const now = new Date();
   const normalizedRounds = Math.min(3, Math.max(1, debateRounds));
+  const initialUsage: ProjectUsage = {
+    totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    session: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    estimatedProjectCostUsd: 0,
+    sessionCostUsd: 0,
+    activeModel: null,
+    models: [],
+    lastUpdatedAt: null,
+    persistence: {
+      lastSyncedAt: null,
+      pendingSync: false,
+    },
+  };
   return {
     id: generateId(),
     name,
@@ -226,5 +240,6 @@ export function createProject(
     taskGraph: null,
     tasks: [],
     messages: [],
+    usage: initialUsage,
   };
 }

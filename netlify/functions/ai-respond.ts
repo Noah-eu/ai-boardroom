@@ -52,6 +52,25 @@ function extractResponseText(response: OpenAI.Responses.Response): string {
   return textParts.join('\n').trim();
 }
 
+function extractUsage(response: OpenAI.Responses.Response): {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+} {
+  const usage = response.usage as
+    | {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+      }
+    | undefined;
+  return {
+    inputTokens: usage?.input_tokens ?? 0,
+    outputTokens: usage?.output_tokens ?? 0,
+    totalTokens: usage?.total_tokens ?? 0,
+  };
+}
+
 function json(statusCode: number, payload: Record<string, unknown>): NetlifyResult {
   return {
     statusCode,
@@ -123,7 +142,13 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
       return json(500, { error: 'Model returned empty response' });
     }
 
-    return json(200, { text });
+    return json(200, {
+      text,
+      meta: {
+        model: response.model,
+        usage: extractUsage(response),
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     const short = message.slice(0, 180);
