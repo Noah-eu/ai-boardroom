@@ -208,37 +208,18 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap }:
 
 interface ApprovalActionsProps {
   onApprove: () => void;
-  onReject: (feedback: string) => void;
+  onRejectRequest: () => void;
+  isRevisionMode: boolean;
   t: (key: TranslationKey) => string;
 }
 
-function ApprovalActions({ onApprove, onReject, t }: ApprovalActionsProps) {
-  const [feedback, setFeedback] = useState('');
-  const [showRevisionInput, setShowRevisionInput] = useState(false);
-  const trimmedFeedback = feedback.trim();
-
+function ApprovalActions({ onApprove, onRejectRequest, isRevisionMode, t }: ApprovalActionsProps) {
   return (
     <div className="flex-shrink-0 border-t border-yellow-800/30 bg-yellow-950/20 px-4 py-3">
       <p className="text-xs text-yellow-300 mb-2 font-medium">{t('chat.reviewPlan')}</p>
-      {showRevisionInput ? (
-        <>
-          <label className="block text-[10px] text-gray-300 mb-1">{t('chat.revisionFeedback')}</label>
-          <textarea
-            value={feedback}
-            onChange={(event) => setFeedback(event.target.value)}
-            rows={2}
-            className="mb-2 w-full resize-none rounded border border-blue-600/50 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-            placeholder={t('chat.revisionFeedbackPlaceholder')}
-          />
-          {!trimmedFeedback && (
-            <p className="mt-1 mb-2 text-[10px] text-gray-400">{t('chat.revisionFeedbackRequired')}</p>
-          )}
-        </>
-      ) : (
-        <p className="mb-2 rounded border border-yellow-700/40 bg-yellow-950/30 px-2 py-1.5 text-[11px] text-yellow-200">
-          {t('chat.revisionFeedbackHint')}
-        </p>
-      )}
+      <p className="mb-2 rounded border border-yellow-700/40 bg-yellow-950/30 px-2 py-1.5 text-[11px] text-yellow-200">
+        {isRevisionMode ? t('chat.revisionModeActiveHint') : t('chat.revisionFeedbackHint')}
+      </p>
       <div className="flex gap-2">
         <button
           onClick={onApprove}
@@ -247,19 +228,7 @@ function ApprovalActions({ onApprove, onReject, t }: ApprovalActionsProps) {
           ✓ {t('chat.approve')}
         </button>
         <button
-          onClick={() => {
-            if (!showRevisionInput) {
-              setShowRevisionInput(true);
-              return;
-            }
-            if (!trimmedFeedback) {
-              return;
-            }
-            onReject(trimmedFeedback);
-            setFeedback('');
-            setShowRevisionInput(false);
-          }}
-          disabled={showRevisionInput && !trimmedFeedback}
+          onClick={onRejectRequest}
           className="flex-1 px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-xs font-medium rounded-lg transition-colors"
         >
           ✕ {t('chat.reject')}
@@ -282,12 +251,14 @@ export function ChatPanel() {
     language,
     setProjectSimulationMode,
   } = useApp();
+  const [composerMode, setComposerMode] = useState<'normal' | 'revision'>('normal');
   const [inputValue, setInputValue] = useState('');
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [showLinkInput, setShowLinkInput] = useState(false);
   const [linkValue, setLinkValue] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [composerNotice, setComposerNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
@@ -315,11 +286,28 @@ export function ChatPanel() {
     .reduce((current, value) => Math.max(current, value), -1);
   const hasPendingApprovalRequest = lastApprovalRequestIndex > lastApprovalResponseIndex;
   const showApprovalActionsResolved = isAwaitingApproval && hasPendingApprovalRequest;
+  const isRevisionMode = composerMode === 'revision';
 
   const messagesCount = messages.length;
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messagesCount]);
+
+  useEffect(() => {
+    if (!isAwaitingApproval && isRevisionMode) {
+      setComposerMode('normal');
+      setInputValue('');
+      setDraftAttachments([]);
+      setShowLinkInput(false);
+      setShowAttachmentMenu(false);
+    }
+  }, [isAwaitingApproval, isRevisionMode]);
+
+  useEffect(() => {
+    if (state.currentPhase !== 'debate') {
+      setComposerNotice(null);
+    }
+  }, [state.currentPhase]);
 
   const removeDraftAttachment = (attachmentId: string) => {
     setDraftAttachments((previous) => previous.filter((attachment) => attachment.id !== attachmentId));
@@ -360,7 +348,28 @@ export function ChatPanel() {
     setShowAttachmentMenu(false);
   };
 
-  const handleSend = async () => {
+  const uploadDraftAttachments = async () => {
+    if (!activeProject || draftAttachments.length === 0) {
+      return [] as string[];
+    }
+
+    const uploaded = await Promise.all(
+      draftAttachments.map(async (attachment) => {
+        if (attachment.kind === 'url') {
+          return attachToProject(activeProject.id, { kind: 'url', url: attachment.url, source: 'message' });
+        }
+        return attachToProject(activeProject.id, {
+          kind: attachment.kind,
+          file: attachment.file,
+          source: 'message',
+        });
+      })
+    );
+
+    return uploaded.map((artifact) => artifact.id);
+  };
+
+  const handleNormalSend = async () => {
     if (!inputValue.trim() && draftAttachments.length === 0) return;
     if (!activeProject) return;
 
@@ -368,19 +377,7 @@ export function ChatPanel() {
     const text = inputValue.trim();
 
     try {
-      const uploaded = await Promise.all(
-        draftAttachments.map(async (attachment) => {
-          if (attachment.kind === 'url') {
-            return attachToProject(activeProject.id, { kind: 'url', url: attachment.url });
-          }
-          return attachToProject(activeProject.id, {
-            kind: attachment.kind,
-            file: attachment.file,
-          });
-        })
-      );
-
-      const attachmentIds = uploaded.map((artifact) => artifact.id);
+      const attachmentIds = await uploadDraftAttachments();
       setInputValue('');
       setDraftAttachments([]);
 
@@ -388,10 +385,54 @@ export function ChatPanel() {
         startDebate(text);
       } else {
         addUserMessage(text || t('attachments.messageOnly'), attachmentIds);
+        if (state.currentPhase === 'debate') {
+          setComposerNotice(t('chat.debateSupplementalHint'));
+        }
       }
     } finally {
       setIsSending(false);
     }
+  };
+
+  const handleRevisionSend = async () => {
+    if (!isAwaitingApproval) return;
+    if (!inputValue.trim()) return;
+    if (!activeProject) return;
+
+    setIsSending(true);
+    const feedback = inputValue.trim();
+
+    try {
+      const attachmentIds = await uploadDraftAttachments();
+      setInputValue('');
+      setDraftAttachments([]);
+      setComposerMode('normal');
+      setComposerNotice(null);
+      rejectPlan(feedback, attachmentIds);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleSend = async () => {
+    if (isRevisionMode) {
+      await handleRevisionSend();
+      return;
+    }
+    await handleNormalSend();
+  };
+
+  const enterRevisionMode = () => {
+    setComposerMode('revision');
+    setComposerNotice(null);
+  };
+
+  const cancelRevisionMode = () => {
+    setComposerMode('normal');
+    setInputValue('');
+    setDraftAttachments([]);
+    setShowLinkInput(false);
+    setShowAttachmentMenu(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -466,12 +507,29 @@ export function ChatPanel() {
 
       {/* Approval actions */}
       {showApprovalActionsResolved && (
-        <ApprovalActions onApprove={approvePlan} onReject={rejectPlan} t={t} />
+        <ApprovalActions
+          onApprove={approvePlan}
+          onRejectRequest={enterRevisionMode}
+          isRevisionMode={isRevisionMode}
+          t={t}
+        />
       )}
 
       {/* Input */}
-      {!isAwaitingApproval ? (
-        <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
+      <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
+        <div className={`mb-2 flex items-center justify-between rounded border px-2 py-1 text-[11px] ${
+          isRevisionMode
+            ? 'border-orange-700/50 bg-orange-950/40 text-orange-200'
+            : 'border-gray-700 bg-gray-900 text-gray-300'
+        }`}>
+          <span className="font-medium">
+            {isRevisionMode ? t('chat.modeRevision') : t('chat.modeNormal')}
+          </span>
+          {isAwaitingApproval && !isRevisionMode ? (
+            <span className="text-yellow-300">{t('chat.approvalComposerHint')}</span>
+          ) : null}
+        </div>
+
         {draftAttachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {draftAttachments.map((attachment) => (
@@ -553,19 +611,34 @@ export function ChatPanel() {
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              state.currentPhase === 'idle'
+              isRevisionMode
+                ? t('chat.revisionFeedbackPlaceholder')
+                : state.currentPhase === 'idle'
                 ? t('chat.placeholderStart')
                 : t('chat.placeholderMessage')
             }
             rows={2}
-            className="flex-1 resize-none bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 transition-colors"
+            className={`flex-1 resize-none rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
+              isRevisionMode
+                ? 'bg-orange-950/30 border border-orange-600/50 focus:border-orange-500 focus:ring-orange-500/30'
+                : 'bg-gray-900 border border-gray-600 focus:border-blue-500 focus:ring-blue-500/30'
+            }`}
           />
+          {isRevisionMode && (
+            <button
+              type="button"
+              onClick={cancelRevisionMode}
+              className="px-3 py-2 border border-gray-600 bg-gray-900 hover:bg-gray-800 text-gray-100 text-sm font-medium rounded-lg transition-colors self-end"
+            >
+              {t('chat.cancel')}
+            </button>
+          )}
           <button
             onClick={() => void handleSend()}
-            disabled={(!inputValue.trim() && draftAttachments.length === 0) || isSending}
+            disabled={(isRevisionMode ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors self-end"
           >
-            {isSending ? t('attachments.sending') : t('chat.send')}
+            {isSending ? t('attachments.sending') : isRevisionMode ? t('chat.sendRevision') : t('chat.send')}
           </button>
         </div>
 
@@ -611,13 +684,12 @@ export function ChatPanel() {
           onChange={(event) => onFilePicked(event, 'zip')}
         />
 
-          <p className="text-[10px] text-gray-400 mt-1">{t('chat.hint')}</p>
-        </div>
-      ) : (
-        <div className="flex-shrink-0 border-t border-yellow-800/30 bg-yellow-950/20 px-4 py-2">
-          <p className="text-[11px] text-yellow-200">{t('chat.approvalInputMode')}</p>
-        </div>
-      )}
+        {composerNotice && <p className="text-[10px] text-yellow-300 mt-1">{composerNotice}</p>}
+        {isRevisionMode && !inputValue.trim() && (
+          <p className="text-[10px] text-gray-400 mt-1">{t('chat.revisionFeedbackRequired')}</p>
+        )}
+        <p className="text-[10px] text-gray-400 mt-1">{t('chat.hint')}</p>
+      </div>
     </div>
   );
 }

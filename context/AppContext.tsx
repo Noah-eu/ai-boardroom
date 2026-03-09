@@ -205,7 +205,7 @@ type Action =
   | { type: 'ORCHESTRATOR_SUMMARY'; content: string }
   | { type: 'REQUEST_APPROVAL' }
   | { type: 'APPROVE_PLAN' }
-  | { type: 'REJECT_PLAN'; feedback: string }
+  | { type: 'REJECT_PLAN'; feedback: string; attachmentIds?: string[] }
   | { type: 'SET_PHASE'; phase: WorkflowPhase }
   | { type: 'UPDATE_AGENT_STATUS'; agent: AgentName; status: AgentStatus; lastOutput?: string }
   | { type: 'ADD_USER_MESSAGE'; content: string; attachmentIds?: string[] }
@@ -475,7 +475,7 @@ function appReducer(state: AppState, action: Action): AppState {
       if (!state.activeProject) return state;
       const lang = state.activeProject.language;
       const nextRound = state.activeProject.revisionRound + 1;
-      const msg = createMessage('user', action.feedback, 'chat');
+      const msg = createMessage('user', action.feedback, 'chat', undefined, action.attachmentIds);
       const log = createLogEntry(
         translateWithVars(lang, 'workflow.revision.requested', { round: nextRound }),
         'warning'
@@ -730,7 +730,7 @@ interface AppContextValue {
   orchestratorSummary: (content: string) => void;
   requestApproval: () => void;
   approvePlan: () => void;
-  rejectPlan: (feedback: string) => void;
+  rejectPlan: (feedback: string, attachmentIds?: string[]) => void;
   updateAgentStatus: (agent: AgentName, status: AgentStatus, lastOutput?: string) => void;
   addUserMessage: (content: string, attachmentIds?: string[]) => void;
   attachToProject: (projectId: string, attachment: DraftAttachmentInput) => Promise<ProjectAttachment>;
@@ -2534,7 +2534,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const rejectPlan = useCallback(
-    (feedback: string) => {
+    (feedback: string, attachmentIds?: string[]) => {
       const project = stateRef.current.activeProject;
       if (!project) return;
 
@@ -2549,7 +2549,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      dispatch({ type: 'REJECT_PLAN', feedback });
+      dispatch({ type: 'REJECT_PLAN', feedback, attachmentIds });
       setTimeout(() => runAutoDebate(project.id), 0);
     },
     [runAutoDebate, translateProjectWithVars]
