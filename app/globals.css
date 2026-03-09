@@ -10,6 +10,7 @@
 body {
   color: var(--foreground);
   background: var(--background);
+  overflow-x: hidden;
 }
 
 /* Custom scrollbar for dark theme */
@@ -29,4 +30,26 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #4b5563;
+}
+
+@media (max-width: 768px) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  button,
+  select,
+  input,
+  textarea {
+    min-height: 44px;
+  }
+
+  .text-xs {
+    font-size: 0.8125rem;
+  }
+
+  .text-sm {
+    font-size: 0.9375rem;
+  }
 }

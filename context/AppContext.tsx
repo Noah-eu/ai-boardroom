@@ -140,6 +140,11 @@ type Action =
       projectId: string;
       simulationMode: boolean;
     }
+  | {
+      type: 'SET_PROJECT_DEBATE_ROUNDS';
+      projectId: string;
+      debateRounds: number;
+    }
   | { type: 'RESET' };
 
 interface AppState extends OrchestratorState {
@@ -483,6 +488,13 @@ function appReducer(state: AppState, action: Action): AppState {
         updatedAt: new Date(),
       }));
     }
+    case 'SET_PROJECT_DEBATE_ROUNDS': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        debateRounds: Math.min(3, Math.max(1, action.debateRounds)),
+        updatedAt: new Date(),
+      }));
+    }
 
     case 'RESET': {
       return createInitialAppState();
@@ -529,6 +541,7 @@ interface AppContextValue {
   addUserMessage: (content: string) => void;
   addLog: (message: string, level: LogEntry['level'], agent?: AgentName) => void;
   setProjectSimulationMode: (projectId: string, simulationMode: boolean) => void;
+  setProjectDebateRounds: (projectId: string, debateRounds: number) => void;
   schedulerState: {
     isPaused: boolean;
     isComplete: boolean;
@@ -1566,6 +1579,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setProjectSimulationMode = useCallback((projectId: string, simulationMode: boolean) => {
     dispatch({ type: 'SET_PROJECT_SIMULATION_MODE', projectId, simulationMode });
   }, []);
+  
+  const setProjectDebateRounds = useCallback((projectId: string, debateRounds: number) => {
+    dispatch({ type: 'SET_PROJECT_DEBATE_ROUNDS', projectId, debateRounds });
+  }, []);
 
   const clampDebateRounds = useCallback((rounds: number) => Math.min(3, Math.max(1, rounds)), []);
 
@@ -2088,6 +2105,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     addUserMessage,
     addLog,
     setProjectSimulationMode,
+    setProjectDebateRounds,
     schedulerState,
     setExecutionSpeed,
     setAutoPauseCheckpoints,
