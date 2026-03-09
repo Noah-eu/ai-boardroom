@@ -1,3 +1,7 @@
+export type AppLanguage = 'en' | 'cz';
+export type OutputType = 'app' | 'website' | 'document' | 'plan' | 'other';
+export type DebateMode = 'auto' | 'interactive';
+
 // Agent types
 export type AgentName =
   | 'Strategist'
@@ -24,17 +28,35 @@ export interface Agent {
 }
 
 // Task types
-export type TaskStatus = 'queued' | 'running' | 'done' | 'failed';
+export type ArtifactKind = 'doc' | 'json' | 'report' | 'zip' | 'image';
+
+export interface TaskArtifact {
+  path: string;
+  label: string;
+  kind: ArtifactKind;
+}
+
+export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'blocked';
 
 export interface Task {
   id: string;
-  assignedAgent: AgentName;
-  status: TaskStatus;
-  artifactRef: string | null;
-  artifactLock: boolean;
+  title: string;
   description: string;
+  agent: AgentName;
+  status: TaskStatus;
+  dependsOn: string[];
+  producesArtifacts: TaskArtifact[];
   createdAt: Date;
   updatedAt: Date;
+  errorMessage?: string;
+  retryCount?: number;
+  maxRetries?: number;
+}
+
+export interface TaskGraph {
+  tasks: Task[];
+  concurrencyLimit: number;
+  maxRetries: number;
 }
 
 // Message types
@@ -67,9 +89,18 @@ export interface Project {
   id: string;
   name: string;
   description: string;
+  language: AppLanguage;
+  simulationMode: boolean;
+  debateRounds: number;
+  debateMode: DebateMode;
+  maxWordsPerAgent: number;
+  latestRevisionFeedback: string | null;
+  revisionRound: number;
+  outputType: OutputType;
   status: ProjectStatus;
   createdAt: Date;
   updatedAt: Date;
+  taskGraph: TaskGraph | null;
   tasks: Task[];
   messages: Message[];
 }

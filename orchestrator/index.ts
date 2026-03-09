@@ -1,11 +1,14 @@
 import {
+  AppLanguage,
   Agent,
   AgentName,
   AgentStatus,
+  DebateMode,
   LogEntry,
   Message,
   MessageSender,
   OrchestratorState,
+  OutputType,
   Project,
   WorkflowPhase,
 } from '@/types';
@@ -193,15 +196,34 @@ export function getPhaseLabel(phase: WorkflowPhase): string {
 }
 
 // Create a new project
-export function createProject(name: string, description: string): Project {
+export function createProject(
+  name: string,
+  description: string,
+  language: AppLanguage,
+  outputType: OutputType,
+  simulationMode = true,
+  debateRounds = 3,
+  debateMode: DebateMode = 'auto',
+  maxWordsPerAgent = 180
+): Project {
   const now = new Date();
+  const normalizedRounds = Math.min(3, Math.max(1, debateRounds));
   return {
     id: generateId(),
     name,
     description,
+    language,
+    simulationMode,
+    debateRounds: normalizedRounds,
+    debateMode,
+    maxWordsPerAgent,
+    latestRevisionFeedback: null,
+    revisionRound: 0,
+    outputType,
     status: 'idle',
     createdAt: now,
     updatedAt: now,
+    taskGraph: null,
     tasks: [],
     messages: [],
   };
