@@ -34,7 +34,7 @@ import {
   WorkflowPhase,
 } from '@/types';
 import { z } from 'zod';
-import { getFirebaseClient, getFirebaseInitError } from '@/lib/firebase';
+import { getFirebaseClient, getFirebaseInitError, getFirebaseStorageBucketName } from '@/lib/firebase';
 import {
   createInitialState,
   createLogEntry,
@@ -224,19 +224,55 @@ function resolveAttachmentImageUrl(attachment: ProjectAttachment): string | null
   );
 }
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        resolve(reader.result);
-        return;
+function normalizeBucketName(value?: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('gs://')) {
+    return trimmed.slice(5).split('/')[0] ?? null;
+  }
+
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    try {
+      const parsed = new URL(trimmed);
+      const pathMatch = parsed.pathname.match(/\/b\/([^/]+)/);
+      if (pathMatch?.[1]) {
+        return decodeURIComponent(pathMatch[1]);
       }
-      reject(new Error('Failed to read file as data URL.'));
-    };
-    reader.onerror = () => reject(reader.error ?? new Error('FileReader failed.'));
-    reader.readAsDataURL(file);
-  });
+      return parsed.hostname || null;
+    } catch {
+      return null;
+    }
+  }
+
+  return trimmed.replace(/^\/+|\/+$/g, '') || null;
+}
+
+type FirebaseErrorLike = {
+  code?: string;
+  message?: string;
+};
+
+function getFirebaseErrorCode(error: unknown): string | null {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const maybeCode = (error as FirebaseErrorLike).code;
+    return typeof maybeCode === 'string' ? maybeCode : null;
+  }
+  return null;
+}
+
+function getFirebaseErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const maybeMessage = (error as FirebaseErrorLike).message;
+    if (typeof maybeMessage === 'string') {
+      return maybeMessage;
+    }
+  }
+  return 'Unknown Firebase Storage error';
 }
 
 type Action =
@@ -836,6 +872,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const projectPhaseRef = useRef<Record<string, WorkflowPhase>>({});
   const firebaseConnectedLoggedRef = useRef(false);
   const firebaseErrorLoggedRef = useRef(false);
+  const firebaseBucketLoggedRef = useRef(false);
   const t = useCallback((key: TranslationKey) => translate(language, key), [language]);
   const tf = useCallback(
     (key: TranslationKey, vars: Record<string, string | number>) =>
@@ -866,6 +903,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
     };
 
+    const logBucketInfo = (clientBucket: string | null) => {
+      if (firebaseBucketLoggedRef.current) {
+        return;
+      }
+      firebaseBucketLoggedRef.current = true;
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message:
+          `Firebase Storage bucket: runtime=${clientBucket ?? '<missing>'}` +
+          `, config=${getFirebaseStorageBucketName() ?? '<missing>'}`,
+      });
+    };
+
     const ensureAnonymousSignIn = async (currentUser: User | null) => {
       if (currentUser) {
         setFirebaseUid(currentUser.uid);
@@ -877,6 +928,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             message: `Firebase: connected (uid: ${currentUser.uid})`,
           });
         }
+        const client = getFirebaseClient();
+        const runtimeBucket = client?.storage?.app?.options?.storageBucket?.toString?.() ?? null;
+        logBucketInfo(runtimeBucket);
         return;
       }
 
@@ -897,6 +951,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             message: `Firebase: connected (uid: ${credential.user.uid})`,
           });
         }
+        const runtimeBucket = client.storage?.app?.options?.storageBucket?.toString?.() ?? null;
+        logBucketInfo(runtimeBucket);
       } catch (error) {
         const detail = error instanceof Error ? error.message : 'anonymous authentication failed';
         logFirebaseError(detail);
@@ -2239,8 +2295,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             const detail = error instanceof Error ? error.message : 'URL metadata save failed';
             dispatch({
               type: 'ADD_LOG',
-              level: 'warning',
-              message: `Attachment fallback (URL): ${detail}`,
+              level: 'error',
+              message: `Attachment metadata save failed (URL): ${detail}`,
             });
           }
         }
@@ -2255,63 +2311,102 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const safeName = sanitizeFileName(file.name);
       const storagePath = `projects/${projectId}/attachments/${artifactId}/${safeName}`;
 
-      let localImageDataUrlCache: string | undefined;
-      let localImageDataUrlLoaded = false;
-      const getLocalImageDataUrl = async (): Promise<string | undefined> => {
-        if (localImageDataUrlLoaded) {
-          return localImageDataUrlCache;
-        }
-        localImageDataUrlLoaded = true;
-        if (derivedKind !== 'image') {
-          return undefined;
-        }
-
-        try {
-          localImageDataUrlCache = await fileToDataUrl(file);
-        } catch {
-          localImageDataUrlCache = undefined;
-        }
-
-        return localImageDataUrlCache;
-      };
-
-      const localFallback = async (): Promise<ProjectAttachment> => {
-        const localImageDataUrl = await getLocalImageDataUrl();
-        const fallbackArtifact: ProjectAttachment = {
-          id: artifactId,
-          projectId,
-          kind: derivedKind,
-          source,
-          title: file.name,
-          mimeType: file.type || undefined,
-          size: Number.isFinite(file.size) ? file.size : undefined,
-          storagePath,
-          downloadUrl: derivedKind === 'image' ? URL.createObjectURL(file) : undefined,
-          aiImageDataUrl: localImageDataUrl,
-          ingestion: {
-            status: 'uploaded',
-            summary:
-              derivedKind === 'image'
-                ? 'Image attached in local fallback mode and linked via inline data URL.'
-                : 'File attached in local fallback mode.',
-          },
-          createdAt,
-        };
-        dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: fallbackArtifact });
-        return fallbackArtifact;
-      };
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: `Attachment upload started: ${file.name}`,
+      });
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: `Attachment upload path: ${storagePath}`,
+      });
 
       const client = getFirebaseClient();
       if (!client) {
-        return await localFallback();
+        const initError = getFirebaseInitError() ?? 'Firebase initialization failed';
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          message: `Firebase Storage upload failed: ${initError}`,
+        });
+        throw new Error(`Firebase Storage upload failed: ${initError}`);
+      }
+
+      const configuredBucket = normalizeBucketName(getFirebaseStorageBucketName());
+      const runtimeBucket = normalizeBucketName(client.storage.app.options.storageBucket?.toString?.() ?? null);
+
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: `Attachment upload bucket: ${runtimeBucket ?? '<missing>'}`,
+      });
+
+      if (configuredBucket && runtimeBucket && configuredBucket !== runtimeBucket) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          message:
+            `Firebase Storage wrong bucket: configured=${configuredBucket}, runtime=${runtimeBucket}`,
+        });
+      }
+
+      let currentUser = client.auth.currentUser;
+      if (!currentUser) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'warning',
+          message: 'Firebase Storage upload waiting for anonymous auth.',
+        });
+        try {
+          const credential = await signInAnonymously(client.auth);
+          currentUser = credential.user;
+          setFirebaseUid(credential.user.uid);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `Firebase auth restored for upload (uid: ${credential.user.uid})`,
+          });
+        } catch (authError) {
+          const authDetail = getFirebaseErrorMessage(authError);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Firebase Storage upload failed: missing auth (${authDetail})`,
+          });
+          throw new Error(`Missing auth for Firebase Storage upload: ${authDetail}`);
+        }
       }
 
       try {
         const storageRef = ref(client.storage, storagePath);
+        console.info(
+          `[attachment-upload] start project=${projectId} artifact=${artifactId} bucket=${runtimeBucket ?? '<missing>'} path=${storagePath}`
+        );
         await uploadBytes(storageRef, file, {
           contentType: file.type || undefined,
         });
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'success',
+          message: `Attachment upload success: ${storagePath}`,
+        });
+
         const downloadUrl = await getDownloadURL(storageRef);
+        if (!downloadUrl || !downloadUrl.trim()) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Firebase Storage upload failed: missing download URL for ${storagePath}`,
+          });
+          throw new Error('Missing download URL after Firebase Storage upload.');
+        }
+
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          message: `Attachment download URL: ${downloadUrl}`,
+        });
 
         const uploadedArtifact: ProjectAttachment = {
           id: artifactId,
@@ -2338,13 +2433,48 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         await ingestAttachment(projectId, uploadedArtifact);
         return uploadedArtifact;
       } catch (error) {
-        const detail = error instanceof Error ? error.message : 'File upload failed';
+        const code = getFirebaseErrorCode(error);
+        const detail = getFirebaseErrorMessage(error);
+
+        if (code === 'storage/bucket-not-found' || code === 'storage/project-not-found') {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Firebase Storage wrong bucket: ${runtimeBucket ?? '<missing>'}`,
+          });
+        }
+
+        if (code === 'storage/unauthorized') {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Firebase Storage upload failed: permission denied for ${storagePath}`,
+          });
+        }
+
+        if (code === 'storage/unauthenticated') {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: 'Firebase Storage upload failed: missing auth.',
+          });
+        }
+
+        if (detail.toLowerCase().includes('missing download url')) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Firebase Storage upload failed: missing download URL (${storagePath})`,
+          });
+        }
+
         dispatch({
           type: 'ADD_LOG',
-          level: 'warning',
-          message: `Attachment fallback (file): ${detail}`,
+          level: 'error',
+          message: `Firebase Storage upload failed${code ? ` [${code}]` : ''}: ${detail}`,
         });
-        return await localFallback();
+
+        throw new Error(`File upload failed for ${file.name}: ${detail}`);
       }
     },
     [firebaseUid, ingestAttachment]

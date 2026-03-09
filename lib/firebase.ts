@@ -22,6 +22,38 @@ const firebaseConfig = {
 
 let firebaseClient: FirebaseClient | null = null;
 let firebaseInitError: string | null = null;
+let firebaseBucketLogged = false;
+
+function normalizeStorageBucket(rawValue?: string): string | null {
+  if (!rawValue) {
+    return null;
+  }
+
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith('gs://')) {
+    const bucket = trimmed.slice(5).split('/')[0]?.trim();
+    return bucket || null;
+  }
+
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    try {
+      const parsed = new URL(trimmed);
+      const pathMatch = parsed.pathname.match(/\/b\/([^/]+)/);
+      if (pathMatch?.[1]) {
+        return decodeURIComponent(pathMatch[1]);
+      }
+      return parsed.hostname || null;
+    } catch {
+      return null;
+    }
+  }
+
+  return trimmed.replace(/^\/+|\/+$/g, '') || null;
+}
 
 function formatInitError(error: unknown): string {
   if (error instanceof Error) {
@@ -64,7 +96,16 @@ export function getFirebaseClient(): FirebaseClient | null {
     const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const firestore = getFirestore(app);
-    const storage = getStorage(app);
+    const normalizedBucket = normalizeStorageBucket(firebaseConfig.storageBucket);
+    const storage = normalizedBucket ? getStorage(app, `gs://${normalizedBucket}`) : getStorage(app);
+
+    if (!firebaseBucketLogged) {
+      firebaseBucketLogged = true;
+      const runtimeBucket = normalizeStorageBucket(storage.app.options.storageBucket);
+      console.info(
+        `[firebase] storage bucket env=${firebaseConfig.storageBucket ?? '<missing>'} normalized=${normalizedBucket ?? '<missing>'} runtime=${runtimeBucket ?? '<missing>'}`
+      );
+    }
 
     firebaseClient = { app, auth, firestore, storage };
     return firebaseClient;
@@ -79,4 +120,8 @@ export function getFirebaseInitError(): string | null {
     getFirebaseClient();
   }
   return firebaseInitError;
+}
+
+export function getFirebaseStorageBucketName(): string | null {
+  return normalizeStorageBucket(firebaseConfig.storageBucket);
 }
