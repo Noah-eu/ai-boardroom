@@ -127,8 +127,8 @@ type AiRespondLogContext = {
 };
 
 type DraftAttachmentInput =
-  | { kind: 'image' | 'pdf' | 'zip' | 'file'; file: File }
-  | { kind: 'url'; url: string };
+  | { kind: 'image' | 'pdf' | 'zip' | 'file'; file: File; source?: 'project' | 'message' }
+  | { kind: 'url'; url: string; source?: 'project' | 'message' };
 
 const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number }> = {
   'gpt-4.1': { input: 2.0, output: 8.0 },
@@ -1792,6 +1792,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     async (projectId: string, attachment: DraftAttachmentInput): Promise<ProjectAttachment> => {
       const createdAt = new Date();
       const artifactId = generateId();
+      const source = attachment.source ?? 'message';
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
 
       if (!project) {
@@ -1805,6 +1806,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           id: artifactId,
           projectId,
           kind: 'url',
+          source,
           title,
           downloadUrl: normalizedUrl,
           createdAt,
@@ -1842,6 +1844,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           id: artifactId,
           projectId,
           kind: derivedKind,
+          source,
           title: file.name,
           mimeType: file.type || undefined,
           size: Number.isFinite(file.size) ? file.size : undefined,
@@ -1869,6 +1872,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           id: artifactId,
           projectId,
           kind: derivedKind,
+          source,
           title: file.name,
           mimeType: file.type || undefined,
           size: Number.isFinite(file.size) ? file.size : undefined,

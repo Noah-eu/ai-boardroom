@@ -64,6 +64,11 @@ export function PreviewPanel() {
     [tasks]
   );
   const projectAttachments = useMemo<ProjectAttachment[]>(() => project?.attachments ?? [], [project]);
+  const groupedAttachments = useMemo(() => {
+    const projectLevel = projectAttachments.filter((attachment) => (attachment.source ?? 'message') === 'project');
+    const messageLevel = projectAttachments.filter((attachment) => (attachment.source ?? 'message') === 'message');
+    return { projectLevel, messageLevel };
+  }, [projectAttachments]);
 
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskStatus, Task[]> = {
@@ -288,51 +293,63 @@ export function PreviewPanel() {
           {projectAttachments.length === 0 ? (
             <p className="mt-1 text-[11px] text-gray-400">{t('attachments.none')}</p>
           ) : (
-            <div className="mt-2 space-y-1.5">
-              {projectAttachments.map((attachment) => (
-                <div key={attachment.id} className="rounded border border-gray-700 bg-gray-900 px-2 py-1.5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-gray-300">
-                      {t(`attachments.kind.${attachment.kind}` as Parameters<typeof translate>[1])}
-                    </span>
-                    <p className="truncate text-[11px] text-gray-100">{attachment.title}</p>
-                    {attachment.size && (
-                      <span className="ml-auto text-[10px] text-gray-500">{formatAttachmentSize(attachment.size)}</span>
-                    )}
+            <div className="mt-2 space-y-2">
+              {([
+                { label: t('attachments.source.project'), items: groupedAttachments.projectLevel },
+                { label: t('attachments.source.message'), items: groupedAttachments.messageLevel },
+              ] as const).map((group) => {
+                if (group.items.length === 0) return null;
+                return (
+                  <div key={group.label} className="space-y-1.5">
+                    <p className="text-[10px] text-gray-500">{group.label}</p>
+                    {group.items.map((attachment) => (
+                      <div key={attachment.id} className="rounded border border-gray-700 bg-gray-900 px-2 py-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-300">
+                            {t(`attachments.kind.${attachment.kind}` as Parameters<typeof translate>[1])}
+                          </span>
+                          <p className="truncate text-[11px] text-gray-100">{attachment.title}</p>
+                          {attachment.size && (
+                            <span className="ml-auto text-[10px] text-gray-500">{formatAttachmentSize(attachment.size)}</span>
+                          )}
+                        </div>
+
+                        {attachment.kind === 'image' && attachment.downloadUrl && (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={attachment.downloadUrl}
+                            alt={attachment.title}
+                            className="mt-1 max-h-24 w-full rounded border border-gray-700 object-cover"
+                          />
+                        )}
+
+                        {attachment.kind === 'url' && attachment.downloadUrl && (
+                          <a
+                            href={attachment.downloadUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 inline-flex text-[10px] text-blue-300 underline"
+                          >
+                            {attachment.downloadUrl}
+                          </a>
+                        )}
+
+                        {(attachment.kind === 'pdf' || attachment.kind === 'zip' || attachment.kind === 'file') &&
+                          attachment.downloadUrl && (
+                            <a
+                              href={attachment.downloadUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-1 inline-flex text-[10px] text-blue-300 underline"
+                            >
+                              {t('attachments.open')}
+                            </a>
+                          )}
+                      </div>
+                    ))}
                   </div>
-
-                  {attachment.kind === 'image' && attachment.downloadUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={attachment.downloadUrl}
-                      alt={attachment.title}
-                      className="mt-1 max-h-24 w-full rounded border border-gray-700 object-cover"
-                    />
-                  )}
-
-                  {attachment.kind === 'url' && attachment.downloadUrl && (
-                    <a
-                      href={attachment.downloadUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 inline-flex text-[10px] text-blue-300 underline"
-                    >
-                      {attachment.downloadUrl}
-                    </a>
-                  )}
-
-                  {(attachment.kind === 'pdf' || attachment.kind === 'zip' || attachment.kind === 'file') && attachment.downloadUrl && (
-                    <a
-                      href={attachment.downloadUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 inline-flex text-[10px] text-blue-300 underline"
-                    >
-                      {t('attachments.open')}
-                    </a>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

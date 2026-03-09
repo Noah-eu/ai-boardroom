@@ -80,6 +80,7 @@ export interface ProjectAttachment {
   id: string;
   projectId: string;
   kind: ProjectAttachmentKind;
+  source?: 'project' | 'message';
   title: string;
   mimeType?: string;
   size?: number;
