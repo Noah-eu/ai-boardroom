@@ -244,6 +244,7 @@ export function ChatPanel() {
     approvePlan,
     rejectPlan,
     addUserMessage,
+    addLog,
     attachToProject,
     startDebate,
     t,
@@ -385,10 +386,18 @@ export function ChatPanel() {
         startDebate(text);
       } else {
         addUserMessage(text || t('attachments.messageOnly'), attachmentIds);
+        addLog(
+          `Project/message attachment link success: source=message count=${attachmentIds.length}`,
+          'success'
+        );
         if (state.currentPhase === 'debate') {
           setComposerNotice(t('chat.debateSupplementalHint'));
         }
       }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'message link failed';
+      addLog(`Project/message attachment link failed: source=message ${detail}`, 'error');
+      throw error;
     } finally {
       setIsSending(false);
     }
@@ -409,6 +418,14 @@ export function ChatPanel() {
       setComposerMode('normal');
       setComposerNotice(null);
       rejectPlan(feedback, attachmentIds);
+      addLog(
+        `Project/message attachment link success: source=message(revision) count=${attachmentIds.length}`,
+        'success'
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'revision message link failed';
+      addLog(`Project/message attachment link failed: source=message(revision) ${detail}`, 'error');
+      throw error;
     } finally {
       setIsSending(false);
     }

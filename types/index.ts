@@ -100,6 +100,7 @@ export interface ProjectAttachment {
   projectId: string;
   kind: ProjectAttachmentKind;
   source?: 'project' | 'message';
+  firestoreCollection?: 'attachments' | 'artifacts';
   title: string;
   mimeType?: string;
   size?: number;

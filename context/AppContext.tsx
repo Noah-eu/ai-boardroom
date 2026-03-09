@@ -2201,16 +2201,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const projectForPersist = stateRef.current.projects.find((candidate) => candidate.id === projectId);
         const client = getFirebaseClient();
         if (projectForPersist && client) {
-          await setDoc(
-            doc(client.firestore, 'projects', projectId, 'attachments', attachment.id),
-            {
-              ingestion: {
-                ...ingest,
-                lastIncludedAt: ingest.lastIncludedAt ? ingest.lastIncludedAt.toISOString() : null,
+          const preferredCollection = attachment.firestoreCollection ?? 'attachments';
+          const persistIngestion = async (collection: 'attachments' | 'artifacts') => {
+            await setDoc(
+              doc(client.firestore, 'projects', projectId, collection, attachment.id),
+              {
+                ingestion: {
+                  ...ingest,
+                  lastIncludedAt: ingest.lastIncludedAt ? ingest.lastIncludedAt.toISOString() : null,
+                },
               },
-            },
-            { merge: true }
-          );
+              { merge: true }
+            );
+          };
+
+          try {
+            await persistIngestion(preferredCollection);
+          } catch (persistError) {
+            const code = getFirebaseErrorCode(persistError);
+            const detail = getFirebaseErrorMessage(persistError);
+            const permissionDenied = code === 'permission-denied' || code === 'firestore/permission-denied';
+
+            if (preferredCollection === 'attachments' && permissionDenied) {
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'warning',
+                message:
+                  `Ingestion metadata write denied at projects/${projectId}/attachments/${attachment.id}; retrying artifacts path.`,
+              });
+              await persistIngestion('artifacts');
+            } else {
+              throw new Error(
+                `Ingestion metadata write failed at projects/${projectId}/${preferredCollection}/${attachment.id}: ${detail}`
+              );
+            }
+          }
         }
 
         const projectForLog = stateRef.current.projects.find((candidate) => candidate.id === projectId);
@@ -2268,6 +2293,63 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw new Error('No active project for attachment upload.');
       }
 
+      const persistAttachmentMetadata = async (
+        client: NonNullable<ReturnType<typeof getFirebaseClient>>,
+        payload: Record<string, unknown>,
+        preferredCollection: 'attachments' | 'artifacts',
+        options?: { merge?: boolean }
+      ): Promise<'attachments' | 'artifacts'> => {
+        const merge = options?.merge ?? false;
+        const persistToCollection = async (collection: 'attachments' | 'artifacts') => {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            message: `Firestore metadata save started: projects/${projectId}/${collection}/${artifactId}`,
+          });
+          const targetRef = doc(client.firestore, 'projects', projectId, collection, artifactId);
+          if (merge) {
+            await setDoc(targetRef, payload, { merge: true });
+          } else {
+            await setDoc(targetRef, payload);
+          }
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `Firestore metadata save success: projects/${projectId}/${collection}/${artifactId}`,
+          });
+        };
+
+        try {
+          await persistToCollection(preferredCollection);
+          return preferredCollection;
+        } catch (error) {
+          const code = getFirebaseErrorCode(error);
+          const detail = getFirebaseErrorMessage(error);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message:
+              `Firestore metadata save failed: projects/${projectId}/${preferredCollection}/${artifactId}` +
+              `${code ? ` [${code}]` : ''} ${detail}`,
+          });
+
+          const permissionDenied = code === 'permission-denied' || code === 'firestore/permission-denied';
+          if (!permissionDenied || preferredCollection === 'artifacts') {
+            throw error;
+          }
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            message:
+              `Firestore metadata path not allowed for anonymous auth, retrying under projects/${projectId}/artifacts/${artifactId}`,
+          });
+
+          await persistToCollection('artifacts');
+          return 'artifacts';
+        }
+      };
+
       if (attachment.kind === 'url') {
         const normalizedUrl = attachment.url.trim();
         const title = normalizedUrl;
@@ -2276,6 +2358,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           projectId,
           kind: 'url',
           source,
+          firestoreCollection: 'attachments',
           title,
           downloadUrl: normalizedUrl,
           sourceUrl: normalizedUrl,
@@ -2286,22 +2369,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const client = getFirebaseClient();
         if (client) {
           try {
-            await setDoc(doc(client.firestore, 'projects', projectId, 'attachments', artifactId), {
+            const savedCollection = await persistAttachmentMetadata(
+              client,
+              {
               ...urlArtifact,
               createdAt: createdAt.toISOString(),
               createdBy: firebaseUid,
-            });
+              },
+              urlArtifact.firestoreCollection ?? 'attachments'
+            );
+            urlArtifact.firestoreCollection = savedCollection;
           } catch (error) {
             const detail = error instanceof Error ? error.message : 'URL metadata save failed';
             dispatch({
               type: 'ADD_LOG',
               level: 'error',
-              message: `Attachment metadata save failed (URL): ${detail}`,
+              message: `Firestore metadata save failed (URL artifact): ${detail}`,
             });
           }
         }
 
-        dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: urlArtifact });
+        try {
+          dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: urlArtifact });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `Project/message attachment link success: source=${source} artifact=${artifactId}`,
+          });
+        } catch (error) {
+          const detail = getFirebaseErrorMessage(error);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Project/message attachment link failed: source=${source} artifact=${artifactId} ${detail}`,
+          });
+          throw error;
+        }
         await ingestAttachment(projectId, urlArtifact);
         return urlArtifact;
       }
@@ -2314,12 +2417,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       dispatch({
         type: 'ADD_LOG',
         level: 'info',
-        message: `Attachment upload started: ${file.name}`,
+        message: `Storage upload started: ${file.name}`,
       });
       dispatch({
         type: 'ADD_LOG',
         level: 'info',
-        message: `Attachment upload path: ${storagePath}`,
+        message: `Storage upload target path: ${storagePath}`,
       });
 
       const client = getFirebaseClient();
@@ -2328,9 +2431,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dispatch({
           type: 'ADD_LOG',
           level: 'error',
-          message: `Firebase Storage upload failed: ${initError}`,
+          message: `Storage upload failed before start: ${initError}`,
         });
-        throw new Error(`Firebase Storage upload failed: ${initError}`);
+        throw new Error(`Storage upload failed before start: ${initError}`);
       }
 
       const configuredBucket = normalizeBucketName(getFirebaseStorageBucketName());
@@ -2339,7 +2442,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       dispatch({
         type: 'ADD_LOG',
         level: 'info',
-        message: `Attachment upload bucket: ${runtimeBucket ?? '<missing>'}`,
+        message: `Storage upload bucket: ${runtimeBucket ?? '<missing>'}`,
       });
 
       if (configuredBucket && runtimeBucket && configuredBucket !== runtimeBucket) {
@@ -2347,7 +2450,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           type: 'ADD_LOG',
           level: 'error',
           message:
-            `Firebase Storage wrong bucket: configured=${configuredBucket}, runtime=${runtimeBucket}`,
+            `Storage bucket mismatch: configured=${configuredBucket}, runtime=${runtimeBucket}`,
         });
       }
 
@@ -2356,7 +2459,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dispatch({
           type: 'ADD_LOG',
           level: 'warning',
-          message: 'Firebase Storage upload waiting for anonymous auth.',
+          message: 'Storage upload waiting for anonymous auth.',
         });
         try {
           const credential = await signInAnonymously(client.auth);
@@ -2372,7 +2475,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_LOG',
             level: 'error',
-            message: `Firebase Storage upload failed: missing auth (${authDetail})`,
+            message: `Storage upload failed: missing auth (${authDetail})`,
           });
           throw new Error(`Missing auth for Firebase Storage upload: ${authDetail}`);
         }
@@ -2389,7 +2492,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dispatch({
           type: 'ADD_LOG',
           level: 'success',
-          message: `Attachment upload success: ${storagePath}`,
+          message: `Storage upload success: ${storagePath}`,
         });
 
         const downloadUrl = await getDownloadURL(storageRef);
@@ -2397,7 +2500,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_LOG',
             level: 'error',
-            message: `Firebase Storage upload failed: missing download URL for ${storagePath}`,
+            message: `Download URL creation failed: ${storagePath}`,
           });
           throw new Error('Missing download URL after Firebase Storage upload.');
         }
@@ -2405,7 +2508,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dispatch({
           type: 'ADD_LOG',
           level: 'info',
-          message: `Attachment download URL: ${downloadUrl}`,
+          message: `Download URL created: ${downloadUrl}`,
         });
 
         const uploadedArtifact: ProjectAttachment = {
@@ -2413,6 +2516,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           projectId,
           kind: derivedKind,
           source,
+          firestoreCollection: 'attachments',
           title: file.name,
           mimeType: file.type || undefined,
           size: Number.isFinite(file.size) ? file.size : undefined,
@@ -2423,13 +2527,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           createdAt,
         };
 
-        await setDoc(doc(client.firestore, 'projects', projectId, 'attachments', artifactId), {
+        const savedCollection = await persistAttachmentMetadata(
+          client,
+          {
           ...uploadedArtifact,
           createdAt: createdAt.toISOString(),
           createdBy: firebaseUid,
-        });
+          },
+          uploadedArtifact.firestoreCollection ?? 'attachments'
+        );
+        uploadedArtifact.firestoreCollection = savedCollection;
 
-        dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: uploadedArtifact });
+        try {
+          dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: uploadedArtifact });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `Project/message attachment link success: source=${source} artifact=${artifactId}`,
+          });
+        } catch (error) {
+          const detail = getFirebaseErrorMessage(error);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `Project/message attachment link failed: source=${source} artifact=${artifactId} ${detail}`,
+          });
+          throw error;
+        }
         await ingestAttachment(projectId, uploadedArtifact);
         return uploadedArtifact;
       } catch (error) {
@@ -2440,7 +2564,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_LOG',
             level: 'error',
-            message: `Firebase Storage wrong bucket: ${runtimeBucket ?? '<missing>'}`,
+            message: `Storage bucket not found: ${runtimeBucket ?? '<missing>'}`,
           });
         }
 
@@ -2448,7 +2572,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_LOG',
             level: 'error',
-            message: `Firebase Storage upload failed: permission denied for ${storagePath}`,
+            message: `Storage upload failed: permission denied for ${storagePath}`,
           });
         }
 
@@ -2456,7 +2580,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_LOG',
             level: 'error',
-            message: 'Firebase Storage upload failed: missing auth.',
+            message: 'Storage upload failed: missing auth.',
           });
         }
 
@@ -2464,14 +2588,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_LOG',
             level: 'error',
-            message: `Firebase Storage upload failed: missing download URL (${storagePath})`,
+            message: `Download URL creation failed: ${storagePath}`,
           });
         }
 
         dispatch({
           type: 'ADD_LOG',
           level: 'error',
-          message: `Firebase Storage upload failed${code ? ` [${code}]` : ''}: ${detail}`,
+          message: `Attachment pipeline failed${code ? ` [${code}]` : ''}: ${detail}`,
         });
 
         throw new Error(`File upload failed for ${file.name}: ${detail}`);
