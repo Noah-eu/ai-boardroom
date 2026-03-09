@@ -197,8 +197,12 @@ function normalizeAiImageUrl(value?: string): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+  if (trimmed.startsWith('blob:')) {
     return null;
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return trimmed;
   }
 
   try {
@@ -213,7 +217,26 @@ function normalizeAiImageUrl(value?: string): string | null {
 }
 
 function resolveAttachmentImageUrl(attachment: ProjectAttachment): string | null {
-  return normalizeAiImageUrl(attachment.downloadUrl) ?? normalizeAiImageUrl(attachment.sourceUrl);
+  return (
+    normalizeAiImageUrl(attachment.downloadUrl) ??
+    normalizeAiImageUrl(attachment.sourceUrl) ??
+    normalizeAiImageUrl(attachment.aiImageDataUrl)
+  );
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error('Failed to read file as data URL.'));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('FileReader failed.'));
+    reader.readAsDataURL(file);
+  });
 }
 
 type Action =
@@ -2232,7 +2255,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const safeName = sanitizeFileName(file.name);
       const storagePath = `projects/${projectId}/attachments/${artifactId}/${safeName}`;
 
-      const localFallback = (): ProjectAttachment => {
+      let localImageDataUrlCache: string | undefined;
+      let localImageDataUrlLoaded = false;
+      const getLocalImageDataUrl = async (): Promise<string | undefined> => {
+        if (localImageDataUrlLoaded) {
+          return localImageDataUrlCache;
+        }
+        localImageDataUrlLoaded = true;
+        if (derivedKind !== 'image') {
+          return undefined;
+        }
+
+        try {
+          localImageDataUrlCache = await fileToDataUrl(file);
+        } catch {
+          localImageDataUrlCache = undefined;
+        }
+
+        return localImageDataUrlCache;
+      };
+
+      const localFallback = async (): Promise<ProjectAttachment> => {
+        const localImageDataUrl = await getLocalImageDataUrl();
         const fallbackArtifact: ProjectAttachment = {
           id: artifactId,
           projectId,
@@ -2243,9 +2287,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           size: Number.isFinite(file.size) ? file.size : undefined,
           storagePath,
           downloadUrl: derivedKind === 'image' ? URL.createObjectURL(file) : undefined,
+          aiImageDataUrl: localImageDataUrl,
           ingestion: {
-            status: 'failed',
-            error: 'Server-side ingestion unavailable in local fallback mode.',
+            status: 'uploaded',
+            summary:
+              derivedKind === 'image'
+                ? 'Image attached in local fallback mode and linked via inline data URL.'
+                : 'File attached in local fallback mode.',
           },
           createdAt,
         };
@@ -2255,7 +2303,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const client = getFirebaseClient();
       if (!client) {
-        return localFallback();
+        return await localFallback();
       }
 
       try {
@@ -2296,7 +2344,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           level: 'warning',
           message: `Attachment fallback (file): ${detail}`,
         });
-        return localFallback();
+        return await localFallback();
       }
     },
     [firebaseUid, ingestAttachment]

@@ -106,6 +106,7 @@ export interface ProjectAttachment {
   storagePath?: string;
   downloadUrl?: string;
   sourceUrl?: string;
+  aiImageDataUrl?: string;
   ingestion?: AttachmentIngestion;
   createdAt: Date;
 }

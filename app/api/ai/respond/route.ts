@@ -13,7 +13,7 @@ const requestSchema = z.object({
       images: z
         .array(
           z.object({
-            url: z.string().url(),
+            url: z.string().min(1),
             title: z.string().min(1),
             source: z.enum(['project', 'message']).optional(),
           })
@@ -79,8 +79,11 @@ function extractUsage(response: OpenAI.Responses.Response): {
 function normalizeRemoteImageUrl(url: string): string | null {
   const trimmed = url.trim();
   if (!trimmed) return null;
-  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+  if (trimmed.startsWith('blob:')) {
     return null;
+  }
+  if (trimmed.startsWith('data:image/')) {
+    return trimmed;
   }
   try {
     const parsed = new URL(trimmed);
