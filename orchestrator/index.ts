@@ -128,7 +128,8 @@ export function createMessage(
   sender: MessageSender,
   content: string,
   type: Message['type'] = 'chat',
-  agentRole?: string
+  agentRole?: string,
+  attachmentIds?: string[]
 ): Message {
   return {
     id: generateId(),
@@ -137,6 +138,7 @@ export function createMessage(
     type,
     timestamp: new Date(),
     agentRole,
+    attachmentIds,
   };
 }
 
@@ -240,6 +242,7 @@ export function createProject(
     taskGraph: null,
     tasks: [],
     messages: [],
+    attachments: [],
     usage: initialUsage,
   };
 }

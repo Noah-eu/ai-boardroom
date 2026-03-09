@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
-import { Message, MessageSender } from '@/types';
+import { Message, MessageSender, ProjectAttachment } from '@/types';
 import { TranslationKey } from '@/i18n';
 
 const senderColors: Record<string, string> = {
@@ -43,15 +43,37 @@ function formatTime(date: Date, locale: string): string {
   return new Date(date).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 }
 
+type DraftAttachment =
+  | {
+      id: string;
+      kind: 'image' | 'pdf' | 'zip' | 'file';
+      file: File;
+      title: string;
+    }
+  | {
+      id: string;
+      kind: 'url';
+      url: string;
+      title: string;
+    };
+
+function formatSize(size?: number): string {
+  if (!size || size <= 0) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 interface MessageBubbleProps {
   message: Message;
   t: (key: TranslationKey) => string;
   tf: (key: TranslationKey, vars: Record<string, string | number>) => string;
   locale: string;
   approvalRound: number;
+  attachmentMap: Record<string, ProjectAttachment>;
 }
 
-function MessageBubble({ message, t, tf, locale, approvalRound }: MessageBubbleProps) {
+function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap }: MessageBubbleProps) {
     const normalizedContent = message.content.toLowerCase();
     const isApprovedResponse =
       normalizedContent.includes('approved') ||
@@ -63,6 +85,27 @@ function MessageBubble({ message, t, tf, locale, approvalRound }: MessageBubbleP
   const isApprovalResponse = message.type === 'approval-response';
   const color = senderColors[message.sender] ?? 'text-gray-300';
   const bgColor = senderBgColors[message.sender] ?? 'bg-gray-700';
+  const messageAttachments = (message.attachmentIds ?? [])
+    .map((attachmentId) => attachmentMap[attachmentId])
+    .filter((attachment): attachment is ProjectAttachment => Boolean(attachment));
+
+  const renderAttachmentList = () => {
+    if (messageAttachments.length === 0) return null;
+
+    return (
+      <div className="mt-2 space-y-1">
+        {messageAttachments.map((attachment) => (
+          <div key={attachment.id} className="rounded border border-gray-600/60 bg-gray-900/70 px-2 py-1">
+            <p className="text-[10px] text-gray-100 truncate">{attachment.title}</p>
+            <p className="text-[10px] text-gray-400">
+              {t('attachments.kindLabel')}: {t(`attachments.kind.${attachment.kind}` as TranslationKey)}
+              {attachment.size ? ` • ${formatSize(attachment.size)}` : ''}
+            </p>
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   if (isSystem) {
     return (
@@ -82,6 +125,7 @@ function MessageBubble({ message, t, tf, locale, approvalRound }: MessageBubbleP
           </div>
           <div className="bg-purple-950/40 border border-purple-800/30 rounded-lg px-3 py-2">
             <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">{message.content}</p>
+            {renderAttachmentList()}
           </div>
         </div>
       </div>
@@ -116,6 +160,7 @@ function MessageBubble({ message, t, tf, locale, approvalRound }: MessageBubbleP
               : 'bg-red-950/50 border border-red-700/40'
           }`}>
             <p className="text-xs text-gray-200">{message.content}</p>
+            {renderAttachmentList()}
           </div>
         </div>
       </div>
@@ -132,6 +177,7 @@ function MessageBubble({ message, t, tf, locale, approvalRound }: MessageBubbleP
           </div>
           <div className="bg-blue-600/20 border border-blue-600/30 rounded-lg px-3 py-2">
             <p className="text-xs text-gray-200 leading-relaxed">{message.content}</p>
+            {renderAttachmentList()}
           </div>
         </div>
       </div>
@@ -153,6 +199,7 @@ function MessageBubble({ message, t, tf, locale, approvalRound }: MessageBubbleP
         </div>
         <div className="bg-gray-800/60 border border-gray-700/40 rounded-lg px-3 py-2">
           <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap">{message.content}</p>
+          {renderAttachmentList()}
         </div>
       </div>
     </div>
@@ -214,6 +261,7 @@ export function ChatPanel() {
     approvePlan,
     rejectPlan,
     addUserMessage,
+    attachToProject,
     startDebate,
     t,
     tf,
@@ -221,11 +269,27 @@ export function ChatPanel() {
     setProjectSimulationMode,
   } = useApp();
   const [inputValue, setInputValue] = useState('');
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
+  const [showLinkInput, setShowLinkInput] = useState(false);
+  const [linkValue, setLinkValue] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const zipInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const locale = language === 'cz' ? 'cs-CZ' : 'en-US';
 
   const activeProject = state.activeProject;
   const messages = activeProject?.messages ?? [];
+  const attachmentMap = (activeProject?.attachments ?? []).reduce<Record<string, ProjectAttachment>>(
+    (acc, attachment) => {
+      acc[attachment.id] = attachment;
+      return acc;
+    },
+    {}
+  );
   const isAwaitingApproval = state.currentPhase === 'awaiting-approval';
   const approvalRound = (activeProject?.revisionRound ?? 0) + 1;
 
@@ -243,21 +307,83 @@ export function ChatPanel() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messagesCount]);
 
-  const handleSend = () => {
-    if (!inputValue.trim()) return;
+  const removeDraftAttachment = (attachmentId: string) => {
+    setDraftAttachments((previous) => previous.filter((attachment) => attachment.id !== attachmentId));
+  };
+
+  const addFileDraft = (file: File, kind: 'image' | 'pdf' | 'zip' | 'file') => {
+    const draft: DraftAttachment = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      kind,
+      file,
+      title: file.name,
+    };
+    setDraftAttachments((previous) => [...previous, draft]);
+  };
+
+  const onFilePicked = (
+    event: React.ChangeEvent<HTMLInputElement>,
+    kind: 'image' | 'pdf' | 'zip' | 'file'
+  ) => {
+    const files = Array.from(event.target.files ?? []);
+    files.forEach((file) => addFileDraft(file, kind));
+    event.target.value = '';
+    setShowAttachmentMenu(false);
+  };
+
+  const handleAddLink = () => {
+    const normalized = linkValue.trim();
+    if (!normalized) return;
+    const draft: DraftAttachment = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      kind: 'url',
+      url: normalized,
+      title: normalized,
+    };
+    setDraftAttachments((previous) => [...previous, draft]);
+    setLinkValue('');
+    setShowLinkInput(false);
+    setShowAttachmentMenu(false);
+  };
+
+  const handleSend = async () => {
+    if (!inputValue.trim() && draftAttachments.length === 0) return;
+    if (!activeProject) return;
+
+    setIsSending(true);
     const text = inputValue.trim();
-    setInputValue('');
-    if (state.currentPhase === 'idle' && state.activeProject) {
-      startDebate(text);
-    } else {
-      addUserMessage(text);
+
+    try {
+      const uploaded = await Promise.all(
+        draftAttachments.map(async (attachment) => {
+          if (attachment.kind === 'url') {
+            return attachToProject(activeProject.id, { kind: 'url', url: attachment.url });
+          }
+          return attachToProject(activeProject.id, {
+            kind: attachment.kind,
+            file: attachment.file,
+          });
+        })
+      );
+
+      const attachmentIds = uploaded.map((artifact) => artifact.id);
+      setInputValue('');
+      setDraftAttachments([]);
+
+      if (state.currentPhase === 'idle' && text) {
+        startDebate(text);
+      } else {
+        addUserMessage(text || t('attachments.messageOnly'), attachmentIds);
+      }
+    } finally {
+      setIsSending(false);
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      void handleSend();
     }
   };
 
@@ -317,6 +443,7 @@ export function ChatPanel() {
               tf={tf}
               locale={locale}
               approvalRound={approvalRound}
+              attachmentMap={attachmentMap}
             />
           ))
         )}
@@ -330,7 +457,82 @@ export function ChatPanel() {
 
       {/* Input */}
       <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
+        {draftAttachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {draftAttachments.map((attachment) => (
+              <div
+                key={attachment.id}
+                className="inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[11px] text-gray-200"
+              >
+                <span className="truncate max-w-36">{attachment.title}</span>
+                <span className="text-gray-400">{t(`attachments.kind.${attachment.kind}` as TranslationKey)}</span>
+                {'file' in attachment && attachment.file.size > 0 && (
+                  <span className="text-gray-500">{formatSize(attachment.file.size)}</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => removeDraftAttachment(attachment.id)}
+                  className="rounded border border-gray-700 px-1 text-gray-300 hover:text-white"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="flex gap-2">
+          <div className="relative self-end">
+            <button
+              type="button"
+              onClick={() => setShowAttachmentMenu((previous) => !previous)}
+              className="h-10 w-10 rounded-lg border border-gray-700 bg-gray-900 text-lg text-gray-200 hover:border-blue-600/60"
+              title={t('attachments.menuOpen')}
+            >
+              +
+            </button>
+
+            {showAttachmentMenu && (
+              <div className="absolute bottom-12 left-0 z-20 w-36 rounded-lg border border-gray-700 bg-gray-950 p-1.5 shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
+                >
+                  {t('attachments.option.file')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => photoInputRef.current?.click()}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
+                >
+                  {t('attachments.option.photo')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => pdfInputRef.current?.click()}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
+                >
+                  {t('attachments.option.pdf')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => zipInputRef.current?.click()}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
+                >
+                  {t('attachments.option.zip')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowLinkInput((previous) => !previous)}
+                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
+                >
+                  {t('attachments.option.link')}
+                </button>
+              </div>
+            )}
+          </div>
+
           <textarea
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
@@ -344,13 +546,56 @@ export function ChatPanel() {
             className="flex-1 resize-none bg-gray-900 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 transition-colors"
           />
           <button
-            onClick={handleSend}
-            disabled={!inputValue.trim()}
+            onClick={() => void handleSend()}
+            disabled={(!inputValue.trim() && draftAttachments.length === 0) || isSending}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors self-end"
           >
-            {t('chat.send')}
+            {isSending ? t('attachments.sending') : t('chat.send')}
           </button>
         </div>
+
+        {showLinkInput && (
+          <div className="mt-2 flex gap-2">
+            <input
+              value={linkValue}
+              onChange={(event) => setLinkValue(event.target.value)}
+              placeholder={t('attachments.linkPlaceholder')}
+              className="flex-1 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400"
+            />
+            <button
+              type="button"
+              onClick={handleAddLink}
+              disabled={!linkValue.trim()}
+              className="rounded border border-blue-700/60 bg-blue-900/40 px-2 py-1.5 text-xs text-blue-100 disabled:opacity-50"
+            >
+              {t('attachments.addLink')}
+            </button>
+          </div>
+        )}
+
+        <input ref={fileInputRef} type="file" className="hidden" onChange={(event) => onFilePicked(event, 'file')} />
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+          className="hidden"
+          onChange={(event) => onFilePicked(event, 'image')}
+        />
+        <input
+          ref={pdfInputRef}
+          type="file"
+          accept=".pdf,application/pdf"
+          className="hidden"
+          onChange={(event) => onFilePicked(event, 'pdf')}
+        />
+        <input
+          ref={zipInputRef}
+          type="file"
+          accept=".zip,application/zip,application/x-zip-compressed"
+          className="hidden"
+          onChange={(event) => onFilePicked(event, 'zip')}
+        />
+
         <p className="text-[10px] text-gray-400 mt-1">{t('chat.hint')}</p>
       </div>
     </div>

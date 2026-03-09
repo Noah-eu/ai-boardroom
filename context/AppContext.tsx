@@ -11,6 +11,8 @@ import React, {
   useState,
 } from 'react';
 import { onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
+import { doc, setDoc } from 'firebase/firestore';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import {
   AppLanguage,
   Agent,
@@ -18,6 +20,8 @@ import {
   AgentStatus,
   DebateMode,
   LogEntry,
+  ProjectAttachment,
+  ProjectAttachmentKind,
   ProjectUsage,
   OrchestratorState,
   OutputType,
@@ -122,6 +126,10 @@ type AiRespondLogContext = {
   agent?: AgentName;
 };
 
+type DraftAttachmentInput =
+  | { kind: 'image' | 'pdf' | 'zip' | 'file'; file: File }
+  | { kind: 'url'; url: string };
+
 const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number }> = {
   'gpt-4.1': { input: 2.0, output: 8.0 },
   'gpt-4.1-mini': { input: 0.4, output: 1.6 },
@@ -160,6 +168,21 @@ function createEmptyUsage(): ProjectUsage {
   };
 }
 
+function sanitizeFileName(fileName: string): string {
+  return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function detectFileKind(file: File): ProjectAttachmentKind {
+  const mime = file.type.toLowerCase();
+  const name = file.name.toLowerCase();
+  if (mime.startsWith('image/') || /\.(jpg|jpeg|png|webp)$/.test(name)) return 'image';
+  if (mime === 'application/pdf' || name.endsWith('.pdf')) return 'pdf';
+  if (mime === 'application/zip' || mime === 'application/x-zip-compressed' || name.endsWith('.zip')) {
+    return 'zip';
+  }
+  return 'file';
+}
+
 type Action =
   | {
       type: 'CREATE_PROJECT';
@@ -181,7 +204,7 @@ type Action =
   | { type: 'REJECT_PLAN'; feedback: string }
   | { type: 'SET_PHASE'; phase: WorkflowPhase }
   | { type: 'UPDATE_AGENT_STATUS'; agent: AgentName; status: AgentStatus; lastOutput?: string }
-  | { type: 'ADD_USER_MESSAGE'; content: string }
+  | { type: 'ADD_USER_MESSAGE'; content: string; attachmentIds?: string[] }
   | { type: 'ADD_LOG'; message: string; level: LogEntry['level']; agent?: AgentName }
   | { type: 'SET_TASK_GRAPH'; projectId: string; taskGraph: TaskGraph }
   | { type: 'ADD_TASK'; projectId: string; task: Task }
@@ -206,6 +229,11 @@ type Action =
       projectId: string;
       model: string;
       usage: AiUsageMeta;
+    }
+  | {
+      type: 'ADD_PROJECT_ATTACHMENT';
+      projectId: string;
+      attachment: ProjectAttachment;
     }
   | { type: 'RESET' };
 
@@ -487,7 +515,7 @@ function appReducer(state: AppState, action: Action): AppState {
 
     case 'ADD_USER_MESSAGE': {
       if (!state.activeProject) return state;
-      const msg = createMessage('user', action.content);
+      const msg = createMessage('user', action.content, 'chat', undefined, action.attachmentIds);
       const updatedProject: Project = {
         ...state.activeProject,
         messages: [...state.activeProject.messages, msg],
@@ -625,6 +653,14 @@ function appReducer(state: AppState, action: Action): AppState {
       });
     }
 
+    case 'ADD_PROJECT_ATTACHMENT': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        attachments: [action.attachment, ...project.attachments],
+        updatedAt: new Date(),
+      }));
+    }
+
     case 'RESET': {
       return createInitialAppState();
     }
@@ -667,7 +703,8 @@ interface AppContextValue {
   approvePlan: () => void;
   rejectPlan: (feedback: string) => void;
   updateAgentStatus: (agent: AgentName, status: AgentStatus, lastOutput?: string) => void;
-  addUserMessage: (content: string) => void;
+  addUserMessage: (content: string, attachmentIds?: string[]) => void;
+  attachToProject: (projectId: string, attachment: DraftAttachmentInput) => Promise<ProjectAttachment>;
   addLog: (message: string, level: LogEntry['level'], agent?: AgentName) => void;
   setProjectSimulationMode: (projectId: string, simulationMode: boolean) => void;
   setProjectDebateRounds: (projectId: string, debateRounds: number) => void;
@@ -1747,9 +1784,119 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  const addUserMessage = useCallback((content: string) => {
-    dispatch({ type: 'ADD_USER_MESSAGE', content });
+  const addUserMessage = useCallback((content: string, attachmentIds?: string[]) => {
+    dispatch({ type: 'ADD_USER_MESSAGE', content, attachmentIds });
   }, []);
+
+  const attachToProject = useCallback(
+    async (projectId: string, attachment: DraftAttachmentInput): Promise<ProjectAttachment> => {
+      const createdAt = new Date();
+      const artifactId = generateId();
+      const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+
+      if (!project) {
+        throw new Error('No active project for attachment upload.');
+      }
+
+      if (attachment.kind === 'url') {
+        const normalizedUrl = attachment.url.trim();
+        const title = normalizedUrl;
+        const urlArtifact: ProjectAttachment = {
+          id: artifactId,
+          projectId,
+          kind: 'url',
+          title,
+          downloadUrl: normalizedUrl,
+          createdAt,
+        };
+
+        const client = getFirebaseClient();
+        if (client) {
+          try {
+            await setDoc(doc(client.firestore, 'projects', projectId, 'attachments', artifactId), {
+              ...urlArtifact,
+              createdAt: createdAt.toISOString(),
+              createdBy: firebaseUid,
+            });
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : 'URL metadata save failed';
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'warning',
+              message: `Attachment fallback (URL): ${detail}`,
+            });
+          }
+        }
+
+        dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: urlArtifact });
+        return urlArtifact;
+      }
+
+      const file = attachment.file;
+      const derivedKind = detectFileKind(file);
+      const safeName = sanitizeFileName(file.name);
+      const storagePath = `projects/${projectId}/attachments/${artifactId}/${safeName}`;
+
+      const localFallback = (): ProjectAttachment => {
+        const fallbackArtifact: ProjectAttachment = {
+          id: artifactId,
+          projectId,
+          kind: derivedKind,
+          title: file.name,
+          mimeType: file.type || undefined,
+          size: Number.isFinite(file.size) ? file.size : undefined,
+          storagePath,
+          downloadUrl: derivedKind === 'image' ? URL.createObjectURL(file) : undefined,
+          createdAt,
+        };
+        dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: fallbackArtifact });
+        return fallbackArtifact;
+      };
+
+      const client = getFirebaseClient();
+      if (!client) {
+        return localFallback();
+      }
+
+      try {
+        const storageRef = ref(client.storage, storagePath);
+        await uploadBytes(storageRef, file, {
+          contentType: file.type || undefined,
+        });
+        const downloadUrl = await getDownloadURL(storageRef);
+
+        const uploadedArtifact: ProjectAttachment = {
+          id: artifactId,
+          projectId,
+          kind: derivedKind,
+          title: file.name,
+          mimeType: file.type || undefined,
+          size: Number.isFinite(file.size) ? file.size : undefined,
+          storagePath,
+          downloadUrl,
+          createdAt,
+        };
+
+        await setDoc(doc(client.firestore, 'projects', projectId, 'attachments', artifactId), {
+          ...uploadedArtifact,
+          createdAt: createdAt.toISOString(),
+          createdBy: firebaseUid,
+        });
+
+        dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: uploadedArtifact });
+        return uploadedArtifact;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'File upload failed';
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'warning',
+          message: `Attachment fallback (file): ${detail}`,
+        });
+        return localFallback();
+      }
+    },
+    [firebaseUid]
+  );
 
   const addLog = useCallback(
     (message: string, level: LogEntry['level'], agent?: AgentName) => {
@@ -2287,6 +2434,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     rejectPlan,
     updateAgentStatus: updateAgentStatusFn,
     addUserMessage,
+    attachToProject,
     addLog,
     setProjectSimulationMode,
     setProjectDebateRounds,

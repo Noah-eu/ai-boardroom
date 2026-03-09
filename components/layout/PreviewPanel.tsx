@@ -3,7 +3,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { translate, translateWithVars } from '@/i18n';
-import { Task, TaskStatus } from '@/types';
+import { ProjectAttachment, Task, TaskStatus } from '@/types';
+
+function formatAttachmentSize(size?: number): string {
+  if (!size || size <= 0) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export function PreviewPanel() {
   const {
@@ -56,6 +63,7 @@ export function PreviewPanel() {
         ),
     [tasks]
   );
+  const projectAttachments = useMemo<ProjectAttachment[]>(() => project?.attachments ?? [], [project]);
 
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskStatus, Task[]> = {
@@ -271,6 +279,64 @@ export function PreviewPanel() {
             <p className="mt-1 text-[11px] text-red-100 leading-relaxed">{schedulerState.deadlock.message}</p>
           </div>
         )}
+
+        <div className="mb-3 rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2.5">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('attachments.sectionTitle')}</p>
+            <span className="text-[10px] text-gray-500">{projectAttachments.length}</span>
+          </div>
+          {projectAttachments.length === 0 ? (
+            <p className="mt-1 text-[11px] text-gray-400">{t('attachments.none')}</p>
+          ) : (
+            <div className="mt-2 space-y-1.5">
+              {projectAttachments.map((attachment) => (
+                <div key={attachment.id} className="rounded border border-gray-700 bg-gray-900 px-2 py-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-300">
+                      {t(`attachments.kind.${attachment.kind}` as Parameters<typeof translate>[1])}
+                    </span>
+                    <p className="truncate text-[11px] text-gray-100">{attachment.title}</p>
+                    {attachment.size && (
+                      <span className="ml-auto text-[10px] text-gray-500">{formatAttachmentSize(attachment.size)}</span>
+                    )}
+                  </div>
+
+                  {attachment.kind === 'image' && attachment.downloadUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={attachment.downloadUrl}
+                      alt={attachment.title}
+                      className="mt-1 max-h-24 w-full rounded border border-gray-700 object-cover"
+                    />
+                  )}
+
+                  {attachment.kind === 'url' && attachment.downloadUrl && (
+                    <a
+                      href={attachment.downloadUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 inline-flex text-[10px] text-blue-300 underline"
+                    >
+                      {attachment.downloadUrl}
+                    </a>
+                  )}
+
+                  {(attachment.kind === 'pdf' || attachment.kind === 'zip' || attachment.kind === 'file') && attachment.downloadUrl && (
+                    <a
+                      href={attachment.downloadUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 inline-flex text-[10px] text-blue-300 underline"
+                    >
+                      {t('attachments.open')}
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {isComplete && (
           <div className="mb-3 rounded-lg border border-green-700/50 bg-green-950/20 px-3 py-3">
             <div className="flex items-center gap-2">

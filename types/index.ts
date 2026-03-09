@@ -71,6 +71,21 @@ export interface Message {
   type: MessageType;
   timestamp: Date;
   agentRole?: string;
+  attachmentIds?: string[];
+}
+
+export type ProjectAttachmentKind = 'image' | 'pdf' | 'zip' | 'file' | 'url';
+
+export interface ProjectAttachment {
+  id: string;
+  projectId: string;
+  kind: ProjectAttachmentKind;
+  title: string;
+  mimeType?: string;
+  size?: number;
+  storagePath?: string;
+  downloadUrl?: string;
+  createdAt: Date;
 }
 
 export interface UsageTotals {
@@ -136,6 +151,7 @@ export interface Project {
   taskGraph: TaskGraph | null;
   tasks: Task[];
   messages: Message[];
+  attachments: ProjectAttachment[];
   usage: ProjectUsage;
 }
 
