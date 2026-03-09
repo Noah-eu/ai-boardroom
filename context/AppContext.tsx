@@ -10,6 +10,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
 import {
   AppLanguage,
   Agent,
@@ -26,6 +27,7 @@ import {
   WorkflowPhase,
 } from '@/types';
 import { z } from 'zod';
+import { getFirebaseClient, getFirebaseInitError } from '@/lib/firebase';
 import {
   createInitialState,
   createLogEntry,
@@ -501,6 +503,7 @@ function createInitialAppState(): AppState {
 
 interface AppContextValue {
   state: AppState;
+  firebaseUid: string | null;
   language: Language;
   setLanguage: (language: Language) => void;
   t: (key: TranslationKey) => string;
@@ -555,6 +558,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
+  const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
   const [language, setLanguage] = useState<Language>('en');
   const [executionSpeed, setExecutionSpeed] = useState<ExecutionSpeed>('normal');
   const [autoPauseCheckpoints, setAutoPauseCheckpoints] = useState(true);
@@ -569,6 +573,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const deadlockSignatureRef = useRef<Record<string, string>>({});
   const debateRunsRef = useRef<Record<string, boolean>>({});
   const projectPhaseRef = useRef<Record<string, WorkflowPhase>>({});
+  const firebaseConnectedLoggedRef = useRef(false);
+  const firebaseErrorLoggedRef = useRef(false);
   const t = useCallback((key: TranslationKey) => translate(language, key), [language]);
   const tf = useCallback(
     (key: TranslationKey, vars: Record<string, string | number>) =>
@@ -583,6 +589,87 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     executionSpeedRef.current = executionSpeed;
   }, [executionSpeed]);
+
+  useEffect(() => {
+    let unsubAuth: (() => void) | undefined;
+
+    const logFirebaseError = (message: string) => {
+      if (firebaseErrorLoggedRef.current) {
+        return;
+      }
+      firebaseErrorLoggedRef.current = true;
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'error',
+        message: `Firebase: ${message}. Continuing in simulation mode.`,
+      });
+    };
+
+    const ensureAnonymousSignIn = async (currentUser: User | null) => {
+      if (currentUser) {
+        setFirebaseUid(currentUser.uid);
+        if (!firebaseConnectedLoggedRef.current) {
+          firebaseConnectedLoggedRef.current = true;
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `Firebase: connected (uid: ${currentUser.uid})`,
+          });
+        }
+        return;
+      }
+
+      setFirebaseUid(null);
+      try {
+        const client = getFirebaseClient();
+        if (!client) {
+          logFirebaseError(getFirebaseInitError() ?? 'initialization failed');
+          return;
+        }
+        const credential = await signInAnonymously(client.auth);
+        setFirebaseUid(credential.user.uid);
+        if (!firebaseConnectedLoggedRef.current) {
+          firebaseConnectedLoggedRef.current = true;
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `Firebase: connected (uid: ${credential.user.uid})`,
+          });
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'anonymous authentication failed';
+        logFirebaseError(detail);
+      }
+    };
+
+    try {
+      const client = getFirebaseClient();
+      if (!client) {
+        logFirebaseError(getFirebaseInitError() ?? 'initialization failed');
+        return;
+      }
+
+      unsubAuth = onAuthStateChanged(
+        client.auth,
+        (user) => {
+          void ensureAnonymousSignIn(user);
+        },
+        (error) => {
+          const detail = error instanceof Error ? error.message : 'auth state tracking failed';
+          logFirebaseError(detail);
+        }
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'initialization failed';
+      logFirebaseError(detail);
+    }
+
+    return () => {
+      if (unsubAuth) {
+        unsubAuth();
+      }
+    };
+  }, []);
 
   const translateProject = useCallback((projectLanguage: AppLanguage, key: TranslationKey) => {
     return translate(projectLanguage, key);
@@ -1984,6 +2071,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const value: AppContextValue = {
     state,
+    firebaseUid,
     language,
     setLanguage,
     t,
