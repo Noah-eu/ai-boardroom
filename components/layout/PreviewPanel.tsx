@@ -308,11 +308,35 @@ export function PreviewPanel() {
                           <span className="text-[10px] text-gray-300">
                             {t(`attachments.kind.${attachment.kind}` as Parameters<typeof translate>[1])}
                           </span>
+                          <span className="rounded border border-gray-700 bg-gray-950 px-1 py-0.5 text-[10px] text-gray-400">
+                            {t(
+                              `attachments.status.${attachment.ingestion?.status ?? 'uploaded'}` as Parameters<
+                                typeof translate
+                              >[1]
+                            )}
+                          </span>
                           <p className="truncate text-[11px] text-gray-100">{attachment.title}</p>
                           {attachment.size && (
                             <span className="ml-auto text-[10px] text-gray-500">{formatAttachmentSize(attachment.size)}</span>
                           )}
                         </div>
+
+                        {attachment.ingestion?.excerpt && (
+                          <p className="mt-1 text-[10px] text-gray-400 leading-relaxed">{attachment.ingestion.excerpt}</p>
+                        )}
+
+                        {attachment.kind === 'zip' && attachment.ingestion?.zipFileTree && (
+                          <div className="mt-1 rounded border border-gray-800 bg-black/30 px-1.5 py-1">
+                            <p className="text-[10px] text-gray-500">{t('attachments.zipTree')}</p>
+                            <p className="text-[10px] text-gray-300 whitespace-pre-wrap">
+                              {attachment.ingestion.zipFileTree.slice(0, 12).join('\n')}
+                            </p>
+                          </div>
+                        )}
+
+                        {attachment.ingestion?.error && (
+                          <p className="mt-1 text-[10px] text-red-300">{attachment.ingestion.error}</p>
+                        )}
 
                         {attachment.kind === 'image' && attachment.downloadUrl && (
                           // eslint-disable-next-line @next/next/no-img-element

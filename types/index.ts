@@ -76,6 +76,22 @@ export interface Message {
 
 export type ProjectAttachmentKind = 'image' | 'pdf' | 'zip' | 'file' | 'url';
 
+export type AttachmentIngestionStatus = 'uploaded' | 'parsed' | 'indexed' | 'included' | 'failed';
+
+export interface AttachmentIngestion {
+  status: AttachmentIngestionStatus;
+  summary?: string;
+  extractedText?: string;
+  excerpt?: string;
+  pageTitle?: string;
+  sourceUrl?: string;
+  zipFileTree?: string[];
+  zipKeyFiles?: Array<{ path: string; content: string }>;
+  error?: string;
+  includedInContext?: boolean;
+  lastIncludedAt?: Date;
+}
+
 export interface ProjectAttachment {
   id: string;
   projectId: string;
@@ -86,6 +102,8 @@ export interface ProjectAttachment {
   size?: number;
   storagePath?: string;
   downloadUrl?: string;
+  sourceUrl?: string;
+  ingestion?: AttachmentIngestion;
   createdAt: Date;
 }
 

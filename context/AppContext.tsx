@@ -14,6 +14,7 @@ import { onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import {
+  AttachmentIngestion,
   AppLanguage,
   Agent,
   AgentName,
@@ -104,6 +105,9 @@ type AiRespondPayload = {
   agentRole: string;
   inputText: string;
   context?: unknown;
+  attachmentContext?: {
+    images?: Array<{ url: string; title: string }>;
+  };
 };
 
 type AiUsageMeta = {
@@ -234,6 +238,12 @@ type Action =
       type: 'ADD_PROJECT_ATTACHMENT';
       projectId: string;
       attachment: ProjectAttachment;
+    }
+  | {
+      type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION';
+      projectId: string;
+      attachmentId: string;
+      ingestion: AttachmentIngestion;
     }
   | { type: 'RESET' };
 
@@ -661,6 +671,24 @@ function appReducer(state: AppState, action: Action): AppState {
       }));
     }
 
+    case 'UPDATE_PROJECT_ATTACHMENT_INGESTION': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        attachments: project.attachments.map((attachment) =>
+          attachment.id === action.attachmentId
+            ? {
+                ...attachment,
+                ingestion: {
+                  ...attachment.ingestion,
+                  ...action.ingestion,
+                },
+              }
+            : attachment
+        ),
+        updatedAt: new Date(),
+      }));
+    }
+
     case 'RESET': {
       return createInitialAppState();
     }
@@ -693,7 +721,8 @@ interface AppContextValue {
     simulationMode: boolean,
     debateRounds: number,
     debateMode: DebateMode,
-    maxWordsPerAgent: number
+    maxWordsPerAgent: number,
+    autoStartDebate?: boolean
   ) => void;
   selectProject: (id: string) => void;
   startDebate: (task: string) => void;
@@ -869,9 +898,104 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return '/api/ai/respond';
   }, []);
 
+  const buildAttachmentContext = useCallback((project: Project) => {
+    const projectAttachments = project.attachments.filter((attachment) => (attachment.source ?? 'message') === 'project');
+    const messageAttachments = project.attachments.filter((attachment) => (attachment.source ?? 'message') === 'message');
+    const includedAttachmentIds: string[] = [];
+    const textSections: Array<{ title: string; kind: ProjectAttachmentKind; source: 'project' | 'message'; text: string }> = [];
+    const images: Array<{ url: string; title: string; source: 'project' | 'message' }> = [];
+
+    for (const attachment of project.attachments) {
+      const source = (attachment.source ?? 'message') as 'project' | 'message';
+      const ingestion = attachment.ingestion;
+      let included = false;
+
+      if (attachment.kind === 'image' && attachment.downloadUrl) {
+        images.push({ url: attachment.downloadUrl, title: attachment.title, source });
+        included = true;
+      }
+
+      if (ingestion?.extractedText) {
+        textSections.push({
+          title: attachment.title,
+          kind: attachment.kind,
+          source,
+          text: ingestion.extractedText,
+        });
+        included = true;
+      } else if (attachment.kind === 'zip' && ingestion?.zipFileTree) {
+        const zipSummary = [
+          `File tree:\n${ingestion.zipFileTree.slice(0, 80).join('\n')}`,
+          ingestion.zipKeyFiles?.length
+            ? `Key files:\n${ingestion.zipKeyFiles
+                .map((file) => `${file.path}\n${file.content}`)
+                .join('\n\n')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+        textSections.push({
+          title: attachment.title,
+          kind: attachment.kind,
+          source,
+          text: zipSummary,
+        });
+        included = true;
+      }
+
+      if (included) {
+        includedAttachmentIds.push(attachment.id);
+      }
+    }
+
+    return {
+      projectAttachments: projectAttachments.map((attachment) => ({
+        id: attachment.id,
+        title: attachment.title,
+        kind: attachment.kind,
+        status: attachment.ingestion?.status ?? 'uploaded',
+      })),
+      messageAttachments: messageAttachments.map((attachment) => ({
+        id: attachment.id,
+        title: attachment.title,
+        kind: attachment.kind,
+        status: attachment.ingestion?.status ?? 'uploaded',
+      })),
+      textSections,
+      images,
+      includedAttachmentIds,
+    };
+  }, []);
+
   const callAiRespond = useCallback(
     async (payload: AiRespondPayload, logContext?: AiRespondLogContext): Promise<AiRespondResult> => {
       const role = payload.agentRole;
+      const project = stateRef.current.projects.find((candidate) => candidate.id === payload.projectId);
+      const attachmentContext = project ? buildAttachmentContext(project) : null;
+      const requestPayload: AiRespondPayload = {
+        ...payload,
+        context: {
+          ...(typeof payload.context === 'object' && payload.context !== null ? payload.context : { raw: payload.context ?? null }),
+          attachments: attachmentContext
+            ? {
+                projectAttachments: attachmentContext.projectAttachments,
+                messageAttachments: attachmentContext.messageAttachments,
+                extractedSections: attachmentContext.textSections.map((section) => ({
+                  title: section.title,
+                  source: section.source,
+                  kind: section.kind,
+                  content: section.text,
+                })),
+              }
+            : null,
+        },
+        attachmentContext: {
+          images: attachmentContext
+            ? attachmentContext.images.map((image) => ({ url: image.url, title: image.title }))
+            : [],
+        },
+      };
+
       if (logContext) {
         dispatch({
           type: 'ADD_LOG',
@@ -886,7 +1010,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(requestPayload),
         });
 
         const contentType = response.headers.get('content-type') ?? '';
@@ -922,6 +1046,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
         }
 
+        if (project && attachmentContext && attachmentContext.includedAttachmentIds.length > 0) {
+          attachmentContext.includedAttachmentIds.forEach((attachmentId) => {
+            dispatch({
+              type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+              projectId: project.id,
+              attachmentId,
+              ingestion: {
+                status: 'included',
+                includedInContext: true,
+                lastIncludedAt: new Date(),
+              },
+            });
+          });
+
+          if (logContext) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: logContext.agent,
+              message: `Attachments included in AI context: ${attachmentContext.includedAttachmentIds.length}`,
+            });
+          }
+        }
+
         if (data.meta?.model && data.meta.usage) {
           dispatch({
             type: 'ADD_PROJECT_USAGE',
@@ -951,7 +1099,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw error;
       }
     },
-    [resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
+    [buildAttachmentContext, resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
   );
 
   const materializePlannerGraph = useCallback((rawGraph: z.infer<typeof plannerTaskGraphSchema>): TaskGraph => {
@@ -1037,7 +1185,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       simulationMode: boolean,
       debateRounds: number,
       debateMode: DebateMode,
-      maxWordsPerAgent: number
+      maxWordsPerAgent: number,
+      autoStartDebate = true
     ) => {
       dispatch({
         type: 'CREATE_PROJECT',
@@ -1050,7 +1199,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         debateMode,
         maxWordsPerAgent,
       });
-      dispatch({ type: 'START_DEBATE', task: description });
+      if (autoStartDebate) {
+        dispatch({ type: 'START_DEBATE', task: description });
+      }
     },
     []
   );
@@ -1788,6 +1939,93 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'ADD_USER_MESSAGE', content, attachmentIds });
   }, []);
 
+  const ingestAttachment = useCallback(
+    async (projectId: string, attachment: ProjectAttachment) => {
+      try {
+        const response = await fetch('/api/attachments/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind: attachment.kind,
+            title: attachment.title,
+            sourceUrl: attachment.sourceUrl,
+            downloadUrl: attachment.downloadUrl,
+            mimeType: attachment.mimeType,
+          }),
+        });
+
+        const body = (await response.json()) as { ingest?: AttachmentIngestion; error?: string };
+        const ingest = body.ingest;
+        if (!response.ok || !ingest) {
+          throw new Error(body.error ?? 'Attachment ingestion failed');
+        }
+
+        dispatch({
+          type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+          projectId,
+          attachmentId: attachment.id,
+          ingestion: ingest,
+        });
+
+        const projectForPersist = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        const client = getFirebaseClient();
+        if (projectForPersist && client) {
+          await setDoc(
+            doc(client.firestore, 'projects', projectId, 'attachments', attachment.id),
+            {
+              ingestion: {
+                ...ingest,
+                lastIncludedAt: ingest.lastIncludedAt ? ingest.lastIncludedAt.toISOString() : null,
+              },
+            },
+            { merge: true }
+          );
+        }
+
+        const projectForLog = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        if (projectForLog) {
+          const logKeyByKind: Record<ProjectAttachmentKind, TranslationKey> = {
+            url: 'attachments.log.urlParsed',
+            pdf: 'attachments.log.pdfParsed',
+            image: 'attachments.log.imageIncluded',
+            zip: 'attachments.log.zipIndexed',
+            file: 'attachments.log.fileUploaded',
+          };
+          dispatch({
+            type: 'ADD_LOG',
+            level: ingest.status === 'failed' ? 'warning' : 'info',
+            message: translateProjectWithVars(projectForLog.language, logKeyByKind[attachment.kind], {
+              title: attachment.title,
+            }),
+          });
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Ingestion failed';
+        dispatch({
+          type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+          projectId,
+          attachmentId: attachment.id,
+          ingestion: {
+            status: 'failed',
+            error: detail,
+          },
+        });
+        const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          message: project
+            ? translateProjectWithVars(project.language, 'attachments.log.ingestFailed', {
+                title: attachment.title,
+                error: detail,
+              })
+            : `Attachment ingest failed (${attachment.title}): ${detail}`,
+        });
+      }
+    },
+    [translateProjectWithVars]
+  );
+
   const attachToProject = useCallback(
     async (projectId: string, attachment: DraftAttachmentInput): Promise<ProjectAttachment> => {
       const createdAt = new Date();
@@ -1809,6 +2047,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           source,
           title,
           downloadUrl: normalizedUrl,
+          sourceUrl: normalizedUrl,
+          ingestion: { status: 'uploaded', summary: 'URL stored, waiting for ingestion.' },
           createdAt,
         };
 
@@ -1831,6 +2071,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: urlArtifact });
+        await ingestAttachment(projectId, urlArtifact);
         return urlArtifact;
       }
 
@@ -1850,6 +2091,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           size: Number.isFinite(file.size) ? file.size : undefined,
           storagePath,
           downloadUrl: derivedKind === 'image' ? URL.createObjectURL(file) : undefined,
+          ingestion: {
+            status: 'failed',
+            error: 'Server-side ingestion unavailable in local fallback mode.',
+          },
           createdAt,
         };
         dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: fallbackArtifact });
@@ -1878,6 +2123,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           size: Number.isFinite(file.size) ? file.size : undefined,
           storagePath,
           downloadUrl,
+          ingestion: { status: 'uploaded', summary: 'File uploaded, waiting for ingestion.' },
           createdAt,
         };
 
@@ -1888,6 +2134,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         dispatch({ type: 'ADD_PROJECT_ATTACHMENT', projectId, attachment: uploadedArtifact });
+        await ingestAttachment(projectId, uploadedArtifact);
         return uploadedArtifact;
       } catch (error) {
         const detail = error instanceof Error ? error.message : 'File upload failed';
@@ -1899,7 +2146,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return localFallback();
       }
     },
-    [firebaseUid]
+    [firebaseUid, ingestAttachment]
   );
 
   const addLog = useCallback(

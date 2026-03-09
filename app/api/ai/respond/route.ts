@@ -8,6 +8,18 @@ const requestSchema = z.object({
   agentRole: z.string().min(1),
   inputText: z.string().min(1),
   context: z.unknown().optional(),
+  attachmentContext: z
+    .object({
+      images: z
+        .array(
+          z.object({
+            url: z.string().url(),
+            title: z.string().min(1),
+          })
+        )
+        .default([]),
+    })
+    .optional(),
 });
 
 function contextToString(context: unknown): string {
@@ -92,17 +104,19 @@ export async function POST(request: Request) {
       );
     }
 
-    const { language, projectId, agentRole, inputText, context } = parsed.data;
+    const { language, projectId, agentRole, inputText, context, attachmentContext } = parsed.data;
     const languageInstruction =
       language === 'cz'
         ? 'Respond in Czech language.'
         : 'Respond in English.';
 
     const client = new OpenAI({ apiKey });
+    const imageInputs = (attachmentContext?.images ?? []).slice(0, 8).map((image) => ({
+      type: 'input_image' as const,
+      image_url: image.url,
+    }));
 
-    const response = await client.responses.create({
-      model,
-      input: [
+    const requestInput = [
         {
           role: 'system',
           content: [
@@ -130,9 +144,14 @@ export async function POST(request: Request) {
                 inputText,
               ].join('\n\n'),
             },
+            ...imageInputs,
           ],
         },
-      ],
+      ] as unknown as OpenAI.Responses.ResponseCreateParams['input'];
+
+    const response = await client.responses.create({
+      model,
+      input: requestInput,
     });
 
     const text = extractResponseText(response);

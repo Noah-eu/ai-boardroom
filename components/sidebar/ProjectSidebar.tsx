@@ -302,6 +302,7 @@ export function ProjectSidebar() {
     createProject,
     attachToProject,
     addLog,
+    startDebate,
     selectProject,
     runDemo,
     language,
@@ -358,7 +359,8 @@ export function ProjectSidebar() {
       simulationMode,
       debateRounds,
       debateMode,
-      maxWordsPerAgent
+      maxWordsPerAgent,
+      attachments.length === 0
     );
     setShowForm(false);
   };
@@ -398,6 +400,7 @@ export function ProjectSidebar() {
         const detail = error instanceof Error ? error.message : 'Project attachment upload failed.';
         addLog(detail, 'warning');
       } finally {
+        startDebate(activeProject.description);
         setPendingProjectAttachments(null);
         setPendingProjectIdentity(null);
         setIsUploadingProjectAttachments(false);
@@ -410,6 +413,7 @@ export function ProjectSidebar() {
     isUploadingProjectAttachments,
     pendingProjectAttachments,
     pendingProjectIdentity,
+    startDebate,
   ]);
 
   return (
