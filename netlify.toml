@@ -1,0 +1,4 @@
+[[redirects]]
+  from = "/api/ai/respond"
+  to = "/.netlify/functions/ai-respond"
+  status = 200

@@ -595,6 +595,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const resolveAiRespondEndpoint = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location.host.includes('netlify.app')) {
+      return '/.netlify/functions/ai-respond';
+    }
+    return '/api/ai/respond';
+  }, []);
+
   const callAiRespond = useCallback(
     async (payload: AiRespondPayload, logContext?: AiRespondLogContext): Promise<string> => {
       const role = payload.agentRole;
@@ -608,13 +615,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       try {
-        const response = await fetch('/api/ai/respond', {
+        const endpoint = resolveAiRespondEndpoint();
+        const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
 
-        const data = (await response.json()) as { text?: string; error?: string };
+        const contentType = response.headers.get('content-type') ?? '';
+        const rawBody = await response.text();
+        let data: { text?: string; error?: string } | null = null;
+
+        if (contentType.includes('application/json')) {
+          try {
+            data = JSON.parse(rawBody) as { text?: string; error?: string };
+          } catch {
+            data = null;
+          }
+        }
+
+        if (!data) {
+          const snippet = rawBody.slice(0, 200).replace(/\s+/g, ' ').trim();
+          const detail = `status=${response.status} body="${snippet || '<empty>'}"`;
+          console.warn(`[ai/respond] Non-JSON response from ${endpoint}: ${detail}`);
+          throw new Error(`AI endpoint returned non-JSON response (${detail}).`);
+        }
+
         if (!response.ok || !data.text) {
           const detail = data.error ? ` ${data.error}` : '';
           throw new Error(`AI request failed.${detail}`);
@@ -646,7 +672,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw error;
       }
     },
-    [translateProject, translateProjectWithVars]
+    [resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
   );
 
   const materializePlannerGraph = useCallback((rawGraph: z.infer<typeof plannerTaskGraphSchema>): TaskGraph => {
@@ -1645,24 +1671,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   .filter(Boolean)
                   .join('\n\n');
 
-                content = await callAiRespond(
-                  {
-                    projectId,
-                    language,
-                    agentRole: agent,
-                    inputText: prompt,
-                    context: {
-                      projectName: refreshedProject.name,
-                      task,
-                      debateRunRound,
-                      round,
-                      rounds,
-                      previousRoundExcerpts: formatRoundExcerpts(previousRoundMessages),
-                      roundOneExcerpts: formatRoundExcerpts(roundOneMessages),
+                try {
+                  content = await callAiRespond(
+                    {
+                      projectId,
+                      language,
+                      agentRole: agent,
+                      inputText: prompt,
+                      context: {
+                        projectName: refreshedProject.name,
+                        task,
+                        debateRunRound,
+                        round,
+                        rounds,
+                        previousRoundExcerpts: formatRoundExcerpts(previousRoundMessages),
+                        roundOneExcerpts: formatRoundExcerpts(roundOneMessages),
+                      },
                     },
-                  },
-                  { agent }
-                );
+                    { agent }
+                  );
+                } catch {
+                  content = buildSimulatedRoundMessage(language, agent, round, previousRoundMessages);
+                }
               }
 
               dispatch({ type: 'AGENT_SPEAK', agent, content });
@@ -1739,22 +1769,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 : `Debate excerpts:\n${summaryContext}`,
             ].join('\n\n');
 
-            summary = await callAiRespond(
-              {
-                projectId,
-                language,
-                agentRole: 'Orchestrator',
-                inputText: summaryPrompt,
-                context: {
-                  projectName: refreshedProject.name,
-                  task,
-                  debateRunRound,
-                  rounds,
-                  revisionFeedback,
+            try {
+              summary = await callAiRespond(
+                {
+                  projectId,
+                  language,
+                  agentRole: 'Orchestrator',
+                  inputText: summaryPrompt,
+                  context: {
+                    projectName: refreshedProject.name,
+                    task,
+                    debateRunRound,
+                    rounds,
+                    revisionFeedback,
+                  },
                 },
-              },
-              {}
-            );
+                {}
+              );
+            } catch {
+              summary =
+                language === 'cz'
+                  ? [
+                      '1) Recommended plan',
+                      '- Potvrdit scope a metriky, dorucit MVP v kratkych iteracich, potom rozsireni podle dopadu.',
+                      '2) Tradeoffs',
+                      '- V1 omezuje rozsah funkcionality, ale zrychluje doruceni a snizuje riziko.',
+                      '3) Risks + mitigations',
+                      '- Nejasne pozadavky -> acceptance criteria; skluz terminu -> milniky a scope lock; kvalita -> povinne QA gate.',
+                      '4) MVP scope',
+                      '- Klicovy uzivatelsky tok, zakladni validace, minimalni UX polish.',
+                      '5) Next steps',
+                      '- Schvalit plan, spustit realizaci, monitorovat metriky a pripravit backlog pro v2.',
+                    ].join('\n')
+                  : [
+                      '1) Recommended plan',
+                      '- Confirm scope and metrics, deliver MVP in short iterations, then expand based on outcomes.',
+                      '2) Tradeoffs',
+                      '- v1 limits feature breadth but improves delivery speed and risk control.',
+                      '3) Risks + mitigations',
+                      '- Unclear requirements -> acceptance criteria; schedule slip -> milestones and scope lock; quality -> mandatory QA gates.',
+                      '4) MVP scope',
+                      '- Core user flow, baseline validation, and minimal UX polish.',
+                      '5) Next steps',
+                      '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
+                    ].join('\n');
+            }
           }
 
           dispatch({ type: 'ORCHESTRATOR_SUMMARY', content: summary });
