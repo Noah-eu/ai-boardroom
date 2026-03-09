@@ -1,21 +1,9 @@
 'use client';
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useApp } from '@/context/AppContext';
 import { AgentCard } from './AgentCard';
 import { WorkflowPhase } from '@/types';
-
-const phaseLabels: Record<WorkflowPhase, string> = {
-  idle: 'Idle',
-  debate: 'Debate',
-  summary: 'Summary',
-  'awaiting-approval': 'Approval',
-  execution: 'Execution',
-  review: 'Review',
-  testing: 'Testing',
-  integration: 'Integration',
-  complete: 'Complete',
-};
 
 const phaseOrder: WorkflowPhase[] = [
   'idle',
@@ -29,8 +17,22 @@ const phaseOrder: WorkflowPhase[] = [
 ];
 
 export function AgentsPanel() {
-  const { state } = useApp();
+  const { state, t } = useApp();
   const { agents, currentPhase } = state;
+  const tasks = useMemo(
+    () => state.activeProject?.taskGraph?.tasks ?? state.activeProject?.tasks ?? [],
+    [state.activeProject]
+  );
+
+  const activeTaskByAgent = useMemo(() => {
+    const mapping: Partial<Record<(typeof agents)[number]['name'], string>> = {};
+    tasks.forEach((task) => {
+      if (task.status === 'running') {
+        mapping[task.agent] = task.title;
+      }
+    });
+    return mapping;
+  }, [tasks]);
 
   const debateAgents = agents.filter((a) => a.phase === 'debate');
   const executionAgents = agents.filter((a) => a.phase === 'execution');
@@ -40,13 +42,25 @@ export function AgentsPanel() {
 
   const currentPhaseIdx = phaseOrder.indexOf(currentPhase);
 
+  const phaseLabels: Record<WorkflowPhase, string> = {
+    idle: t('phase.idle'),
+    debate: t('phase.debate'),
+    summary: t('phase.summary'),
+    'awaiting-approval': t('phase.awaiting-approval'),
+    execution: t('phase.execution'),
+    review: t('phase.review'),
+    testing: t('phase.testing'),
+    integration: t('phase.integration'),
+    complete: t('phase.complete'),
+  };
+
   return (
     <div className="h-full flex flex-col bg-gray-950 border-l border-gray-800">
       {/* Header */}
       <div className="flex-shrink-0 px-4 py-3 border-b border-gray-800">
-        <h2 className="text-sm font-semibold text-gray-200">Agents</h2>
-        <p className="text-xs text-gray-500 mt-0.5">
-          Phase:{' '}
+        <h2 className="text-sm font-semibold text-gray-100">{t('agents.title')}</h2>
+        <p className="text-xs text-gray-400 mt-0.5">
+          {t('agents.phase')}:{' '}
           <span className="text-blue-400 font-medium">
             {phaseLabels[currentPhase]}
           </span>
@@ -68,7 +82,7 @@ export function AgentsPanel() {
                     ? 'bg-blue-600 text-white'
                     : isDone
                     ? 'bg-green-900/50 text-green-400'
-                    : 'bg-gray-800 text-gray-600'
+                    : 'bg-gray-800 text-gray-400'
                 }`}
               >
                 {phaseLabels[phase]}
@@ -82,8 +96,8 @@ export function AgentsPanel() {
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
         {/* Debate group */}
         <div>
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2 px-1">
-            Debate
+          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">
+            {t('agents.group.debate')}
           </p>
           <div className="space-y-2">
             {debateAgents.map((agent) => (
@@ -94,6 +108,7 @@ export function AgentsPanel() {
                 status={agent.status}
                 lastOutput={agent.lastOutput}
                 description={agent.description}
+                activeTaskTitle={activeTaskByAgent[agent.name] ?? null}
                 isActive={agent.status === 'thinking' || agent.status === 'active'}
               />
             ))}
@@ -102,8 +117,8 @@ export function AgentsPanel() {
 
         {/* Execution group */}
         <div>
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2 px-1">
-            Execution
+          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">
+            {t('agents.group.execution')}
           </p>
           <div className="space-y-2">
             {executionAgents.map((agent) => (
@@ -114,6 +129,7 @@ export function AgentsPanel() {
                 status={agent.status}
                 lastOutput={agent.lastOutput}
                 description={agent.description}
+                activeTaskTitle={activeTaskByAgent[agent.name] ?? null}
                 isActive={agent.status === 'thinking' || agent.status === 'active'}
               />
             ))}
@@ -122,8 +138,8 @@ export function AgentsPanel() {
 
         {/* Review / QA group */}
         <div>
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2 px-1">
-            Review & QA
+          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">
+            {t('agents.group.review')}
           </p>
           <div className="space-y-2">
             {reviewAgents.map((agent) => (
@@ -134,6 +150,7 @@ export function AgentsPanel() {
                 status={agent.status}
                 lastOutput={agent.lastOutput}
                 description={agent.description}
+                activeTaskTitle={activeTaskByAgent[agent.name] ?? null}
                 isActive={agent.status === 'thinking' || agent.status === 'active'}
               />
             ))}

@@ -1,4 +1,7 @@
+'use client';
+
 import React from 'react';
+import { useApp } from '@/context/AppContext';
 import { AgentName, AgentStatus } from '@/types';
 
 interface AgentCardProps {
@@ -8,26 +11,27 @@ interface AgentCardProps {
   lastOutput: string | null;
   description: string;
   isActive?: boolean;
+  activeTaskTitle?: string | null;
 }
 
-const statusConfig: Record<AgentStatus, { label: string; dotClass: string; badgeClass: string }> = {
+const statusConfig: Record<AgentStatus, { labelKey: 'agent.status.idle' | 'agent.status.active' | 'agent.status.thinking' | 'agent.status.error'; dotClass: string; badgeClass: string }> = {
   idle: {
-    label: 'Idle',
+    labelKey: 'agent.status.idle',
     dotClass: 'bg-gray-500',
-    badgeClass: 'bg-gray-800 text-gray-400 border border-gray-700',
+    badgeClass: 'bg-gray-800 text-gray-300 border border-gray-700',
   },
   active: {
-    label: 'Active',
+    labelKey: 'agent.status.active',
     dotClass: 'bg-green-500',
     badgeClass: 'bg-green-950 text-green-300 border border-green-800',
   },
   thinking: {
-    label: 'Thinking',
+    labelKey: 'agent.status.thinking',
     dotClass: 'bg-yellow-400 animate-pulse',
     badgeClass: 'bg-yellow-950 text-yellow-300 border border-yellow-800',
   },
   error: {
-    label: 'Error',
+    labelKey: 'agent.status.error',
     dotClass: 'bg-red-500',
     badgeClass: 'bg-red-950 text-red-300 border border-red-800',
   },
@@ -64,7 +68,9 @@ export function AgentCard({
   lastOutput,
   description,
   isActive = false,
+  activeTaskTitle = null,
 }: AgentCardProps) {
+  const { t } = useApp();
   const cfg = statusConfig[status];
   const colors = phaseConfig[name] ?? { color: 'from-gray-900/30 to-gray-950/60 border-gray-800/40' };
 
@@ -86,21 +92,26 @@ export function AgentCard({
             <span className="text-sm font-semibold text-gray-100 truncate">{name}</span>
             <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${cfg.badgeClass}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${cfg.dotClass}`} />
-              {cfg.label}
+              {t(cfg.labelKey)}
             </span>
           </div>
-          <p className="text-[11px] text-gray-500 truncate">{role}</p>
+          <p className="text-[11px] text-gray-300 truncate">{role}</p>
         </div>
       </div>
 
       {/* Last output */}
       <div className="mt-1">
+        {status === 'active' && activeTaskTitle && (
+          <p className="text-[10px] text-blue-200 mb-1">
+            {t('agent.activeTask')}: <span className="text-blue-100">{activeTaskTitle}</span>
+          </p>
+        )}
         {lastOutput ? (
-          <p className="text-[11px] text-gray-400 line-clamp-2 leading-relaxed">
+          <p className="text-[11px] text-gray-300 line-clamp-2 leading-relaxed">
             {lastOutput}
           </p>
         ) : (
-          <p className="text-[11px] text-gray-600 italic">{description}</p>
+          <p className="text-[11px] text-gray-400 italic">{description}</p>
         )}
       </div>
 
@@ -116,7 +127,7 @@ export function AgentCard({
               />
             ))}
           </div>
-          <span className="text-[10px] text-yellow-400/70 ml-1">Processing...</span>
+          <span className="text-[10px] text-yellow-400/70 ml-1">{t('agent.processing')}</span>
         </div>
       )}
     </div>
