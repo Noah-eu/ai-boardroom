@@ -214,19 +214,31 @@ interface ApprovalActionsProps {
 
 function ApprovalActions({ onApprove, onReject, t }: ApprovalActionsProps) {
   const [feedback, setFeedback] = useState('');
+  const [showRevisionInput, setShowRevisionInput] = useState(false);
   const trimmedFeedback = feedback.trim();
 
   return (
     <div className="flex-shrink-0 border-t border-yellow-800/30 bg-yellow-950/20 px-4 py-3">
       <p className="text-xs text-yellow-300 mb-2 font-medium">{t('chat.reviewPlan')}</p>
-      <label className="block text-[10px] text-gray-300 mb-1">{t('chat.revisionFeedback')}</label>
-      <textarea
-        value={feedback}
-        onChange={(event) => setFeedback(event.target.value)}
-        rows={2}
-        className="mb-2 w-full resize-none rounded border border-gray-600 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
-        placeholder={t('chat.revisionFeedbackPlaceholder')}
-      />
+      {showRevisionInput ? (
+        <>
+          <label className="block text-[10px] text-gray-300 mb-1">{t('chat.revisionFeedback')}</label>
+          <textarea
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+            rows={2}
+            className="mb-2 w-full resize-none rounded border border-blue-600/50 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+            placeholder={t('chat.revisionFeedbackPlaceholder')}
+          />
+          {!trimmedFeedback && (
+            <p className="mt-1 mb-2 text-[10px] text-gray-400">{t('chat.revisionFeedbackRequired')}</p>
+          )}
+        </>
+      ) : (
+        <p className="mb-2 rounded border border-yellow-700/40 bg-yellow-950/30 px-2 py-1.5 text-[11px] text-yellow-200">
+          {t('chat.revisionFeedbackHint')}
+        </p>
+      )}
       <div className="flex gap-2">
         <button
           onClick={onApprove}
@@ -236,21 +248,23 @@ function ApprovalActions({ onApprove, onReject, t }: ApprovalActionsProps) {
         </button>
         <button
           onClick={() => {
+            if (!showRevisionInput) {
+              setShowRevisionInput(true);
+              return;
+            }
             if (!trimmedFeedback) {
               return;
             }
             onReject(trimmedFeedback);
             setFeedback('');
+            setShowRevisionInput(false);
           }}
-          disabled={!trimmedFeedback}
+          disabled={showRevisionInput && !trimmedFeedback}
           className="flex-1 px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-xs font-medium rounded-lg transition-colors"
         >
           ✕ {t('chat.reject')}
         </button>
       </div>
-      {!trimmedFeedback && (
-        <p className="mt-1 text-[10px] text-gray-400">{t('chat.revisionFeedbackRequired')}</p>
-      )}
     </div>
   );
 }
@@ -456,7 +470,8 @@ export function ChatPanel() {
       )}
 
       {/* Input */}
-      <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
+      {!isAwaitingApproval ? (
+        <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
         {draftAttachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {draftAttachments.map((attachment) => (
@@ -596,8 +611,13 @@ export function ChatPanel() {
           onChange={(event) => onFilePicked(event, 'zip')}
         />
 
-        <p className="text-[10px] text-gray-400 mt-1">{t('chat.hint')}</p>
-      </div>
+          <p className="text-[10px] text-gray-400 mt-1">{t('chat.hint')}</p>
+        </div>
+      ) : (
+        <div className="flex-shrink-0 border-t border-yellow-800/30 bg-yellow-950/20 px-4 py-2">
+          <p className="text-[11px] text-yellow-200">{t('chat.approvalInputMode')}</p>
+        </div>
+      )}
     </div>
   );
 }
