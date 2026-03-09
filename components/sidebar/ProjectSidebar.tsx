@@ -1,69 +1,174 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
-import { ProjectStatus } from '@/types';
+import { AppLanguage, DebateMode, OutputType, ProjectStatus } from '@/types';
 
-const statusConfig: Record<ProjectStatus, { label: string; color: string; dot: string }> = {
-  idle: { label: 'Idle', color: 'text-gray-400', dot: 'bg-gray-500' },
-  debating: { label: 'Debating', color: 'text-yellow-400', dot: 'bg-yellow-400 animate-pulse' },
-  'awaiting-approval': { label: 'Needs Review', color: 'text-orange-400', dot: 'bg-orange-400 animate-pulse' },
-  executing: { label: 'Executing', color: 'text-blue-400', dot: 'bg-blue-400 animate-pulse' },
-  reviewing: { label: 'Reviewing', color: 'text-sky-400', dot: 'bg-sky-400 animate-pulse' },
-  testing: { label: 'Testing', color: 'text-pink-400', dot: 'bg-pink-400 animate-pulse' },
-  integrating: { label: 'Integrating', color: 'text-amber-400', dot: 'bg-amber-400 animate-pulse' },
-  complete: { label: 'Complete', color: 'text-green-400', dot: 'bg-green-400' },
-  failed: { label: 'Failed', color: 'text-red-400', dot: 'bg-red-500' },
+const statusConfig: Record<ProjectStatus, { color: string; dot: string }> = {
+  idle: { color: 'text-gray-400', dot: 'bg-gray-500' },
+  debating: { color: 'text-yellow-400', dot: 'bg-yellow-400 animate-pulse' },
+  'awaiting-approval': { color: 'text-orange-400', dot: 'bg-orange-400 animate-pulse' },
+  executing: { color: 'text-blue-400', dot: 'bg-blue-400 animate-pulse' },
+  reviewing: { color: 'text-sky-400', dot: 'bg-sky-400 animate-pulse' },
+  testing: { color: 'text-pink-400', dot: 'bg-pink-400 animate-pulse' },
+  integrating: { color: 'text-amber-400', dot: 'bg-amber-400 animate-pulse' },
+  complete: { color: 'text-green-400', dot: 'bg-green-400' },
+  failed: { color: 'text-red-400', dot: 'bg-red-500' },
 };
 
 interface NewProjectFormProps {
-  onSubmit: (name: string, description: string) => void;
+  onSubmit: (
+    name: string,
+    description: string,
+    projectLanguage: AppLanguage,
+    outputType: OutputType,
+    simulationMode: boolean,
+    debateRounds: number,
+    debateMode: DebateMode,
+    maxWordsPerAgent: number
+  ) => void;
   onCancel: () => void;
+  t: ReturnType<typeof useApp>['t'];
+  defaultLanguage: AppLanguage;
 }
 
-function NewProjectForm({ onSubmit, onCancel }: NewProjectFormProps) {
+function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFormProps) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [projectLanguage, setProjectLanguage] = useState<AppLanguage>(defaultLanguage);
+  const [outputType, setOutputType] = useState<OutputType>('other');
+  const [simulationMode, setSimulationMode] = useState(true);
+  const [debateRounds, setDebateRounds] = useState(3);
+  const [debateMode, setDebateMode] = useState<DebateMode>('auto');
+  const [maxWordsPerAgent, setMaxWordsPerAgent] = useState(180);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (name.trim()) {
-      onSubmit(name.trim(), description.trim());
+    if (name.trim() && description.trim()) {
+      onSubmit(
+        name.trim(),
+        description.trim(),
+        projectLanguage,
+        outputType,
+        simulationMode,
+        debateRounds,
+        debateMode,
+        maxWordsPerAgent
+      );
     }
   };
 
   return (
     <form onSubmit={handleSubmit} className="mx-3 mb-3 bg-gray-900 rounded-lg border border-gray-700 p-3">
-      <p className="text-xs font-semibold text-gray-300 mb-2">New Project</p>
+      <p className="text-xs font-semibold text-gray-100 mb-2">{t('projectForm.title')}</p>
       <input
         type="text"
-        placeholder="Project name"
+        placeholder={t('projectForm.name')}
         value={name}
         onChange={(e) => setName(e.target.value)}
         autoFocus
-        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600 mb-2"
+        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
       />
       <textarea
-        placeholder="Description (optional)"
+        placeholder={t('projectForm.prompt')}
         value={description}
         onChange={(e) => setDescription(e.target.value)}
-        rows={2}
-        className="w-full resize-none bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600 mb-2"
+        rows={3}
+        className="w-full resize-none bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
+      />
+      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.language')}</label>
+      <select
+        value={projectLanguage}
+        onChange={(e) => setProjectLanguage(e.target.value as AppLanguage)}
+        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
+      >
+        <option value="en">{t('lang.en')}</option>
+        <option value="cz">{t('lang.cz')}</option>
+      </select>
+      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.outputType')}</label>
+      <select
+        value={outputType}
+        onChange={(e) => setOutputType(e.target.value as OutputType)}
+        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
+      >
+        <option value="app">{t('outputType.app')}</option>
+        <option value="website">{t('outputType.website')}</option>
+        <option value="document">{t('outputType.document')}</option>
+        <option value="plan">{t('outputType.plan')}</option>
+        <option value="other">{t('outputType.other')}</option>
+      </select>
+      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.simulationMode')}</label>
+      <div className="mb-2 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={() => setSimulationMode(true)}
+          className={`rounded px-2 py-1.5 text-xs border transition-colors ${
+            simulationMode
+              ? 'bg-emerald-900/60 text-emerald-200 border-emerald-700/60'
+              : 'bg-gray-800 text-gray-300 border-gray-600'
+          }`}
+        >
+          {t('projectForm.simulationOn')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setSimulationMode(false)}
+          className={`rounded px-2 py-1.5 text-xs border transition-colors ${
+            !simulationMode
+              ? 'bg-blue-900/60 text-blue-200 border-blue-700/60'
+              : 'bg-gray-800 text-gray-300 border-gray-600'
+          }`}
+        >
+          {t('projectForm.simulationOff')}
+        </button>
+      </div>
+      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.debateRounds')}</label>
+      <select
+        value={debateRounds}
+        onChange={(e) => setDebateRounds(Number(e.target.value))}
+        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
+      >
+        <option value={1}>1</option>
+        <option value={2}>2</option>
+        <option value={3}>3</option>
+      </select>
+      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.debateMode')}</label>
+      <select
+        value={debateMode}
+        onChange={(e) => setDebateMode(e.target.value as DebateMode)}
+        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
+      >
+        <option value="auto">{t('projectForm.debateModeAuto')}</option>
+        <option value="interactive">{t('projectForm.debateModeInteractive')}</option>
+      </select>
+      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.maxWordsPerAgent')}</label>
+      <input
+        type="number"
+        min={140}
+        max={220}
+        step={10}
+        value={maxWordsPerAgent}
+        onChange={(e) => {
+          const next = Number(e.target.value);
+          if (Number.isNaN(next)) return;
+          setMaxWordsPerAgent(Math.max(140, Math.min(220, next)));
+        }}
+        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-2"
       />
       <div className="flex gap-2">
         <button
           type="submit"
-          disabled={!name.trim()}
-          className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-medium rounded transition-colors"
+          disabled={!name.trim() || !description.trim()}
+          className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-80 text-white text-xs font-medium rounded transition-colors"
         >
-          Create
+          {t('projectForm.create')}
         </button>
         <button
           type="button"
           onClick={onCancel}
           className="flex-1 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded transition-colors"
         >
-          Cancel
+          {t('projectForm.cancel')}
         </button>
       </div>
     </form>
@@ -71,11 +176,59 @@ function NewProjectForm({ onSubmit, onCancel }: NewProjectFormProps) {
 }
 
 export function ProjectSidebar() {
-  const { state, createProject, selectProject, runDemo } = useApp();
+  const {
+    state,
+    createProject,
+    selectProject,
+    runDemo,
+    language,
+    setLanguage,
+    t,
+    setProjectSimulationMode,
+  } = useApp();
   const [showForm, setShowForm] = useState(false);
+  const [buildInfo, setBuildInfo] = useState<{ branch: string; commit: string } | null>(null);
+  const activeProject = state.activeProject;
 
-  const handleCreate = (name: string, description: string) => {
-    createProject(name, description);
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/build-info')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!isMounted || !data) return;
+        if (typeof data.branch === 'string' && typeof data.commit === 'string') {
+          setBuildInfo({ branch: data.branch, commit: data.commit });
+        }
+      })
+      .catch(() => {
+        // Keep footer hidden if build info is unavailable.
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const handleCreate = (
+    name: string,
+    description: string,
+    projectLanguage: AppLanguage,
+    outputType: OutputType,
+    simulationMode: boolean,
+    debateRounds: number,
+    debateMode: DebateMode,
+    maxWordsPerAgent: number
+  ) => {
+    createProject(
+      name,
+      description,
+      projectLanguage,
+      outputType,
+      simulationMode,
+      debateRounds,
+      debateMode,
+      maxWordsPerAgent
+    );
     setShowForm(false);
   };
 
@@ -88,19 +241,41 @@ export function ProjectSidebar() {
             <span className="text-white text-xs font-bold">AI</span>
           </div>
           <h1 className="text-sm font-bold text-gray-100">AI Boardroom</h1>
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => setLanguage('en')}
+              className={`px-1.5 py-0.5 text-[10px] rounded border transition-colors ${
+                language === 'en'
+                  ? 'bg-blue-700/60 border-blue-500 text-blue-100'
+                  : 'bg-gray-900 border-gray-700 text-gray-300 hover:text-gray-100'
+              }`}
+            >
+              {t('lang.en')}
+            </button>
+            <button
+              onClick={() => setLanguage('cz')}
+              className={`px-1.5 py-0.5 text-[10px] rounded border transition-colors ${
+                language === 'cz'
+                  ? 'bg-blue-700/60 border-blue-500 text-blue-100'
+                  : 'bg-gray-900 border-gray-700 text-gray-300 hover:text-gray-100'
+              }`}
+            >
+              {t('lang.cz')}
+            </button>
+          </div>
         </div>
-        <p className="text-[10px] text-gray-500">Multi-agent orchestration</p>
+        <p className="text-[10px] text-gray-400">{t('sidebar.subtitle')}</p>
       </div>
 
       {/* Projects label + new button */}
       <div className="flex-shrink-0 flex items-center justify-between px-3 py-2">
-        <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">
-          Projects
+        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+          {t('sidebar.projects')}
         </span>
         <button
           onClick={() => setShowForm(true)}
-          title="New project"
-          className="w-5 h-5 rounded flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors text-sm"
+          title={t('sidebar.newProject')}
+          className="w-5 h-5 rounded flex items-center justify-center text-gray-300 hover:text-gray-100 hover:bg-gray-800 transition-colors text-sm"
         >
           +
         </button>
@@ -111,6 +286,8 @@ export function ProjectSidebar() {
         <NewProjectForm
           onSubmit={handleCreate}
           onCancel={() => setShowForm(false)}
+          t={t}
+          defaultLanguage={language}
         />
       )}
 
@@ -118,12 +295,12 @@ export function ProjectSidebar() {
       <div className="flex-1 overflow-y-auto">
         {state.projects.length === 0 ? (
           <div className="px-4 py-6 text-center">
-            <p className="text-xs text-gray-600 mb-3">No projects yet</p>
+            <p className="text-xs text-gray-400 mb-3">{t('sidebar.noProjects')}</p>
             <button
               onClick={() => setShowForm(true)}
               className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white text-xs rounded-lg transition-colors"
             >
-              Create first project
+              {t('sidebar.createFirst')}
             </button>
           </div>
         ) : (
@@ -131,6 +308,7 @@ export function ProjectSidebar() {
             {state.projects.map((project) => {
               const isSelected = project.id === state.selectedProjectId;
               const sCfg = statusConfig[project.status];
+              const statusLabel = t(`status.project.${project.status}` as const);
               return (
                 <button
                   key={project.id}
@@ -151,7 +329,21 @@ export function ProjectSidebar() {
                       >
                         {project.name}
                       </p>
-                      <p className={`text-[10px] mt-0.5 ${sCfg.color}`}>{sCfg.label}</p>
+                      <p className={`text-[10px] mt-0.5 ${sCfg.color}`}>{statusLabel}</p>
+                      <div className="mt-1 flex items-center gap-1">
+                        <span className="text-[9px] px-1.5 py-0.5 rounded border border-gray-700 bg-gray-900 text-gray-300">
+                          {project.language.toUpperCase()}
+                        </span>
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded border ${
+                            project.simulationMode
+                              ? 'border-emerald-700/60 bg-emerald-900/40 text-emerald-200'
+                              : 'border-blue-700/60 bg-blue-900/40 text-blue-200'
+                          }`}
+                        >
+                          {project.simulationMode ? t('projectForm.simulationOn') : t('projectForm.simulationOff')}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </button>
@@ -163,13 +355,37 @@ export function ProjectSidebar() {
 
       {/* Demo button */}
       <div className="flex-shrink-0 p-3 border-t border-gray-800">
+        {activeProject && (
+          <label className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-gray-700 bg-gray-900/80 px-3 py-2">
+            <div>
+              <p className="text-[11px] font-medium text-gray-200">{t('sidebar.simulationMode')}</p>
+              <p className="text-[10px] text-gray-400">{t('sidebar.simulationModeHint')}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setProjectSimulationMode(activeProject.id, !activeProject.simulationMode)}
+              className={`rounded-full px-2 py-1 text-[10px] font-semibold transition-colors ${
+                activeProject.simulationMode
+                  ? 'bg-emerald-900/60 text-emerald-200 border border-emerald-700/60'
+                  : 'bg-gray-800 text-gray-200 border border-gray-600'
+              }`}
+            >
+              {activeProject.simulationMode ? t('projectForm.simulationOn') : t('projectForm.simulationOff')}
+            </button>
+          </label>
+        )}
         <button
           onClick={runDemo}
           className="w-full px-3 py-2 bg-purple-800/40 hover:bg-purple-700/50 border border-purple-700/40 text-purple-300 text-xs font-medium rounded-lg transition-colors"
         >
-          ▶ Run Demo
+          ▶ {t('sidebar.runDemo')}
         </button>
-        <p className="text-[10px] text-gray-600 text-center mt-1">Simulate a workflow</p>
+        <p className="text-[10px] text-gray-400 text-center mt-1">{t('sidebar.simulateWorkflow')}</p>
+        {buildInfo && (
+          <p className="text-[9px] text-gray-500 text-center mt-2">
+            {buildInfo.branch} {buildInfo.commit}
+          </p>
+        )}
       </div>
     </div>
   );

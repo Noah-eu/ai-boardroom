@@ -1,4 +1,6 @@
-export type Language = 'en' | 'cz';
+import { AppLanguage } from '@/types';
+
+export type Language = AppLanguage;
 
 const translations = {
   en: {
