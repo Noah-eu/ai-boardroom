@@ -43,18 +43,23 @@ function formatTimestamp(date: Date): string {
   });
 }
 
-export function ExecutionLog() {
+interface ExecutionLogProps {
+  mode?: 'desktop' | 'mobile';
+}
+
+export function ExecutionLog({ mode = 'desktop' }: ExecutionLogProps) {
   const { state, language } = useApp();
   const projectLanguage = state.activeProject?.language ?? language;
   const t = (key: Parameters<typeof translate>[1]) => translate(projectLanguage, key);
   const endRef = useRef<HTMLDivElement>(null);
+  const isMobile = mode === 'mobile';
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [state.executionLog]);
 
   return (
-    <div className="h-full flex flex-col bg-gray-950 border-t border-gray-800">
+    <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-t border-gray-800'}`}>
       {/* Header */}
       <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-900/70">
         <div className="flex items-center gap-1.5">

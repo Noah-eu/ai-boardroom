@@ -241,7 +241,11 @@ function ApprovalActions({ onApprove, t }: ApprovalActionsProps) {
   );
 }
 
-export function ChatPanel() {
+interface ChatPanelProps {
+  mode?: 'desktop' | 'mobile';
+}
+
+export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
   const {
     state,
     approvePlan,
@@ -267,6 +271,7 @@ export function ChatPanel() {
   const zipInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const locale = language === 'cz' ? 'cs-CZ' : 'en-US';
+  const isMobile = mode === 'mobile';
 
   const activeProject = state.activeProject;
   const messages = activeProject?.messages ?? [];
@@ -461,10 +466,10 @@ export function ChatPanel() {
 
   if (!activeProject) {
     return (
-      <div className="h-full flex flex-col items-center justify-center bg-gray-950 text-center px-8">
+      <div className={`h-full flex flex-col items-center justify-center bg-gray-950 text-center ${isMobile ? 'px-5 py-8' : 'px-8'}`}>
         <div className="text-4xl mb-4">🤖</div>
         <h3 className="text-base font-semibold text-gray-200 mb-2">{t('chat.noProjectTitle')}</h3>
-        <p className="text-sm text-gray-400 max-w-xs">
+        <p className={`text-gray-400 ${isMobile ? 'max-w-sm text-sm leading-relaxed' : 'max-w-xs text-sm'}`}>
           {t('chat.noProjectDesc')}
         </p>
       </div>
@@ -474,6 +479,7 @@ export function ChatPanel() {
   return (
     <div className="h-full flex flex-col bg-gray-950">
       {/* Header */}
+      {!isMobile && (
       <div className="flex-shrink-0 px-4 py-3 border-b border-gray-800">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -484,13 +490,14 @@ export function ChatPanel() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-2 space-y-0.5">
+      <div className={`flex-1 overflow-y-auto space-y-0.5 ${isMobile ? 'px-3 py-3' : 'px-4 py-2'}`}>
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <div className="text-3xl mb-3">💬</div>
-            <p className="text-sm text-gray-400">
+            <p className={`text-gray-400 ${isMobile ? 'max-w-sm text-sm leading-relaxed' : 'text-sm'}`}>
               {t('chat.emptyPrompt')}
             </p>
           </div>
@@ -519,7 +526,10 @@ export function ChatPanel() {
       )}
 
       {/* Input */}
-      <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
+      <div
+        className={`flex-shrink-0 border-t border-gray-800 ${isMobile ? 'bg-gray-950/95 px-3 pt-3 backdrop-blur' : 'px-4 py-3'}`}
+        style={isMobile ? { paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' } : undefined}
+      >
         <div className="mb-2 flex items-center justify-between rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[11px] text-gray-300">
           <span className="font-medium">
             {t('chat.modeNormal')}
@@ -553,87 +563,89 @@ export function ChatPanel() {
           </div>
         )}
 
-        <div className="flex gap-2">
-          <div className="relative self-end">
-            <button
-              type="button"
-              onClick={() => setShowAttachmentMenu((previous) => !previous)}
-              className="h-10 w-10 rounded-lg border border-gray-700 bg-gray-900 text-lg text-gray-200 hover:border-blue-600/60"
-              title={t('attachments.menuOpen')}
-            >
-              +
-            </button>
+        <div className={isMobile ? 'space-y-2' : 'flex gap-2'}>
+          <div className={isMobile ? 'flex gap-2' : 'contents'}>
+            <div className="relative self-end">
+              <button
+                type="button"
+                onClick={() => setShowAttachmentMenu((previous) => !previous)}
+                className={`${isMobile ? 'h-11 w-11 text-xl' : 'h-10 w-10 text-lg'} rounded-lg border border-gray-700 bg-gray-900 text-gray-200 hover:border-blue-600/60`}
+                title={t('attachments.menuOpen')}
+              >
+                +
+              </button>
 
-            {showAttachmentMenu && (
-              <div className="absolute bottom-12 left-0 z-20 w-36 rounded-lg border border-gray-700 bg-gray-950 p-1.5 shadow-xl">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
-                >
-                  {t('attachments.option.file')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => photoInputRef.current?.click()}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
-                >
-                  {t('attachments.option.photo')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => pdfInputRef.current?.click()}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
-                >
-                  {t('attachments.option.pdf')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => zipInputRef.current?.click()}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
-                >
-                  {t('attachments.option.zip')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowLinkInput((previous) => !previous)}
-                  className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-900"
-                >
-                  {t('attachments.option.link')}
-                </button>
-              </div>
-            )}
+              {showAttachmentMenu && (
+                <div className={`absolute left-0 z-20 rounded-lg border border-gray-700 bg-gray-950 p-1.5 shadow-xl ${isMobile ? 'bottom-14 w-44' : 'bottom-12 w-36'}`}>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full rounded px-2 py-2 text-left text-xs text-gray-200 hover:bg-gray-900"
+                  >
+                    {t('attachments.option.file')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => photoInputRef.current?.click()}
+                    className="w-full rounded px-2 py-2 text-left text-xs text-gray-200 hover:bg-gray-900"
+                  >
+                    {t('attachments.option.photo')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => pdfInputRef.current?.click()}
+                    className="w-full rounded px-2 py-2 text-left text-xs text-gray-200 hover:bg-gray-900"
+                  >
+                    {t('attachments.option.pdf')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => zipInputRef.current?.click()}
+                    className="w-full rounded px-2 py-2 text-left text-xs text-gray-200 hover:bg-gray-900"
+                  >
+                    {t('attachments.option.zip')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowLinkInput((previous) => !previous)}
+                    className="w-full rounded px-2 py-2 text-left text-xs text-gray-200 hover:bg-gray-900"
+                  >
+                    {t('attachments.option.link')}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <textarea
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                isAwaitingApproval
+                  ? t('chat.revisionFeedbackPlaceholder')
+                  : state.currentPhase === 'idle'
+                  ? t('chat.placeholderStart')
+                  : t('chat.placeholderMessage')
+              }
+              rows={isMobile ? 3 : 2}
+              className={`flex-1 resize-none rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
+                isAwaitingApproval
+                  ? 'bg-orange-950/30 border border-orange-600/50 focus:border-orange-500 focus:ring-orange-500/30'
+                  : 'bg-gray-900 border border-gray-600 focus:border-blue-500 focus:ring-blue-500/30'
+              } ${isMobile ? 'min-h-[88px]' : ''}`}
+            />
           </div>
-
-          <textarea
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              isAwaitingApproval
-                ? t('chat.revisionFeedbackPlaceholder')
-                : state.currentPhase === 'idle'
-                ? t('chat.placeholderStart')
-                : t('chat.placeholderMessage')
-            }
-            rows={2}
-            className={`flex-1 resize-none rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
-              isAwaitingApproval
-                ? 'bg-orange-950/30 border border-orange-600/50 focus:border-orange-500 focus:ring-orange-500/30'
-                : 'bg-gray-900 border border-gray-600 focus:border-blue-500 focus:ring-blue-500/30'
-            }`}
-          />
           <button
             onClick={() => void handleSend()}
             disabled={(isAwaitingApproval ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors self-end"
+            className={`${isMobile ? 'min-h-11 w-full' : 'self-end px-4'} rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90`}
           >
             {isSending ? t('attachments.sending') : t('chat.send')}
           </button>
         </div>
 
         {showLinkInput && (
-          <div className="mt-2 flex gap-2">
+          <div className={`mt-2 ${isMobile ? 'space-y-2' : 'flex gap-2'}`}>
             <input
               value={linkValue}
               onChange={(event) => setLinkValue(event.target.value)}
@@ -644,7 +656,7 @@ export function ChatPanel() {
               type="button"
               onClick={handleAddLink}
               disabled={!linkValue.trim()}
-              className="rounded border border-blue-700/60 bg-blue-900/40 px-2 py-1.5 text-xs text-blue-100 disabled:opacity-50"
+              className={`${isMobile ? 'min-h-11 w-full' : ''} rounded border border-blue-700/60 bg-blue-900/40 px-2 py-1.5 text-xs text-blue-100 disabled:opacity-50`}
             >
               {t('attachments.addLink')}
             </button>

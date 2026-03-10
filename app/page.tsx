@@ -7,19 +7,13 @@ import { AgentsPanel } from '@/components/agents/AgentsPanel';
 import { ExecutionLog } from '@/components/layout/ExecutionLog';
 import { PreviewPanel } from '@/components/layout/PreviewPanel';
 import { TopStatusBar } from '@/components/layout/TopStatusBar';
-import { useApp } from '@/context/AppContext';
-
-type MobileTab = 'chat' | 'agents' | 'log' | 'preview' | 'projects';
+import { MobileShell } from '@/components/mobile/MobileShell';
 
 export default function DashboardPage() {
   const MIN_TOP_HEIGHT = 260;
   const MIN_BOTTOM_HEIGHT = 170;
-  const { state, language, setLanguage, setProjectDebateRounds, t } = useApp();
   const [bottomHeight, setBottomHeight] = useState(192);
   const [isResizing, setIsResizing] = useState(false);
-  const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>('chat');
-  const [showMobileSettings, setShowMobileSettings] = useState(false);
-  const activeProject = state.activeProject;
 
   useEffect(() => {
     if (!isResizing) return;
@@ -93,114 +87,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Mobile dashboard with single active panel */}
-      <div className="flex h-full flex-col lg:hidden">
-        <header className="flex min-h-14 items-center justify-between border-b border-gray-800 px-4 py-2">
-          <h1 className="text-base font-semibold text-gray-100">AI Boardroom</h1>
-          <button
-            type="button"
-            onClick={() => setShowMobileSettings((value) => !value)}
-            className="min-h-11 rounded-lg border border-gray-700 bg-gray-900 px-3 text-sm font-medium text-gray-200"
-          >
-            {t('preview.more')}
-          </button>
-        </header>
-
-        <TopStatusBar />
-
-        {showMobileSettings && (
-          <div className="border-b border-gray-800 bg-gray-900/80 px-4 py-3">
-            <div className="grid gap-3">
-              <div>
-                <p className="mb-1 text-xs text-gray-300">{t('projectForm.language')}</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setLanguage('en')}
-                    className={`min-h-11 rounded-lg border text-sm ${
-                      language === 'en'
-                        ? 'border-blue-600 bg-blue-900/40 text-blue-200'
-                        : 'border-gray-700 bg-gray-950 text-gray-200'
-                    }`}
-                  >
-                    {t('lang.en')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLanguage('cz')}
-                    className={`min-h-11 rounded-lg border text-sm ${
-                      language === 'cz'
-                        ? 'border-blue-600 bg-blue-900/40 text-blue-200'
-                        : 'border-gray-700 bg-gray-950 text-gray-200'
-                    }`}
-                  >
-                    {t('lang.cz')}
-                  </button>
-                </div>
-              </div>
-
-              {activeProject && (
-                <>
-                  <div>
-                    <p className="mb-1 text-xs text-gray-300">{t('projectForm.debateRounds')}</p>
-                    <div className="grid grid-cols-3 gap-2">
-                      {[1, 2, 3].map((round) => (
-                        <button
-                          key={round}
-                          type="button"
-                          onClick={() => setProjectDebateRounds(activeProject.id, round)}
-                          className={`min-h-11 rounded-lg border text-sm ${
-                            activeProject.debateRounds === round
-                              ? 'border-blue-600 bg-blue-900/40 text-blue-200'
-                              : 'border-gray-700 bg-gray-950 text-gray-200'
-                          }`}
-                        >
-                          {round}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-
-        <main className="min-h-0 flex-1 overflow-hidden pb-16">
-          {activeMobileTab === 'chat' && <ChatPanel />}
-          {activeMobileTab === 'agents' && <AgentsPanel />}
-          {activeMobileTab === 'log' && <ExecutionLog />}
-          {activeMobileTab === 'preview' && <PreviewPanel />}
-          {activeMobileTab === 'projects' && <ProjectSidebar />}
-        </main>
-
-        <nav className="absolute inset-x-0 bottom-0 border-t border-gray-800 bg-gray-950/95 backdrop-blur">
-          <div className="grid grid-cols-5 gap-1 px-2 py-2">
-            {[
-              { id: 'chat', label: 'Chat' },
-              { id: 'agents', label: 'Agents' },
-              { id: 'log', label: 'Log' },
-              { id: 'preview', label: 'Preview' },
-              { id: 'projects', label: 'Projects' },
-            ].map((tab) => {
-              const isActive = activeMobileTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setActiveMobileTab(tab.id as MobileTab)}
-                  className={`min-h-11 rounded-lg text-xs font-medium transition-colors ${
-                    isActive
-                      ? 'bg-blue-900/50 text-blue-200 border border-blue-700/60'
-                      : 'text-gray-300 border border-transparent hover:bg-gray-900'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
-        </nav>
-      </div>
+      <MobileShell />
     </div>
   );
 }

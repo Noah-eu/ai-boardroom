@@ -16,9 +16,14 @@ const phaseOrder: WorkflowPhase[] = [
   'complete',
 ];
 
-export function AgentsPanel() {
+interface AgentsPanelProps {
+  mode?: 'desktop' | 'mobile';
+}
+
+export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
   const { state, t } = useApp();
   const { agents, currentPhase } = state;
+  const isMobile = mode === 'mobile';
   const tasks = useMemo(
     () => state.activeProject?.taskGraph?.tasks ?? state.activeProject?.tasks ?? [],
     [state.activeProject]
@@ -55,7 +60,7 @@ export function AgentsPanel() {
   };
 
   return (
-    <div className="h-full flex flex-col bg-gray-950 border-l border-gray-800">
+    <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-l border-gray-800'}`}>
       {/* Header */}
       <div className="flex-shrink-0 px-4 py-3 border-b border-gray-800">
         <h2 className="text-sm font-semibold text-gray-100">{t('agents.title')}</h2>

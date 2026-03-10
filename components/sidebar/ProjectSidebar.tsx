@@ -325,7 +325,12 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
   );
 }
 
-export function ProjectSidebar() {
+interface ProjectSidebarProps {
+  mode?: 'desktop' | 'mobile';
+  onProjectActivated?: () => void;
+}
+
+export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: ProjectSidebarProps) {
   const {
     state,
     createProject,
@@ -339,6 +344,7 @@ export function ProjectSidebar() {
   } = useApp();
   const [showForm, setShowForm] = useState(false);
   const [buildInfo, setBuildInfo] = useState<{ branch: string; commit: string } | null>(null);
+  const isMobile = mode === 'mobile';
 
   useEffect(() => {
     let isMounted = true;
@@ -453,11 +459,13 @@ export function ProjectSidebar() {
     addLog('pending attachment upload success', 'success');
     addLog('debate start allowed', 'info');
     startDebate(description, projectId);
+    onProjectActivated?.();
   };
 
   return (
-    <div className="h-full flex flex-col bg-gray-950 border-r border-gray-800">
+    <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-r border-gray-800'}`}>
       {/* Header */}
+      {!isMobile && (
       <div className="flex-shrink-0 px-4 py-4 border-b border-gray-800">
         <div className="flex items-center gap-2 mb-1">
           <div className="w-6 h-6 bg-blue-600 rounded flex items-center justify-center">
@@ -489,16 +497,17 @@ export function ProjectSidebar() {
         </div>
         <p className="text-[10px] text-gray-400">{t('sidebar.subtitle')}</p>
       </div>
+      )}
 
       {/* Projects label + new button */}
-      <div className="flex-shrink-0 flex items-center justify-between px-3 py-2">
+      <div className={`flex-shrink-0 flex items-center justify-between ${isMobile ? 'px-4 py-3 border-b border-gray-800' : 'px-3 py-2'}`}>
         <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
           {t('sidebar.projects')}
         </span>
         <button
           onClick={() => setShowForm(true)}
           title={t('sidebar.newProject')}
-          className="w-5 h-5 rounded flex items-center justify-center text-gray-300 hover:text-gray-100 hover:bg-gray-800 transition-colors text-sm"
+          className={`${isMobile ? 'min-h-10 min-w-10 rounded-lg border border-gray-700 bg-gray-900 text-base' : 'w-5 h-5 rounded text-sm'} flex items-center justify-center text-gray-300 transition-colors hover:bg-gray-800 hover:text-gray-100`}
         >
           +
         </button>
@@ -535,8 +544,11 @@ export function ProjectSidebar() {
               return (
                 <button
                   key={project.id}
-                  onClick={() => selectProject(project.id)}
-                  className={`w-full text-left px-3 py-2.5 transition-colors ${
+                  onClick={() => {
+                    selectProject(project.id);
+                    onProjectActivated?.();
+                  }}
+                  className={`w-full text-left transition-colors ${isMobile ? 'px-4 py-3.5' : 'px-3 py-2.5'} ${
                     isSelected
                       ? 'bg-blue-600/20 border-r-2 border-blue-500'
                       : 'hover:bg-gray-800/60'
@@ -567,7 +579,10 @@ export function ProjectSidebar() {
         )}
       </div>
 
-      <div className="flex-shrink-0 p-3 border-t border-gray-800">
+      <div
+        className={`flex-shrink-0 border-t border-gray-800 p-3 ${isMobile ? 'pb-5' : ''}`}
+        style={isMobile ? { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' } : undefined}
+      >
         {buildInfo && (
           <p className="text-[9px] text-gray-500 text-center mt-2">
             {buildInfo.branch} {buildInfo.commit}

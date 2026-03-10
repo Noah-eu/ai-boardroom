@@ -131,7 +131,11 @@ function buildAttachmentStatusChips(
   return chips;
 }
 
-export function PreviewPanel() {
+interface PreviewPanelProps {
+  mode?: 'desktop' | 'mobile';
+}
+
+export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   const {
     state,
     language,
@@ -158,6 +162,7 @@ export function PreviewPanel() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const executionTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
+  const isMobile = mode === 'mobile';
 
   const tasks = useMemo(() => project?.taskGraph?.tasks ?? project?.tasks ?? [], [project]);
   const hasArtifacts = tasks.some((task) => task.producesArtifacts.length > 0);
@@ -292,7 +297,7 @@ export function PreviewPanel() {
 
   if (!project) {
     return (
-      <div className="h-full flex flex-col items-center justify-center bg-gray-950 border-t border-gray-800 text-center px-6">
+      <div className={`h-full flex flex-col items-center justify-center bg-gray-950 text-center px-6 ${isMobile ? '' : 'border-t border-gray-800'}`}>
         <div className="text-2xl mb-2">🖼</div>
         <p className="text-xs text-gray-400">{t('preview.empty')}</p>
       </div>
@@ -300,7 +305,7 @@ export function PreviewPanel() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-gray-950 border-t border-gray-800">
+    <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-t border-gray-800'}`}>
       {/* Header */}
       <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2 border-b border-gray-800">
         <h3 className="text-xs font-semibold text-gray-100">{t('preview.title')}</h3>
@@ -456,7 +461,10 @@ export function PreviewPanel() {
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto px-4 py-3">
+      <div
+        className={`flex-1 overflow-y-auto ${isMobile ? 'px-3 py-3' : 'px-4 py-3'}`}
+        style={isMobile ? { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' } : undefined}
+      >
         {schedulerState.deadlock && !isComplete && (
           <div className="mb-3 rounded-lg border border-red-700/60 bg-red-950/30 px-3 py-3">
             <div className="flex items-center gap-2">
