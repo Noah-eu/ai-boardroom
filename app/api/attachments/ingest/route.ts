@@ -87,6 +87,7 @@ async function extractPdfText(buffer: Buffer): Promise<{ pageCount: number; text
 }
 
 async function ingestUrl(sourceUrl: string): Promise<IngestPayload> {
+  console.info(`[attachments/ingest] URL fetch started: ${sourceUrl}`);
   const response = await fetch(sourceUrl, {
     headers: {
       'User-Agent': 'AI-Boardroom-Ingest/1.0',
@@ -95,14 +96,22 @@ async function ingestUrl(sourceUrl: string): Promise<IngestPayload> {
   });
 
   if (!response.ok) {
+    console.error(`[attachments/ingest] URL fetch failed: ${sourceUrl} (HTTP ${response.status})`);
     throw new Error(`URL fetch failed (${response.status})`);
   }
 
   const html = await response.text();
   const $ = loadHtml(html);
   $('script,style,noscript').remove();
-  const title = $('title').first().text().trim() || $('h1').first().text().trim() || sourceUrl;
+  const title =
+    $('title').first().text().trim() ||
+    $('meta[property="og:title"]').attr('content')?.trim() ||
+    $('h1').first().text().trim() ||
+    sourceUrl;
   const text = trimText($('body').text());
+
+  console.info(`[attachments/ingest] URL fetch success: ${sourceUrl}`);
+  console.info(`[attachments/ingest] Readable text extracted: ${text.length} chars`);
 
   return {
     status: 'parsed',

@@ -395,14 +395,24 @@ export function PreviewPanel() {
                         )}
 
                         {attachment.kind === 'url' && attachment.downloadUrl && (
-                          <a
-                            href={attachment.downloadUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mt-1 inline-flex text-[10px] text-blue-300 underline"
-                          >
-                            {attachment.downloadUrl}
-                          </a>
+                          <div className="mt-1 space-y-1 rounded border border-gray-800 bg-black/20 px-1.5 py-1">
+                            <p className="text-[10px] text-gray-300">
+                              {attachment.ingestion?.pageTitle ?? attachment.title}
+                            </p>
+                            <a
+                              href={attachment.sourceUrl ?? attachment.downloadUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex text-[10px] text-blue-300 underline break-all"
+                            >
+                              {attachment.sourceUrl ?? attachment.downloadUrl}
+                            </a>
+                            <p className="text-[10px] text-gray-500">
+                              {attachment.ingestion?.extractedText
+                                ? `Parsed content ready (${attachment.ingestion.extractedText.length} chars)`
+                                : 'Parsed content pending'}
+                            </p>
+                          </div>
                         )}
 
                         {(attachment.kind === 'pdf' || attachment.kind === 'zip' || attachment.kind === 'file') &&

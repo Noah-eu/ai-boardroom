@@ -276,6 +276,17 @@ function detectFileKind(file: File): ProjectAttachmentKind {
   return 'file';
 }
 
+function normalizeUserUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `https://${trimmed}`;
+}
+
 function normalizeAiImageUrl(value?: string): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -2342,6 +2353,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
+        if (attachment.kind === 'url') {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            message: `URL fetch started: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
+          });
+        }
+
         const response = await fetch('/api/attachments/ingest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2354,43 +2373,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }),
         });
 
-        const contentType = response.headers.get('content-type') || 'unknown';
-        const rawBody = await response.text();
-        const preview = rawBody.slice(0, 200);
-        const isHtml = contentType.toLowerCase().includes('text/html') || rawBody.startsWith('<!DOCTYPE');
-
-        if (isHtml) {
-          const htmlError =
-            `PDF ingest endpoint returned HTML instead of JSON. ` +
-            `status=${response.status}; content-type=${contentType}; first200=${preview}`;
-          console.error(`[ingest-attachment] ${htmlError}`);
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'error',
-            message: htmlError,
-          });
-          throw new Error(htmlError);
-        }
-
-        let body: { ingest?: AttachmentIngestion; error?: string };
-        try {
-          body = JSON.parse(rawBody) as { ingest?: AttachmentIngestion; error?: string };
-        } catch (parseError) {
-          const errorMsg =
-            `Failed to parse JSON response from ingest endpoint. ` +
-            `status=${response.status}; content-type=${contentType}; first200=${preview}`;
-          console.error(`[ingest-attachment] ${errorMsg}`);
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'error',
-            message: errorMsg,
-          });
-          throw new Error(errorMsg);
-        }
-
+        const body = (await response.json()) as { ingest?: AttachmentIngestion; error?: string };
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
           throw new Error(body.error ?? 'Attachment ingestion failed');
+        }
+
+        if (attachment.kind === 'url') {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            message: `URL fetch success: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            message: `Readable text extracted: ${ingest.extractedText?.length ?? 0} chars`,
+          });
         }
 
         dispatch({
@@ -2464,6 +2463,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       } catch (error) {
         const detail = error instanceof Error ? error.message : 'Ingestion failed';
+        if (attachment.kind === 'url') {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: `URL fetch failure: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title} (${detail})`,
+          });
+        }
         dispatch({
           type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
           projectId,
@@ -2575,7 +2581,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
 
       if (attachment.kind === 'url') {
-        const normalizedUrl = attachment.url.trim();
+        const normalizedUrl = normalizeUserUrl(attachment.url);
+        if (!normalizedUrl) {
+          throw new Error('URL attachment is empty.');
+        }
+
         const title = normalizedUrl;
         const urlArtifact: ProjectAttachment = {
           id: artifactId,
@@ -2590,6 +2600,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           createdAt,
         };
 
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          message: `URL attachment added: ${normalizedUrl}`,
+        });
+
         const client = getFirebaseClient();
         if (client) {
           try {
@@ -2603,6 +2619,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               urlArtifact.firestoreCollection ?? 'attachments'
             );
             urlArtifact.firestoreCollection = savedCollection;
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'success',
+              message: `URL artifact persisted: projects/${projectId}/${savedCollection}/${artifactId}`,
+            });
           } catch (error) {
             const detail = error instanceof Error ? error.message : 'URL metadata save failed';
             dispatch({
@@ -2629,6 +2650,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
           throw error;
         }
+
         maybeQueueForNextRound(urlArtifact.id);
         await ingestAttachment(projectId, urlArtifact);
         return urlArtifact;
@@ -2998,6 +3020,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               type: 'ADD_LOG',
               level: 'info',
               message: snapshotLog,
+            });
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: `Round ${round} snapshot urls=${roundAttachmentCounts.urls}`,
             });
 
             roundAttachmentSnapshot.includedAttachmentIds.forEach((attachmentId) => {

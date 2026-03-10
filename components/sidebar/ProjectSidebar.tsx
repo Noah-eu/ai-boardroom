@@ -27,6 +27,17 @@ function formatSize(size?: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function normalizeUserUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `https://${trimmed}`;
+}
+
 interface NewProjectFormProps {
   onSubmit: (
     name: string,
@@ -65,6 +76,25 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (name.trim() && description.trim()) {
+      const normalizedPendingLink = normalizeUserUrl(linkValue);
+      const hasPendingLink = Boolean(normalizedPendingLink);
+      const pendingLinkAlreadyAdded = attachments.some(
+        (attachment) => attachment.kind === 'url' && attachment.url === normalizedPendingLink
+      );
+
+      const submissionAttachments =
+        hasPendingLink && !pendingLinkAlreadyAdded
+          ? [
+              ...attachments,
+              {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                kind: 'url' as const,
+                url: normalizedPendingLink,
+                title: normalizedPendingLink,
+              },
+            ]
+          : attachments;
+
       onSubmit(
         name.trim(),
         description.trim(),
@@ -74,7 +104,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
         debateRounds,
         debateMode,
         maxWordsPerAgent,
-        attachments
+        submissionAttachments
       );
     }
   };
@@ -97,7 +127,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
   };
 
   const addLinkAttachment = () => {
-    const normalizedUrl = linkValue.trim();
+    const normalizedUrl = normalizeUserUrl(linkValue);
     if (!normalizedUrl) return;
     const draft: FormDraftAttachment = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -372,7 +402,14 @@ export function ProjectSidebar() {
     setShowForm(false);
     addLog(`starting pending attachment upload for project id: ${projectId}`, 'info');
 
+    const pendingUrlCount = attachments.filter((attachment) => attachment.kind === 'url').length;
+    if (pendingUrlCount > 0) {
+      addLog(`pending project URL attachments detected: ${pendingUrlCount}`, 'info');
+    }
+
     let attachmentUploadFailed = false;
+    let uploadedCount = 0;
+    let uploadedUrlCount = 0;
     try {
       for (const attachment of attachments) {
         if (attachment.kind === 'url') {
@@ -381,6 +418,7 @@ export function ProjectSidebar() {
             url: attachment.url,
             source: 'project',
           });
+          uploadedUrlCount += 1;
         } else {
           await attachToProject(projectId, {
             kind: attachment.kind,
@@ -388,6 +426,7 @@ export function ProjectSidebar() {
             source: 'project',
           });
         }
+        uploadedCount += 1;
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Project attachment upload failed.';
@@ -397,6 +436,22 @@ export function ProjectSidebar() {
 
     if (attachmentUploadFailed) {
       addLog('Project debate not started because attachment upload/ingestion failed.', 'error');
+      return;
+    }
+
+    if (uploadedCount !== attachments.length) {
+      addLog(
+        `Attachment count mismatch before debate start (expected=${attachments.length}, uploaded=${uploadedCount}).`,
+        'error'
+      );
+      return;
+    }
+
+    if (pendingUrlCount !== uploadedUrlCount) {
+      addLog(
+        `URL attachment mismatch before debate start (expected=${pendingUrlCount}, uploaded=${uploadedUrlCount}).`,
+        'error'
+      );
       return;
     }
 

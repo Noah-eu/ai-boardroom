@@ -64,6 +64,17 @@ function formatSize(size?: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function normalizeUserUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `https://${trimmed}`;
+}
+
 interface MessageBubbleProps {
   message: Message;
   t: (key: TranslationKey) => string;
@@ -335,7 +346,7 @@ export function ChatPanel() {
   };
 
   const handleAddLink = () => {
-    const normalized = linkValue.trim();
+    const normalized = normalizeUserUrl(linkValue);
     if (!normalized) return;
     const draft: DraftAttachment = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -350,12 +361,34 @@ export function ChatPanel() {
   };
 
   const uploadDraftAttachments = async () => {
-    if (!activeProject || draftAttachments.length === 0) {
+    if (!activeProject) {
+      return [] as string[];
+    }
+
+    const normalizedPendingLink = normalizeUserUrl(linkValue);
+    const pendingLinkAlreadyAdded = draftAttachments.some(
+      (attachment) => attachment.kind === 'url' && attachment.url === normalizedPendingLink
+    );
+
+    const attachmentsToUpload: DraftAttachment[] =
+      normalizedPendingLink && !pendingLinkAlreadyAdded
+        ? [
+            ...draftAttachments,
+            {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              kind: 'url',
+              url: normalizedPendingLink,
+              title: normalizedPendingLink,
+            },
+          ]
+        : draftAttachments;
+
+    if (attachmentsToUpload.length === 0) {
       return [] as string[];
     }
 
     const uploaded = await Promise.all(
-      draftAttachments.map(async (attachment) => {
+      attachmentsToUpload.map(async (attachment) => {
         if (attachment.kind === 'url') {
           return attachToProject(activeProject.id, { kind: 'url', url: attachment.url, source: 'message' });
         }
@@ -380,6 +413,7 @@ export function ChatPanel() {
     try {
       const attachmentIds = await uploadDraftAttachments();
       setInputValue('');
+      setLinkValue('');
       setDraftAttachments([]);
 
       if (state.currentPhase === 'idle' && text) {
@@ -414,6 +448,7 @@ export function ChatPanel() {
     try {
       const attachmentIds = await uploadDraftAttachments();
       setInputValue('');
+      setLinkValue('');
       setDraftAttachments([]);
       setComposerMode('normal');
       setComposerNotice(null);
