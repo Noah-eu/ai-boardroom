@@ -39,7 +39,13 @@ export interface TaskArtifact {
   generatedAt?: Date;
 }
 
-export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'blocked';
+export type TaskStatus =
+  | 'queued'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'blocked'
+  | 'completed_with_fallback';
 
 export interface Task {
   id: string;

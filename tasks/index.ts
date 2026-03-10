@@ -62,6 +62,7 @@ export function getStatusColor(status: TaskStatus): string {
     running: 'text-blue-400',
     done: 'text-green-400',
     failed: 'text-red-400',
+    completed_with_fallback: 'text-cyan-300',
   };
   return colors[status];
 }
@@ -73,6 +74,7 @@ export function getStatusBadgeClass(status: TaskStatus): string {
     running: 'bg-blue-900 text-blue-300',
     done: 'bg-green-900 text-green-300',
     failed: 'bg-red-900 text-red-300',
+    completed_with_fallback: 'bg-cyan-900 text-cyan-200',
   };
   return classes[status];
 }

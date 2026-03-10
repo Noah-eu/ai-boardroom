@@ -487,7 +487,11 @@ function syncProjectById(
 
 function dependencySatisfied(tasks: Task[], dependencyId: string): boolean {
   const dependencyTask = tasks.find((task) => task.id === dependencyId);
-  return dependencyTask ? dependencyTask.status === 'done' || dependencyTask.status === 'failed' : false;
+  return dependencyTask
+    ? dependencyTask.status === 'done' ||
+        dependencyTask.status === 'failed' ||
+        dependencyTask.status === 'completed_with_fallback'
+    : false;
 }
 
 function dependenciesSatisfied(tasks: Task[], task: Task): boolean {
@@ -1758,7 +1762,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const derivePhaseFromTasks = useCallback((tasks: Task[]): WorkflowPhase => {
-    if (tasks.length > 0 && tasks.every((task) => task.status === 'done' || task.status === 'failed')) {
+    if (
+      tasks.length > 0 &&
+      tasks.every(
+        (task) =>
+          task.status === 'done' ||
+          task.status === 'failed' ||
+          task.status === 'completed_with_fallback'
+      )
+    ) {
       return 'complete';
     }
     if (tasks.some((task) => task.status === 'running' && task.agent === 'Integrator')) {
@@ -1782,7 +1794,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       let changed = false;
 
       project.tasks.forEach((task) => {
-        if (task.status === 'done' || task.status === 'failed' || task.status === 'running') {
+        if (
+          task.status === 'done' ||
+          task.status === 'failed' ||
+          task.status === 'completed_with_fallback' ||
+          task.status === 'running'
+        ) {
           return;
         }
 
@@ -2014,12 +2031,160 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  type PlannerPriority = 'high' | 'medium' | 'low';
+  type PlannerStructuredTask = {
+    id: string;
+    title: string;
+    description: string;
+    priority: PlannerPriority;
+    dependsOn?: string[];
+  };
+
+  type PlannerStructuredPlan = {
+    title: string;
+    summary: string;
+    tasks: PlannerStructuredTask[];
+  };
+
+  const normalizePlannerTaskId = useCallback((value: string, index: number): string => {
+    const trimmed = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+    return trimmed || `task-${index + 1}`;
+  }, []);
+
+  const validatePlannerStructuredPlan = useCallback(
+    (raw: string): PlannerStructuredPlan => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        throw new Error(`Planner conversion JSON parse failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Planner conversion payload is not an object.');
+      }
+
+      const candidate = parsed as Record<string, unknown>;
+      const title = typeof candidate.title === 'string' ? candidate.title.trim() : '';
+      const summary = typeof candidate.summary === 'string' ? candidate.summary.trim() : '';
+      const tasks = Array.isArray(candidate.tasks) ? candidate.tasks : [];
+
+      if (!title) throw new Error('Planner conversion missing title.');
+      if (!summary) throw new Error('Planner conversion missing summary.');
+      if (tasks.length < 3 || tasks.length > 7) {
+        throw new Error(`Planner conversion task count out of range: ${tasks.length} (expected 3-7).`);
+      }
+
+      const normalizedTasks: PlannerStructuredTask[] = tasks.map((task, index) => {
+        if (!task || typeof task !== 'object') {
+          throw new Error(`Planner task at index ${index} is not an object.`);
+        }
+        const item = task as Record<string, unknown>;
+        const taskId = normalizePlannerTaskId(String(item.id ?? ''), index);
+        const taskTitle = typeof item.title === 'string' ? item.title.trim() : '';
+        const taskDescription = typeof item.description === 'string' ? item.description.trim() : '';
+        const rawPriority = typeof item.priority === 'string' ? item.priority.toLowerCase() : 'medium';
+        const priority: PlannerPriority =
+          rawPriority === 'high' || rawPriority === 'medium' || rawPriority === 'low'
+            ? rawPriority
+            : 'medium';
+        const dependsOn = Array.isArray(item.dependsOn)
+          ? item.dependsOn.map((dep) => String(dep)).filter(Boolean)
+          : undefined;
+
+        if (!taskTitle) throw new Error(`Planner task at index ${index} missing title.`);
+        if (!taskDescription) throw new Error(`Planner task at index ${index} missing description.`);
+
+        return {
+          id: taskId,
+          title: taskTitle,
+          description: taskDescription,
+          priority,
+          dependsOn,
+        };
+      });
+
+      return {
+        title,
+        summary,
+        tasks: normalizedTasks,
+      };
+    },
+    [normalizePlannerTaskId]
+  );
+
+  const buildPlannerFallbackPlan = useCallback(
+    (project: Project, stageAText: string): PlannerStructuredPlan => {
+      const extractedLines = stageAText
+        .split('\n')
+        .map((line) => line.replace(/^[-*\d.)\s]+/, '').trim())
+        .filter((line) => line.length > 10)
+        .slice(0, 5);
+
+      const fallbackLines =
+        extractedLines.length >= 3
+          ? extractedLines
+          : [
+              'Audit current static website baseline and identify top user-facing issues.',
+              'Propose high-impact UX/content/performance improvements for v1.',
+              'Implement and review prioritized improvements with quick validation.',
+            ];
+
+      const tasks: PlannerStructuredTask[] = fallbackLines.map((line, index) => ({
+        id: `fallback-${index + 1}`,
+        title: `Task ${index + 1}`,
+        description: shorten(line, 180),
+        priority: index === 0 ? 'high' : index < 3 ? 'medium' : 'low',
+        dependsOn: index > 0 ? [`fallback-${index}`] : [],
+      }));
+
+      return {
+        title: `Planner fallback plan: ${project.name}`,
+        summary: 'Structured conversion failed; generated fallback task list from planner plain-text output.',
+        tasks,
+      };
+    },
+    []
+  );
+
+  const buildPlannerArtifactMarkdown = useCallback(
+    (
+      plan: PlannerStructuredPlan,
+      stageAText: string,
+      options?: { fallbackReason?: string; usedFallback?: boolean }
+    ): string => {
+      return [
+        `# ${plan.title}`,
+        '',
+        '## Summary',
+        plan.summary,
+        '',
+        '## Tasks',
+        ...plan.tasks.map((task) => {
+          const deps = task.dependsOn?.length ? task.dependsOn.join(', ') : 'none';
+          return `- id: ${task.id}\n  - title: ${task.title}\n  - description: ${task.description}\n  - priority: ${task.priority}\n  - dependsOn: ${deps}`;
+        }),
+        '',
+        '## Planner Stage A (plain text)',
+        stageAText,
+        '',
+        '## Planner Final Status',
+        options?.usedFallback ? 'completed_with_fallback' : 'completed',
+        options?.fallbackReason ? `Fallback reason: ${options.fallbackReason}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    },
+    []
+  );
+
   const rerouteDependencies = useCallback((project: Project, fromTaskId: string, toTaskId: string) => {
     project.tasks
       .filter(
         (task) =>
           task.id !== toTaskId &&
           task.status !== 'done' &&
+          task.status !== 'completed_with_fallback' &&
           task.status !== 'running' &&
           task.dependsOn.includes(fromTaskId)
       )
@@ -2337,6 +2502,255 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         };
 
         const updatedArtifacts = [...task.producesArtifacts];
+
+        if (task.agent === 'Planner') {
+          const plannerArtifactIndex = updatedArtifacts.findIndex((artifact) => artifact.path === 'execution-plan.md');
+          if (plannerArtifactIndex < 0) {
+            failLiveTask('Planner', 'Planner artifact execution-plan.md missing in task output contract.');
+            return;
+          }
+
+          const plannerArtifact = updatedArtifacts[plannerArtifactIndex];
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Planner',
+            message: 'planner prompt built',
+          });
+
+          const plannerStageAPrompt = [
+            project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
+            'You are Planner. Return concise plain-text plan only.',
+            'Include: a short title, one-paragraph summary, and 3-7 actionable tasks in bullet form.',
+            `Project prompt: ${snapshot.projectPrompt}`,
+            `Approved debate summary: ${shorten(snapshot.approvedDebateSummary, 2600)}`,
+          ].join('\n\n');
+
+          const plannerStageAContext = buildExecutionAgentContext(task, snapshot);
+          const plannerStageASize = estimatePromptSize(plannerStageAPrompt, plannerStageAContext);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Planner',
+            message: `Planner prompt size estimate chars=${plannerStageASize.chars}, tokens~=${plannerStageASize.tokensApprox}`,
+          });
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Planner',
+            message: 'planner OpenAI call started',
+          });
+
+          let stageAText = '';
+          try {
+            const stageAResponse = await callAiRespond(
+              {
+                projectId,
+                language: project.language,
+                agentRole: 'Planner',
+                inputText: plannerStageAPrompt,
+                context: plannerStageAContext,
+              },
+              { agent: 'Planner' },
+              snapshotAttachmentContext,
+              { timeoutMs: executionTaskTimeoutMs }
+            );
+            stageAText = stageAResponse.text;
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : 'Unknown planner stage A error';
+            failLiveTask('Planner', `planner OpenAI call failed: ${detail}`);
+            return;
+          }
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            agent: 'Planner',
+            message: 'planner OpenAI call returned',
+          });
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Planner',
+            message: 'planner parse started',
+          });
+
+          let plan: PlannerStructuredPlan;
+          let usedFallback = false;
+          let fallbackReason = '';
+
+          const plannerStageBPrompt = [
+            project.language === 'cz' ? 'Write in English for JSON keys and values.' : 'Write in English.',
+            'Convert the planner text into minimal JSON only.',
+            'JSON contract:',
+            '{"title":"...","summary":"...","tasks":[{"id":"...","title":"...","description":"...","priority":"high|medium|low","dependsOn":["id"]}]}',
+            'Rules: task count must be 3 to 7, dependsOn optional array, no additional nesting.',
+            'Planner plain-text input:',
+            stageAText,
+          ].join('\n\n');
+
+          try {
+            const stageBResponse = await callAiRespond(
+              {
+                projectId,
+                language: project.language,
+                agentRole: 'Planner',
+                inputText: plannerStageBPrompt,
+                context: {
+                  snapshotId: snapshot.id,
+                  conversionMode: 'planner-minimal-v1',
+                },
+              },
+              { agent: 'Planner' },
+              snapshotAttachmentContext,
+              { timeoutMs: executionTaskTimeoutMs }
+            );
+
+            try {
+              plan = validatePlannerStructuredPlan(stageBResponse.text);
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: 'Planner',
+                message: 'planner parse success',
+              });
+            } catch (parseError) {
+              fallbackReason = parseError instanceof Error ? parseError.message : 'Unknown planner parse error';
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'error',
+                agent: 'Planner',
+                message: `planner parse failure: ${fallbackReason}`,
+              });
+              plan = buildPlannerFallbackPlan(project, stageAText);
+              usedFallback = true;
+            }
+          } catch (conversionError) {
+            fallbackReason =
+              conversionError instanceof Error
+                ? conversionError.message
+                : 'Unknown planner conversion stage error';
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'error',
+              agent: 'Planner',
+              message: `planner parse failure: ${fallbackReason}`,
+            });
+            plan = buildPlannerFallbackPlan(project, stageAText);
+            usedFallback = true;
+          }
+
+          const plannerMarkdown = buildPlannerArtifactMarkdown(plan, stageAText, {
+            usedFallback,
+            fallbackReason,
+          });
+
+          updatedArtifacts[plannerArtifactIndex] = {
+            ...plannerArtifact,
+            content: plannerMarkdown,
+            producedBy: 'Planner',
+            generatedAt: new Date(),
+          };
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Planner',
+            message: 'planner artifact save started',
+          });
+
+          try {
+            dispatch({
+              type: 'UPDATE_TASK',
+              projectId,
+              taskId,
+              patch: { producesArtifacts: updatedArtifacts },
+            });
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'success',
+              agent: 'Planner',
+              message: 'planner artifact save success',
+            });
+          } catch (saveError) {
+            const detail = saveError instanceof Error ? saveError.message : 'Unknown planner artifact save error';
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'error',
+              agent: 'Planner',
+              message: `planner artifact save failure: ${detail}`,
+            });
+            failLiveTask('Planner', `planner artifact save failure: ${detail}`);
+            return;
+          }
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Planner',
+            message: 'planner task graph save started',
+          });
+
+          try {
+            const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+            if (liveProject) {
+              const nonPlanner = liveProject.tasks.filter((candidate) => candidate.id !== taskId);
+              nonPlanner.forEach((candidate, index) => {
+                const mapped = plan.tasks[index];
+                if (!mapped) return;
+                dispatch({
+                  type: 'UPDATE_TASK',
+                  projectId,
+                  taskId: candidate.id,
+                  patch: {
+                    title: `${candidate.agent}: ${mapped.title}`,
+                    description: mapped.description,
+                  },
+                });
+              });
+            }
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'success',
+              agent: 'Planner',
+              message: 'planner task graph save success',
+            });
+          } catch (graphError) {
+            const detail = graphError instanceof Error ? graphError.message : 'Unknown planner task graph save error';
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'error',
+              agent: 'Planner',
+              message: `planner task graph save failure: ${detail}`,
+            });
+          }
+
+          dispatch({
+            type: 'UPDATE_TASK',
+            projectId,
+            taskId,
+            patch: {
+              status: usedFallback ? 'completed_with_fallback' : 'done',
+              errorMessage: usedFallback ? `Planner fallback used: ${fallbackReason || 'conversion failed'}` : undefined,
+            },
+          });
+          dispatch({
+            type: 'UPDATE_AGENT_STATUS',
+            agent: 'Planner',
+            status: 'idle',
+            lastOutput: usedFallback ? 'completed_with_fallback' : 'completed',
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: usedFallback ? 'warning' : 'success',
+            agent: 'Planner',
+            message: `planner final status: ${usedFallback ? 'completed_with_fallback' : 'completed'}`,
+          });
+          return;
+        }
+
         for (let index = 0; index < updatedArtifacts.length; index += 1) {
           const { liveTask } = getLiveTask();
           if (!liveTask || liveTask.status !== 'running') {
@@ -2448,11 +2862,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [
+      buildPlannerArtifactMarkdown,
+      buildPlannerFallbackPlan,
       buildExecutionAgentContext,
       buildExecutionArtifactPrompt,
       callAiRespond,
       completeTask,
       executionTaskTimeoutMs,
+      validatePlannerStructuredPlan,
     ]
   );
 
@@ -2558,7 +2975,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const blockedDetails: DeadlockTaskDetail[] = blockedTasks.map((task) => {
           const unmetDependencies = task.dependsOn
             .map((dependencyId) => refreshedProject.tasks.find((candidate) => candidate.id === dependencyId))
-            .filter((dependency): dependency is Task => Boolean(dependency && dependency.status !== 'done' && dependency.status !== 'failed'))
+            .filter(
+              (dependency): dependency is Task =>
+                Boolean(
+                  dependency &&
+                    dependency.status !== 'done' &&
+                    dependency.status !== 'failed' &&
+                    dependency.status !== 'completed_with_fallback'
+                )
+            )
             .map((dependency) => `${dependency.title} [${dependency.status}]`);
           return {
             taskId: task.id,
@@ -2818,7 +3243,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         delete taskTimersRef.current[task.id];
       }
 
-      if (task.status !== 'done' && task.status !== 'failed') {
+      if (
+        task.status !== 'done' &&
+        task.status !== 'failed' &&
+        task.status !== 'completed_with_fallback'
+      ) {
         dispatch({
           type: 'UPDATE_TASK',
           projectId: project.id,
@@ -4060,7 +4489,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const project = state.activeProject;
     const taskGraph = project?.taskGraph;
     const runningTasks = project?.tasks.filter((task) => task.status === 'running').length ?? 0;
-    const done = project?.tasks.filter((task) => task.status === 'done').length ?? 0;
+    const done =
+      project?.tasks.filter(
+        (task) => task.status === 'done' || task.status === 'completed_with_fallback'
+      ).length ?? 0;
     const queued = project?.tasks.filter((task) => task.status === 'queued').length ?? 0;
     const blocked = project?.tasks.filter((task) => task.status === 'blocked').length ?? 0;
     const failed = project?.tasks.filter((task) => task.status === 'failed').length ?? 0;

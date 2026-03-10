@@ -144,6 +144,7 @@ export function PreviewPanel() {
       running: [],
       done: [],
       failed: [],
+      completed_with_fallback: [],
     };
     tasks.forEach((task) => {
       groups[task.status].push(task);
@@ -586,7 +587,7 @@ export function PreviewPanel() {
           </div>
         ) : (
           <div className="space-y-2">
-            {(['blocked', 'queued', 'running', 'done', 'failed'] as TaskStatus[]).map((status) => {
+            {(['blocked', 'queued', 'running', 'done', 'completed_with_fallback', 'failed'] as TaskStatus[]).map((status) => {
               const items = groupedTasks[status];
               if (items.length === 0) return null;
               return (
@@ -624,6 +625,8 @@ export function PreviewPanel() {
                             ? 'bg-green-900/50 text-green-300'
                             : task.status === 'running'
                             ? 'bg-blue-900/50 text-blue-300'
+                            : task.status === 'completed_with_fallback'
+                            ? 'bg-cyan-900/50 text-cyan-200'
                             : task.status === 'failed'
                             ? 'bg-red-900/50 text-red-300'
                             : task.status === 'blocked'
@@ -743,6 +746,8 @@ export function PreviewPanel() {
                             ? 'bg-green-900/50 text-green-300'
                             : artifact.taskStatus === 'running'
                             ? 'bg-blue-900/50 text-blue-300'
+                            : artifact.taskStatus === 'completed_with_fallback'
+                            ? 'bg-cyan-900/50 text-cyan-200'
                             : artifact.taskStatus === 'queued' || artifact.taskStatus === 'blocked'
                             ? 'bg-gray-800 text-gray-300'
                             : 'bg-red-900/50 text-red-300'
