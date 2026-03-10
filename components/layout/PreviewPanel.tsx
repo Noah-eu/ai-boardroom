@@ -5,6 +5,22 @@ import { useApp } from '@/context/AppContext';
 import { translate, translateWithVars } from '@/i18n';
 import { ProjectAttachment, Task, TaskStatus } from '@/types';
 
+const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
+
+function resolveExecutionTaskTimeoutMs(): number {
+  const raw = Number(process.env.NEXT_PUBLIC_EXECUTION_TASK_TIMEOUT_MS);
+  if (!Number.isFinite(raw)) return DEFAULT_EXECUTION_TASK_TIMEOUT_MS;
+  return Math.max(60_000, Math.min(120_000, Math.floor(raw)));
+}
+
+function formatDurationMs(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes}m ${seconds}s`;
+}
+
 function formatAttachmentSize(size?: number): string {
   if (!size || size <= 0) return '';
   if (size < 1024) return `${size} B`;
@@ -73,6 +89,8 @@ export function PreviewPanel() {
   );
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const executionTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
 
   const tasks = useMemo(() => project?.taskGraph?.tasks ?? project?.tasks ?? [], [project]);
   const hasArtifacts = tasks.some((task) => task.producesArtifacts.length > 0);
@@ -149,6 +167,11 @@ export function PreviewPanel() {
       setSelectedTaskId(tasks[0].id);
     }
   }, [tasks, selectedTaskId]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
   const selectedArtifactMeta = selectedTask?.producesArtifacts.find(
@@ -574,6 +597,11 @@ export function PreviewPanel() {
                   {items.map((task) => (
                     (() => {
                       const dependencyTitles = task.dependsOn.map((id) => taskTitleMap[id] ?? id);
+                      const runningForMs =
+                        task.status === 'running'
+                          ? Math.max(0, nowTick - new Date(task.updatedAt).getTime())
+                          : 0;
+                      const isStalled = task.status === 'running' && runningForMs > executionTimeoutMs;
                       const unresolvedDependencies = task.dependsOn
                         .map((id) => tasks.find((candidate) => candidate.id === id))
                         .filter((dependency): dependency is Task =>
@@ -607,6 +635,12 @@ export function PreviewPanel() {
                         <span className="text-xs text-gray-100 truncate">{task.title}</span>
                         <span className="text-[10px] text-gray-400 flex-shrink-0">{task.agent}</span>
                       </div>
+                      {task.status === 'running' && (
+                        <p className={`mt-1 text-[10px] ${isStalled ? 'text-red-300' : 'text-blue-300'}`}>
+                          Running: {formatDurationMs(runningForMs)}
+                          {isStalled ? ' (timeout / stalled)' : ''}
+                        </p>
+                      )}
                       <p className="mt-1 text-[11px] text-gray-300 line-clamp-2">{task.description}</p>
                       <p className="mt-1 text-[10px] text-gray-400">
                         {t('preview.dependsOn')}: {dependencyTitles.length ? dependencyTitles.join(', ') : t('preview.none')}

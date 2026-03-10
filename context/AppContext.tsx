@@ -68,6 +68,33 @@ const SPEED_CONFIG: Record<ExecutionSpeed, { tickMs: number; minTaskMs: number; 
 };
 
 const MAX_REVISION_ROUNDS = 5;
+const MIN_EXECUTION_TASK_TIMEOUT_MS = 60_000;
+const MAX_EXECUTION_TASK_TIMEOUT_MS = 120_000;
+const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
+
+function resolveExecutionTaskTimeoutMs(): number {
+  const raw = process.env.NEXT_PUBLIC_EXECUTION_TASK_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_EXECUTION_TASK_TIMEOUT_MS;
+  }
+  return Math.max(MIN_EXECUTION_TASK_TIMEOUT_MS, Math.min(MAX_EXECUTION_TASK_TIMEOUT_MS, Math.floor(parsed)));
+}
+
+function estimatePromptSize(inputText: string, context: unknown): { chars: number; tokensApprox: number } {
+  const contextText = (() => {
+    try {
+      return JSON.stringify(context ?? null);
+    } catch {
+      return String(context ?? '');
+    }
+  })();
+  const chars = inputText.length + contextText.length;
+  return {
+    chars,
+    tokensApprox: Math.ceil(chars / 4),
+  };
+}
 
 type AiRespondPayload = {
   projectId: string;
@@ -104,6 +131,10 @@ type AiRespondResult = {
 
 type AiRespondLogContext = {
   agent?: AgentName;
+};
+
+type AiRespondOptions = {
+  timeoutMs?: number;
 };
 
 type AttachmentIngestApiResponse = {
@@ -980,6 +1011,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [language, setLanguage] = useState<Language>('en');
   const [executionSpeed, setExecutionSpeed] = useState<ExecutionSpeed>('normal');
   const [autoPauseCheckpoints, setAutoPauseCheckpoints] = useState(true);
+  const executionTaskTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
   const [pausedSchedulers, setPausedSchedulers] = useState<Record<string, boolean>>({});
   const [deadlocks, setDeadlocks] = useState<Record<string, DeadlockState | null>>({});
   const stateRef = useRef<AppState>(state);
@@ -1322,7 +1354,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     async (
       payload: AiRespondPayload,
       logContext?: AiRespondLogContext,
-      attachmentSnapshot?: AttachmentContextSnapshot
+      attachmentSnapshot?: AttachmentContextSnapshot,
+      options?: AiRespondOptions
     ): Promise<AiRespondResult> => {
       const role = payload.agentRole;
       const project = stateRef.current.projects.find((candidate) => candidate.id === payload.projectId);
@@ -1454,10 +1487,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const endpoint = resolveAiRespondEndpoint();
+        const controller = new AbortController();
+        const timeoutMs = options?.timeoutMs;
+        const timeoutHandle =
+          typeof timeoutMs === 'number' && timeoutMs > 0
+            ? setTimeout(() => controller.abort(), timeoutMs)
+            : null;
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify(requestPayload),
+        }).finally(() => {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+          }
         });
 
         const contentType = response.headers.get('content-type') ?? '';
@@ -1553,8 +1597,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           meta: data.meta ?? null,
         };
       } catch (error) {
+        const timeoutError =
+          error instanceof DOMException && error.name === 'AbortError'
+            ? new Error(`OpenAI request timeout after ${options?.timeoutMs ?? 0} ms.`)
+            : error;
         if (logContext) {
-          const message = error instanceof Error ? error.message : 'Unknown OpenAI error';
+          const message = timeoutError instanceof Error ? timeoutError.message : 'Unknown OpenAI error';
           const shortError = message.length > 140 ? `${message.slice(0, 137)}...` : message;
           dispatch({
             type: 'ADD_LOG',
@@ -1565,7 +1613,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             }),
           });
         }
-        throw error;
+        throw timeoutError;
       }
     },
     [buildAttachmentContext, resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
@@ -1900,6 +1948,72 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const buildExecutionAgentContext = useCallback(
+    (task: Task, snapshot: ExecutionSnapshot) => {
+      const compact = {
+        snapshotId: snapshot.id,
+        projectPrompt: shorten(snapshot.projectPrompt, 1_800),
+        approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 3_000),
+        attachmentOverview: {
+          project: snapshot.projectAttachments.map((item) => ({
+            title: item.title,
+            kind: item.kind,
+            status: item.status,
+          })),
+          message: snapshot.messageAttachments.map((item) => ({
+            title: item.title,
+            kind: item.kind,
+            status: item.status,
+          })),
+        },
+        zipSummary: snapshot.zipSnapshots.map((entry) => ({
+          title: entry.title,
+          fileTreeTop: entry.fileTree.slice(0, 80),
+          keyFiles: entry.keyFiles.slice(0, 8).map((file) => ({
+            path: file.path,
+            excerpt: shorten(file.content, 800),
+          })),
+        })),
+        siteSummary: snapshot.siteSnapshots.map((entry) => ({
+          title: entry.title,
+          pageTitle: entry.pageTitle,
+          summary: shorten(entry.summary, 600),
+          extractedExcerpt: shorten(entry.extractedText, 1_000),
+          pages: (entry.pages ?? []).slice(0, 5).map((page) => ({
+            title: page.title,
+            url: page.url,
+            excerpt: shorten(page.excerpt ?? page.summary, 220),
+          })),
+        })),
+        pdfSummary: snapshot.pdfTexts.map((entry) => ({
+          title: entry.title,
+          excerpt: shorten(entry.text, 1_200),
+        })),
+        imageSummary: snapshot.imageInputs.map((entry) => ({
+          title: entry.title,
+          description: shorten(entry.description, 300),
+          source: entry.source,
+        })),
+        missingInputNotes: snapshot.missingInputNotes,
+      };
+
+      if (task.agent === 'Planner') {
+        return compact;
+      }
+
+      return {
+        ...compact,
+        detailed: {
+          zipSnapshots: snapshot.zipSnapshots,
+          siteSnapshots: snapshot.siteSnapshots,
+          pdfTexts: snapshot.pdfTexts,
+          imageInputs: snapshot.imageInputs,
+        },
+      };
+    },
+    []
+  );
+
   const rerouteDependencies = useCallback((project: Project, fromTaskId: string, toTaskId: string) => {
     project.tasks
       .filter(
@@ -2098,102 +2212,197 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const runLiveTaskExecution = useCallback(
     async (projectId: string, taskId: string) => {
+      const getLiveTask = () => {
+        const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        const liveTask = liveProject?.tasks.find((candidate) => candidate.id === taskId);
+        return { liveProject, liveTask };
+      };
+
+      const failLiveTask = (agent: AgentName, message: string) => {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          agent,
+          message,
+        });
+        dispatch({
+          type: 'UPDATE_TASK',
+          projectId,
+          taskId,
+          patch: { status: 'failed', errorMessage: message },
+        });
+        dispatch({
+          type: 'UPDATE_AGENT_STATUS',
+          agent,
+          status: 'error',
+          lastOutput: message,
+        });
+
+        if (agent === 'Planner') {
+          const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+          if (!liveProject) return;
+          liveProject.tasks
+            .filter((candidate) => candidate.id !== taskId && (candidate.status === 'queued' || candidate.status === 'blocked'))
+            .forEach((candidate) => {
+              dispatch({
+                type: 'UPDATE_TASK',
+                projectId,
+                taskId: candidate.id,
+                patch: {
+                  status: 'failed',
+                  errorMessage: 'Planner failed; downstream execution canceled.',
+                },
+              });
+            });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: 'Planner failed; downstream queued/blocked tasks were canceled.',
+          });
+        }
+      };
+
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
       if (!project) return;
 
       const task = project.tasks.find((candidate) => candidate.id === taskId);
       if (!task || task.status !== 'running') return;
 
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        agent: task.agent,
+        message: `${task.agent} agent started`,
+      });
+
       const snapshot = project.executionSnapshot;
       if (!snapshot) {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'error',
-          agent: task.agent,
-          message: 'Execution snapshot missing; task cannot use approved immutable context.',
-        });
-        dispatch({
-          type: 'UPDATE_TASK',
-          projectId,
-          taskId,
-          patch: { status: 'failed', errorMessage: 'Execution snapshot missing.' },
-        });
+        failLiveTask(task.agent, 'Execution snapshot missing; task cannot use approved immutable context.');
         return;
       }
 
-      const snapshotAttachmentContext: AttachmentContextSnapshot = {
-        projectAttachments: snapshot.projectAttachments,
-        messageAttachments: snapshot.messageAttachments,
-        textSections: [
-          ...snapshot.pdfTexts.map((entry) => ({
-            title: entry.title,
-            kind: 'pdf' as const,
-            source: entry.source,
-            text: entry.text,
-          })),
-          ...snapshot.zipSnapshots.map((entry) => ({
-            title: entry.title,
-            kind: 'zip' as const,
-            source: entry.source,
-            text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
-              .map((file) => `${file.path}\n${file.content}`)
-              .join('\n\n')}`,
-          })),
-          ...snapshot.siteSnapshots.map((entry) => ({
-            title: entry.title,
-            kind: 'url' as const,
-            source: entry.source,
-            text: [
-              entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
-              entry.summary ? `Summary: ${entry.summary}` : '',
-              entry.extractedText ?? '',
-            ]
-              .filter(Boolean)
-              .join('\n\n'),
-          })),
-        ],
-        images: snapshot.imageInputs.map((entry) => ({
-          url: entry.url,
-          title: entry.title,
-          source: entry.source,
-          attachmentId: entry.attachmentId,
-        })),
-        droppedImageAttachments: [],
-        includedAttachmentIds: [
-          ...snapshot.imageInputs.map((entry) => entry.attachmentId),
-          ...snapshot.pdfTexts.map((entry) => entry.attachmentId),
-          ...snapshot.zipSnapshots.map((entry) => entry.attachmentId),
-          ...snapshot.siteSnapshots.map((entry) => entry.attachmentId),
-        ],
-      };
+      const stallTimer = setTimeout(() => {
+        const { liveTask } = getLiveTask();
+        if (!liveTask || liveTask.status !== 'running') {
+          return;
+        }
+        failLiveTask(task.agent, `Task timed out after ${executionTaskTimeoutMs} ms (timeout / stalled).`);
+      }, executionTaskTimeoutMs);
 
-      const updatedArtifacts = [...task.producesArtifacts];
-      for (let index = 0; index < updatedArtifacts.length; index += 1) {
-        const artifact = updatedArtifacts[index];
-        const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
+      try {
+        const snapshotAttachmentContext: AttachmentContextSnapshot = {
+          projectAttachments: snapshot.projectAttachments,
+          messageAttachments: snapshot.messageAttachments,
+          textSections: [
+            ...snapshot.pdfTexts.map((entry) => ({
+              title: entry.title,
+              kind: 'pdf' as const,
+              source: entry.source,
+              text: entry.text,
+            })),
+            ...snapshot.zipSnapshots.map((entry) => ({
+              title: entry.title,
+              kind: 'zip' as const,
+              source: entry.source,
+              text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
+                .map((file) => `${file.path}\n${file.content}`)
+                .join('\n\n')}`,
+            })),
+            ...snapshot.siteSnapshots.map((entry) => ({
+              title: entry.title,
+              kind: 'url' as const,
+              source: entry.source,
+              text: [
+                entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
+                entry.summary ? `Summary: ${entry.summary}` : '',
+                entry.extractedText ?? '',
+              ]
+                .filter(Boolean)
+                .join('\n\n'),
+            })),
+          ],
+          images: snapshot.imageInputs.map((entry) => ({
+            url: entry.url,
+            title: entry.title,
+            source: entry.source,
+            attachmentId: entry.attachmentId,
+          })),
+          droppedImageAttachments: [],
+          includedAttachmentIds: [
+            ...snapshot.imageInputs.map((entry) => entry.attachmentId),
+            ...snapshot.pdfTexts.map((entry) => entry.attachmentId),
+            ...snapshot.zipSnapshots.map((entry) => entry.attachmentId),
+            ...snapshot.siteSnapshots.map((entry) => entry.attachmentId),
+          ],
+        };
 
-        try {
-          const response = await callAiRespond(
-            {
-              projectId,
-              language: project.language,
-              agentRole: task.agent,
-              inputText: prompt,
-              context: {
-                snapshotId: snapshot.id,
-                artifactPath: artifact.path,
-                approvedDebateSummary: snapshot.approvedDebateSummary,
-                projectPrompt: snapshot.projectPrompt,
-                zipSnapshots: snapshot.zipSnapshots,
-                siteSnapshots: snapshot.siteSnapshots,
-                pdfTexts: snapshot.pdfTexts,
-                imageInputs: snapshot.imageInputs,
-                missingInputNotes: snapshot.missingInputNotes,
+        const updatedArtifacts = [...task.producesArtifacts];
+        for (let index = 0; index < updatedArtifacts.length; index += 1) {
+          const { liveTask } = getLiveTask();
+          if (!liveTask || liveTask.status !== 'running') {
+            return;
+          }
+
+          const artifact = updatedArtifacts[index];
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: task.agent,
+            message: `${task.agent}: building prompt (${artifact.path})`,
+          });
+
+          const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
+          const compactContext = buildExecutionAgentContext(task, snapshot);
+          const promptSize = estimatePromptSize(prompt, compactContext);
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: task.agent,
+            message: `${task.agent}: prompt size estimate chars=${promptSize.chars}, tokens~=${promptSize.tokensApprox}`,
+          });
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: task.agent,
+            message: `${task.agent}: calling OpenAI`,
+          });
+
+          let response: AiRespondResult;
+          try {
+            response = await callAiRespond(
+              {
+                projectId,
+                language: project.language,
+                agentRole: task.agent,
+                inputText: prompt,
+                context: {
+                  artifactPath: artifact.path,
+                  ...compactContext,
+                },
               },
-            },
-            { agent: task.agent },
-            snapshotAttachmentContext
-          );
+              { agent: task.agent },
+              snapshotAttachmentContext,
+              { timeoutMs: executionTaskTimeoutMs }
+            );
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : 'Unknown OpenAI execution error';
+            failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail}`);
+            return;
+          }
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            agent: task.agent,
+            message: `${task.agent}: OpenAI returned (${artifact.path})`,
+          });
+
+          if (!response.text || !response.text.trim()) {
+            failLiveTask(task.agent, `${task.agent}: artifact parsing failed for ${artifact.path} (empty output).`);
+            return;
+          }
 
           updatedArtifacts[index] = {
             ...artifact,
@@ -2201,27 +2410,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             producedBy: task.agent,
             generatedAt: new Date(),
           };
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : 'Unknown execution artifact error';
-          updatedArtifacts[index] = {
-            ...artifact,
-            content: `# ${artifact.label}\n\n## Missing Inputs\n- Artifact generation failed: ${detail}`,
-            producedBy: task.agent,
-            generatedAt: new Date(),
-          };
         }
+
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          agent: task.agent,
+          message: `${task.agent}: saving artifact`,
+        });
+
+        try {
+          dispatch({
+            type: 'UPDATE_TASK',
+            projectId,
+            taskId,
+            patch: { producesArtifacts: updatedArtifacts },
+          });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Unknown artifact save error';
+          failLiveTask(task.agent, `${task.agent}: artifact save failed: ${detail}`);
+          return;
+        }
+
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'success',
+          agent: task.agent,
+          message: `${task.agent} agent completed`,
+        });
+
+        completeTask(projectId, taskId, { skipFailure: true, lastOutput: task.title });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Unknown execution runner error';
+        failLiveTask(task.agent, `${task.agent}: execution runner failed: ${detail}`);
+      } finally {
+        clearTimeout(stallTimer);
       }
-
-      dispatch({
-        type: 'UPDATE_TASK',
-        projectId,
-        taskId,
-        patch: { producesArtifacts: updatedArtifacts },
-      });
-
-      completeTask(projectId, taskId, { skipFailure: true, lastOutput: task.title });
     },
-    [buildExecutionArtifactPrompt, callAiRespond, completeTask]
+    [
+      buildExecutionAgentContext,
+      buildExecutionArtifactPrompt,
+      callAiRespond,
+      completeTask,
+      executionTaskTimeoutMs,
+    ]
   );
 
   const startTask = useCallback(
@@ -2510,6 +2742,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         level: 'info',
         message: translateProject(project.language, 'workflow.graph.generated'),
       });
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: `Execution agent timeout configured: ${executionTaskTimeoutMs} ms`,
+      });
       projectPhaseRef.current[project.id] = 'execution';
 
       schedulerIntervalsRef.current[project.id] = setInterval(() => {
@@ -2521,6 +2758,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       schedulerTick,
       setSchedulerPaused,
       translateProject,
+      executionTaskTimeoutMs,
     ]
   );
 
