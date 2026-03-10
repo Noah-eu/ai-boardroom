@@ -162,6 +162,8 @@ type AttachmentTypeCounts = {
   zips: number;
 };
 
+type DebateTaskType = 'observational' | 'planning';
+
 function getAttachmentTypeCounts(attachments: ProjectAttachment[]): AttachmentTypeCounts {
   return attachments.reduce<AttachmentTypeCounts>(
     (acc, attachment) => {
@@ -173,6 +175,48 @@ function getAttachmentTypeCounts(attachments: ProjectAttachment[]): AttachmentTy
     },
     { images: 0, pdfs: 0, urls: 0, zips: 0 }
   );
+}
+
+function detectDebateTaskType(task: string): DebateTaskType {
+  const normalized = task.toLowerCase();
+
+  const planningSignals = [
+    /\bplan\b/,
+    /\bstrategy\b/,
+    /\barchitecture\b/,
+    /\bimplement\b/,
+    /\bexecution\b/,
+    /\bimprove\b/,
+    /\bpropose\b/,
+    /\bdesign\b/,
+    /\broadmap\b/,
+    /\bmvp\b/,
+    /\bkrok(y|u)?\b/,
+    /\bnavrh(nout|ni)?\b/,
+    /\bstrategie\b/,
+    /\barchitektur(a|u)\b/,
+    /\bimplementa(cni|ce)\b/,
+    /\bzleps(i|it|eni)\b/,
+    /\bpostup\b/,
+  ];
+
+  const observationalSignals = [
+    /what is in (the )?(photo|image|picture|screenshot)/,
+    /describe (the )?(photo|image|picture|screenshot|webpage|page)/,
+    /summari[sz]e (the )?(document|pdf|page|webpage)/,
+    /what is on (this|the) (webpage|page|site)/,
+    /co je na (fotce|obrazku|screenshotu|strance|webu)/,
+    /popi[sš] (mi )?(co je )?na (fotce|obrazku|screenshotu)/,
+    /shrn(i|out) (obsah )?(pdf|dokumentu|stranky|webu)/,
+    /co vid[ií][šs]/,
+  ];
+
+  const hasPlanningSignal = planningSignals.some((pattern) => pattern.test(normalized));
+  const hasObservationalSignal = observationalSignals.some((pattern) => pattern.test(normalized));
+
+  if (hasPlanningSignal) return 'planning';
+  if (hasObservationalSignal) return 'observational';
+  return 'planning';
 }
 
 type DraftAttachmentInput =
@@ -2787,8 +2831,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       language: AppLanguage,
       agent: AgentName,
       round: number,
-      previousRoundMessages: Array<{ agent: AgentName; content: string }>
+      previousRoundMessages: Array<{ agent: AgentName; content: string }>,
+      mode: DebateTaskType
     ) => {
+      if (mode === 'observational' && round === 1) {
+        if (language === 'cz') {
+          if (agent === 'Strategist') {
+            return 'Vidim vstupni obsah a popisuji primo to, co je citelne nebo viditelne. Pokud casti chybi, jasne uvedu co nelze potvrdit.';
+          }
+          if (agent === 'Skeptic') {
+            return 'Opatrny popis: uvedu pouze skutecne viditelne prvky a nejistoty oznacim explicitne bez spekulaci.';
+          }
+          return 'Strucna odpoved pro uzivatele: co je na vstupu videt/cist + kratka poznamka o nejistote jen pokud je potreba.';
+        }
+
+        if (agent === 'Strategist') {
+          return 'Direct factual description of visible/readable input only. If anything is missing, I clearly say what cannot be verified.';
+        }
+        if (agent === 'Skeptic') {
+          return 'Cautious direct description: only observable facts, and uncertainties stated explicitly when needed.';
+        }
+        return 'Concise user-ready answer describing what is visible/readable, with a short uncertainty note only if needed.';
+      }
+
       if (language === 'cz') {
         if (round === 1 && agent === 'Strategist') {
           return 'Navrhuji smer: nejdrive dorucit jasne MVP s merenim dopadu, pak rozsireni po validaci. Priorita je rychla hodnota pro uzivatele a stabilni zaklad pro dalsi iterace.';
@@ -2862,6 +2927,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const rounds = clampDebateRounds(initialProject.debateRounds);
           const language = initialProject.language;
           const task = initialProject.description;
+          const taskType = detectDebateTaskType(task);
+          const isOneRoundDescriptive = rounds === 1 && taskType === 'observational';
           const previousSummary = getLatestOrchestratorSummary(initialProject);
           const revisionFeedback = initialProject.latestRevisionFeedback;
           const debateRunRound = initialProject.revisionRound + 1;
@@ -2929,44 +2996,89 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
               let content = '';
               if (refreshedProject.simulationMode) {
-                content = buildSimulatedRoundMessage(language, agent, round, previousRoundMessages);
+                content = buildSimulatedRoundMessage(
+                  language,
+                  agent,
+                  round,
+                  previousRoundMessages,
+                  isOneRoundDescriptive ? 'observational' : 'planning'
+                );
               } else {
-                const roleInstruction =
-                  language === 'cz'
+                const roleInstruction = isOneRoundDescriptive
+                  ? language === 'cz'
                     ? agent === 'Strategist'
-                      ? 'Role: Strategist. Navrhni nejlepsi strategicky pristup.'
+                      ? 'Role: Strategist. Dej primy fakticky popis toho, co je skutecne videt/cist.'
                       : agent === 'Skeptic'
-                      ? 'Role: Skeptic. Kriticky oponuj predpoklady a rizika.'
-                      : 'Role: Pragmatist. Definuj prakticky MVP plan a omezeni.'
+                      ? 'Role: Skeptic. Dej opatrny primy popis bez spekulaci; nejistoty uveď explicitne jen kdyz je to nutne.'
+                      : 'Role: Pragmatist. Dej strucnou odpoved pripravenou pro uzivatele.'
                     : agent === 'Strategist'
-                    ? 'Role: Strategist. Propose the best strategic approach.'
+                    ? 'Role: Strategist. Provide a direct factual description of what is actually visible/readable.'
                     : agent === 'Skeptic'
-                    ? 'Role: Skeptic. Critique assumptions and major risks.'
-                    : 'Role: Pragmatist. Define practical MVP scope and constraints.';
+                    ? 'Role: Skeptic. Provide a cautious direct description without speculation; mention uncertainty only when needed.'
+                    : 'Role: Pragmatist. Provide a concise user-ready answer.'
+                  : language === 'cz'
+                  ? agent === 'Strategist'
+                    ? 'Role: Strategist. Navrhni nejlepsi strategicky pristup.'
+                    : agent === 'Skeptic'
+                    ? 'Role: Skeptic. Kriticky oponuj predpoklady a rizika.'
+                    : 'Role: Pragmatist. Definuj prakticky MVP plan a omezeni.'
+                  : agent === 'Strategist'
+                  ? 'Role: Strategist. Propose the best strategic approach.'
+                  : agent === 'Skeptic'
+                  ? 'Role: Skeptic. Critique assumptions and major risks.'
+                  : 'Role: Pragmatist. Define practical MVP scope and constraints.';
 
-                const roundInstruction =
-                  round === 1
-                    ? language === 'cz'
-                      ? 'Round 1: pocatecni pozice.'
-                      : 'Round 1: initial position.'
-                    : round === 2
-                    ? `Round 2: ${crossReplyRule}`
-                    : language === 'cz'
-                    ? agent === 'Strategist'
-                      ? 'Round 3: konvergence. Dodaj finalni doporuceny plan krok za krokem.'
-                      : agent === 'Skeptic'
-                      ? 'Round 3: konvergence. Dodaj top rizika a mitigace.'
-                      : 'Round 3: konvergence. Dodaj MVP deliverables a orientacni timeline.'
-                    : agent === 'Strategist'
-                    ? 'Round 3: convergence. Provide the final recommended step-by-step plan.'
+                const roundInstruction = isOneRoundDescriptive
+                  ? language === 'cz'
+                    ? [
+                        'Rezim: observational/descriptive, 1 kolo.',
+                        'Odpovez primo z dostupneho vstupu (obrazek/PDF/URL/text).',
+                        'Popisuj jen skutecne viditelne/citelne informace.',
+                        'Nepis strategii, MVP plan, next steps ani meta komentar o tom, jak bys analyzoval.',
+                        'Nezminuj budouci kola.',
+                        'Kdyz chybi vstupni data, rekni to jasne.',
+                      ].join(' ')
+                    : [
+                        'Mode: observational/descriptive, one round.',
+                        'Answer directly from available input (image/PDF/URL/text).',
+                        'Describe only what is actually visible/readable.',
+                        'Do not provide strategy, MVP plan, next steps, or meta discussion about how you would analyze it.',
+                        'Do not talk about future rounds.',
+                        'If input data is missing, say that clearly.',
+                      ].join(' ')
+                  : round === 1
+                  ? language === 'cz'
+                    ? 'Round 1: pocatecni pozice.'
+                    : 'Round 1: initial position.'
+                  : round === 2
+                  ? `Round 2: ${crossReplyRule}`
+                  : language === 'cz'
+                  ? agent === 'Strategist'
+                    ? 'Round 3: konvergence. Dodaj finalni doporuceny plan krok za krokem.'
                     : agent === 'Skeptic'
-                    ? 'Round 3: convergence. Provide top risks and mitigations.'
-                    : 'Round 3: convergence. Provide MVP deliverables and timeline.';
+                    ? 'Round 3: konvergence. Dodaj top rizika a mitigace.'
+                    : 'Round 3: konvergence. Dodaj MVP deliverables a orientacni timeline.'
+                  : agent === 'Strategist'
+                  ? 'Round 3: convergence. Provide the final recommended step-by-step plan.'
+                  : agent === 'Skeptic'
+                  ? 'Round 3: convergence. Provide top risks and mitigations.'
+                  : 'Round 3: convergence. Provide MVP deliverables and timeline.';
+
+                const inputAvailabilityInstruction =
+                  roundAttachmentSnapshot.includedAttachmentIds.length > 0 ||
+                  roundAttachmentSnapshot.textSections.length > 0
+                    ? language === 'cz'
+                      ? 'Vstupni data jsou k dispozici, pouzij je primo v odpovedi.'
+                      : 'Input data is available; use it directly in your answer.'
+                    : language === 'cz'
+                    ? 'Vstupni data nejsou dostupna nebo nejsou citelna; tuto skutecnost jasne uveď.'
+                    : 'Input data is missing or unreadable; state this clearly.';
 
                 const prompt = [
                   language === 'cz' ? 'Pis cesky. Bud vecny.' : 'Write in English. Be concise.',
                   roleInstruction,
                   roundInstruction,
+                  inputAvailabilityInstruction,
                   language === 'cz' ? `Zadani: ${task}` : `Task: ${task}`,
                   previousSummary
                     ? language === 'cz'
@@ -3018,7 +3130,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   );
                   content = response.text;
                 } catch {
-                  content = buildSimulatedRoundMessage(language, agent, round, previousRoundMessages);
+                  content = buildSimulatedRoundMessage(
+                    language,
+                    agent,
+                    round,
+                    previousRoundMessages,
+                    isOneRoundDescriptive ? 'observational' : 'planning'
+                  );
                 }
               }
 
@@ -3055,69 +3173,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           let summary = '';
           if (refreshedProject.simulationMode) {
-            summary =
-              language === 'cz'
-                ? [
-                    '1) Recommended plan',
-                    '- Potvrdit scope a metriky, dorucit MVP v kratkych iteracich, potom rozsireni podle dopadu.',
-                    '2) Tradeoffs',
-                    '- V1 omezuje rozsah funkcionality, ale zrychluje doruceni a snizuje riziko.',
-                    '3) Risks + mitigations',
-                    '- Nejasne pozadavky -> acceptance criteria; skluz terminu -> milniky a scope lock; kvalita -> povinne QA gate.',
-                    '4) MVP scope',
-                    '- Klicovy uzivatelsky tok, zakladni validace, minimalni UX polish.',
-                    '5) Next steps',
-                    '- Schvalit plan, spustit realizaci, monitorovat metriky a pripravit backlog pro v2.',
-                  ].join('\n')
-                : [
-                    '1) Recommended plan',
-                    '- Confirm scope and metrics, deliver MVP in short iterations, then expand based on outcomes.',
-                    '2) Tradeoffs',
-                    '- v1 limits feature breadth but improves delivery speed and risk control.',
-                    '3) Risks + mitigations',
-                    '- Unclear requirements -> acceptance criteria; schedule slip -> milestones and scope lock; quality -> mandatory QA gates.',
-                    '4) MVP scope',
-                    '- Core user flow, baseline validation, and minimal UX polish.',
-                    '5) Next steps',
-                    '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
-                  ].join('\n');
-          } else {
-            const summaryPrompt = [
-              language === 'cz' ? 'Pis cesky.' : 'Write in English.',
-              language === 'cz'
-                ? 'Vytvor strukturovany vystup v sekcich presne:'
-                : 'Generate a structured output with exactly these sections:',
-              '1) Recommended plan',
-              '2) Tradeoffs',
-              '3) Risks + mitigations',
-              '4) MVP scope',
-              '5) Next steps',
-              language === 'cz' ? `Zadani: ${task}` : `Task: ${task}`,
-              language === 'cz'
-                ? `Vybrane body z debaty:\n${summaryContext}`
-                : `Debate excerpts:\n${summaryContext}`,
-            ].join('\n\n');
-
-            try {
-              const response = await callAiRespond(
-                {
-                  projectId,
-                  language,
-                  agentRole: 'Orchestrator',
-                  inputText: summaryPrompt,
-                  context: {
-                    projectName: refreshedProject.name,
-                    task,
-                    debateRunRound,
-                    rounds,
-                    revisionFeedback,
-                  },
-                },
-                {},
-                buildAttachmentContext(refreshedProject)
-              );
-              summary = response.text;
-            } catch {
+            if (isOneRoundDescriptive) {
+              summary =
+                language === 'cz'
+                  ? [
+                      'Final answer:',
+                      'Pri tomto vstupu davam primy popis toho, co je skutecne videt nebo citelne.',
+                      'Uncertainty (optional):',
+                      'Pokud je cast vstupu nejasna nebo chybi, uvadim to explicitne.',
+                    ].join('\n')
+                  : [
+                      'Final answer:',
+                      'Direct description of what is actually visible/readable in the provided input.',
+                      'Uncertainty (optional):',
+                      'Any missing or unclear part is stated explicitly.',
+                    ].join('\n');
+            } else {
               summary =
                 language === 'cz'
                   ? [
@@ -3144,6 +3215,104 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       '5) Next steps',
                       '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
                     ].join('\n');
+            }
+          } else {
+            const summaryPrompt = isOneRoundDescriptive
+              ? [
+                  language === 'cz' ? 'Pis cesky.' : 'Write in English.',
+                  language === 'cz'
+                    ? 'Vytvor pouze: "Final answer" a volitelne kratkou sekci "Uncertainty".'
+                    : 'Produce only: "Final answer" and an optional short "Uncertainty" note.',
+                  language === 'cz'
+                    ? 'Nepouzivej sekce jako Recommended plan, Tradeoffs, MVP scope, Next steps.'
+                    : 'Do not use sections like Recommended plan, Tradeoffs, MVP scope, Next steps.',
+                  language === 'cz'
+                    ? 'Syntetizuj primou odpoved z pozorovani agentu bez meta komentaru.'
+                    : 'Synthesize a direct answer from agent observations without meta discussion.',
+                  language === 'cz' ? `Zadani: ${task}` : `Task: ${task}`,
+                  language === 'cz'
+                    ? `Vybrane body z debaty:\n${summaryContext}`
+                    : `Debate excerpts:\n${summaryContext}`,
+                ].join('\n\n')
+              : [
+                  language === 'cz' ? 'Pis cesky.' : 'Write in English.',
+                  language === 'cz'
+                    ? 'Vytvor strukturovany vystup v sekcich presne:'
+                    : 'Generate a structured output with exactly these sections:',
+                  '1) Recommended plan',
+                  '2) Tradeoffs',
+                  '3) Risks + mitigations',
+                  '4) MVP scope',
+                  '5) Next steps',
+                  language === 'cz' ? `Zadani: ${task}` : `Task: ${task}`,
+                  language === 'cz'
+                    ? `Vybrane body z debaty:\n${summaryContext}`
+                    : `Debate excerpts:\n${summaryContext}`,
+                ].join('\n\n');
+
+            try {
+              const response = await callAiRespond(
+                {
+                  projectId,
+                  language,
+                  agentRole: 'Orchestrator',
+                  inputText: summaryPrompt,
+                  context: {
+                    projectName: refreshedProject.name,
+                    task,
+                    debateRunRound,
+                    rounds,
+                    revisionFeedback,
+                  },
+                },
+                {},
+                buildAttachmentContext(refreshedProject)
+              );
+              summary = response.text;
+            } catch {
+              if (isOneRoundDescriptive) {
+                summary =
+                  language === 'cz'
+                    ? [
+                        'Final answer:',
+                        'Primy popis toho, co je skutecne videt nebo citelne ve vstupu.',
+                        'Uncertainty (optional):',
+                        'Nejasne nebo chybejici casti vstupu jsou uvedeny explicitne.',
+                      ].join('\n')
+                    : [
+                        'Final answer:',
+                        'Direct description of what is actually visible/readable in the input.',
+                        'Uncertainty (optional):',
+                        'Any unclear or missing input parts are stated explicitly.',
+                      ].join('\n');
+              } else {
+                summary =
+                  language === 'cz'
+                    ? [
+                        '1) Recommended plan',
+                        '- Potvrdit scope a metriky, dorucit MVP v kratkych iteracich, potom rozsireni podle dopadu.',
+                        '2) Tradeoffs',
+                        '- V1 omezuje rozsah funkcionality, ale zrychluje doruceni a snizuje riziko.',
+                        '3) Risks + mitigations',
+                        '- Nejasne pozadavky -> acceptance criteria; skluz terminu -> milniky a scope lock; kvalita -> povinne QA gate.',
+                        '4) MVP scope',
+                        '- Klicovy uzivatelsky tok, zakladni validace, minimalni UX polish.',
+                        '5) Next steps',
+                        '- Schvalit plan, spustit realizaci, monitorovat metriky a pripravit backlog pro v2.',
+                      ].join('\n')
+                    : [
+                        '1) Recommended plan',
+                        '- Confirm scope and metrics, deliver MVP in short iterations, then expand based on outcomes.',
+                        '2) Tradeoffs',
+                        '- v1 limits feature breadth but improves delivery speed and risk control.',
+                        '3) Risks + mitigations',
+                        '- Unclear requirements -> acceptance criteria; schedule slip -> milestones and scope lock; quality -> mandatory QA gates.',
+                        '4) MVP scope',
+                        '- Core user flow, baseline validation, and minimal UX polish.',
+                        '5) Next steps',
+                        '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
+                      ].join('\n');
+              }
             }
           }
 
