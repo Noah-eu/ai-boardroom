@@ -328,7 +328,7 @@ type Action =
       maxWordsPerAgent: number;
     }
   | { type: 'SELECT_PROJECT'; projectId: string }
-  | { type: 'START_DEBATE'; task: string }
+  | { type: 'START_DEBATE'; task: string; projectId?: string }
   | { type: 'AGENT_SPEAK'; agent: AgentName; content: string }
   | { type: 'ORCHESTRATOR_SUMMARY'; content: string }
   | { type: 'REQUEST_APPROVAL' }
@@ -491,8 +491,11 @@ function appReducer(state: AppState, action: Action): AppState {
     }
 
     case 'START_DEBATE': {
-      if (!state.activeProject) return state;
-      const lang = state.activeProject.language;
+      const targetProjectId = action.projectId ?? state.activeProject?.id;
+      if (!targetProjectId) return state;
+      const targetProject = state.projects.find((project) => project.id === targetProjectId);
+      if (!targetProject) return state;
+      const lang = targetProject.language;
       const welcomeMsg = createMessage(
         'orchestrator',
         translateWithVars(lang, 'workflow.startDebateWelcome', { task: action.task }),
@@ -505,15 +508,16 @@ function appReducer(state: AppState, action: Action): AppState {
         status: (phaseAgents.includes(agent.name) ? 'thinking' : 'idle') as AgentStatus,
       }));
       const updatedProject: Project = {
-        ...state.activeProject,
+        ...targetProject,
         status: 'debating',
-        messages: [...state.activeProject.messages, createMessage('user', action.task), welcomeMsg],
+        messages: [...targetProject.messages, createMessage('user', action.task), welcomeMsg],
         updatedAt: new Date(),
       };
       return {
         ...state,
         currentPhase: 'debate',
         agents: updatedAgents,
+        selectedProjectId: updatedProject.id,
         activeProject: updatedProject,
         projects: state.projects.map((p) => (p.id === updatedProject.id ? updatedProject : p)),
         executionLog: [...state.executionLog, log],
@@ -862,9 +866,9 @@ interface AppContextValue {
     debateMode: DebateMode,
     maxWordsPerAgent: number,
     autoStartDebate?: boolean
-  ) => string;
+  ) => Promise<{ projectId: string }>;
   selectProject: (id: string) => void;
-  startDebate: (task: string) => void;
+  startDebate: (task: string, projectId?: string) => void;
   agentSpeak: (agent: AgentName, content: string) => void;
   orchestratorSummary: (content: string) => void;
   requestApproval: () => void;
@@ -1464,7 +1468,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const createProjectFn = useCallback(
-    (
+    async (
       name: string,
       description: string,
       projectLanguage: AppLanguage,
@@ -1476,6 +1480,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       autoStartDebate = true
     ) => {
       const projectId = generateId();
+      const createdProject = createProject(
+        name,
+        description,
+        projectLanguage,
+        outputType,
+        simulationMode,
+        debateRounds,
+        debateMode,
+        maxWordsPerAgent,
+        projectId
+      );
+
       dispatch({
         type: 'CREATE_PROJECT',
         projectId,
@@ -1488,20 +1504,70 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         debateMode,
         maxWordsPerAgent,
       });
-      if (autoStartDebate) {
-        dispatch({ type: 'START_DEBATE', task: description });
+      dispatch({ type: 'ADD_LOG', level: 'info', message: `project created with id: ${projectId}` });
+
+      const client = getFirebaseClient();
+      if (client) {
+        await setDoc(
+          doc(client.firestore, 'projects', projectId),
+          {
+            ...createdProject,
+            createdAt: createdProject.createdAt.toISOString(),
+            updatedAt: createdProject.updatedAt.toISOString(),
+            usage: {
+              ...createdProject.usage,
+              lastUpdatedAt: createdProject.usage.lastUpdatedAt
+                ? createdProject.usage.lastUpdatedAt.toISOString()
+                : null,
+              persistence: {
+                ...createdProject.usage.persistence,
+                lastSyncedAt: createdProject.usage.persistence.lastSyncedAt
+                  ? createdProject.usage.persistence.lastSyncedAt.toISOString()
+                  : null,
+              },
+            },
+            createdBy: firebaseUid,
+          },
+          { merge: true }
+        );
+        dispatch({ type: 'ADD_LOG', level: 'success', message: 'project persisted' });
       }
-      return projectId;
+
+      if (autoStartDebate) {
+        dispatch({ type: 'START_DEBATE', task: description, projectId });
+      }
+      return { projectId };
     },
-    []
+    [firebaseUid]
   );
 
   const selectProject = useCallback((id: string) => {
     dispatch({ type: 'SELECT_PROJECT', projectId: id });
   }, []);
 
-  const startDebate = useCallback((task: string) => {
-    dispatch({ type: 'START_DEBATE', task });
+  const startDebate = useCallback((task: string, projectId?: string) => {
+    const targetProjectId = projectId ?? stateRef.current.activeProject?.id;
+    if (!targetProjectId) {
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'error',
+        message: 'startDebate failed in AppContext.startDebate: missing target project id.',
+      });
+      return;
+    }
+
+    const targetProject = stateRef.current.projects.find((candidate) => candidate.id === targetProjectId);
+    if (!targetProject) {
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'error',
+        message: `startDebate failed in AppContext.startDebate: project lookup failed for id ${targetProjectId}.`,
+      });
+      return;
+    }
+
+    dispatch({ type: 'SELECT_PROJECT', projectId: targetProjectId });
+    dispatch({ type: 'START_DEBATE', task, projectId: targetProjectId });
   }, []);
 
   const agentSpeak = useCallback((agent: AgentName, content: string) => {
@@ -2257,9 +2323,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ingestion: ingest,
         });
 
-        const projectForPersist = stateRef.current.projects.find((candidate) => candidate.id === projectId);
         const client = getFirebaseClient();
-        if (projectForPersist && client) {
+        if (client) {
           const preferredCollection = attachment.firestoreCollection ?? 'attachments';
           const persistIngestion = async (collection: 'attachments' | 'artifacts') => {
             await setDoc(
@@ -2313,6 +2378,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               title: attachment.title,
             }),
           });
+        } else {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            message: `Project lookup failed in ingestAttachment log stage for id ${projectId}.`,
+          });
         }
       } catch (error) {
         const detail = error instanceof Error ? error.message : 'Ingestion failed';
@@ -2346,11 +2417,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const createdAt = new Date();
       const artifactId = generateId();
       const source = attachment.source ?? 'message';
-      const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-
-      if (!project) {
-        throw new Error(`Attachment upload failed: project not found for id ${projectId}.`);
-      }
 
       const maybeQueueForNextRound = (attachmentId: string) => {
         const debateRoundState = debateRoundStateRef.current[projectId];

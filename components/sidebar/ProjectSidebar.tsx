@@ -344,18 +344,33 @@ export function ProjectSidebar() {
     maxWordsPerAgent: number,
     attachments: FormDraftAttachment[]
   ) => {
-    const projectId = createProject(
-      name,
-      description,
-      projectLanguage,
-      outputType,
-      simulationMode,
-      debateRounds,
-      debateMode,
-      maxWordsPerAgent,
-      false
-    );
+    let projectId: string;
+    try {
+      const createdProject = await createProject(
+        name,
+        description,
+        projectLanguage,
+        outputType,
+        simulationMode,
+        debateRounds,
+        debateMode,
+        maxWordsPerAgent,
+        false
+      );
+      projectId = createdProject.projectId;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Project creation failed.';
+      addLog(`Project creation failed before attachment upload: ${detail}`, 'error');
+      return;
+    }
+
+    if (!projectId) {
+      addLog('Project creation failed in ProjectSidebar.handleCreate: missing projectId.', 'error');
+      return;
+    }
+
     setShowForm(false);
+    addLog(`starting pending attachment upload for project id: ${projectId}`, 'info');
 
     let attachmentUploadFailed = false;
     try {
@@ -385,7 +400,9 @@ export function ProjectSidebar() {
       return;
     }
 
-    startDebate(description);
+    addLog('pending attachment upload success', 'success');
+    addLog('debate start allowed', 'info');
+    startDebate(description, projectId);
   };
 
   return (
