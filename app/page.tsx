@@ -14,7 +14,7 @@ type MobileTab = 'chat' | 'agents' | 'log' | 'preview' | 'projects';
 export default function DashboardPage() {
   const MIN_TOP_HEIGHT = 260;
   const MIN_BOTTOM_HEIGHT = 170;
-  const { state, language, setLanguage, setProjectSimulationMode, setProjectDebateRounds, t } = useApp();
+  const { state, language, setLanguage, setProjectDebateRounds, t } = useApp();
   const [bottomHeight, setBottomHeight] = useState(192);
   const [isResizing, setIsResizing] = useState(false);
   const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>('chat');
@@ -140,25 +140,6 @@ export default function DashboardPage() {
 
               {activeProject && (
                 <>
-                  <div>
-                    <p className="mb-1 text-xs text-gray-300">{t('sidebar.simulationMode')}</p>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setProjectSimulationMode(activeProject.id, !activeProject.simulationMode)
-                      }
-                      className={`min-h-11 w-full rounded-lg border text-sm font-medium ${
-                        activeProject.simulationMode
-                          ? 'border-emerald-700/60 bg-emerald-900/40 text-emerald-200'
-                          : 'border-blue-700/60 bg-blue-900/40 text-blue-200'
-                      }`}
-                    >
-                      {activeProject.simulationMode
-                        ? t('projectForm.simulationOn')
-                        : t('projectForm.simulationOff')}
-                    </button>
-                  </div>
-
                   <div>
                     <p className="mb-1 text-xs text-gray-300">{t('projectForm.debateRounds')}</p>
                     <div className="grid grid-cols-3 gap-2">

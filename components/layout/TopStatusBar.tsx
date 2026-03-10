@@ -19,10 +19,9 @@ export function TopStatusBar() {
   const t = (key: string) => translate(projectLanguage, key as TranslationKey);
 
   const usage = project?.usage;
-  const isSimulated = Boolean(project?.simulationMode);
   const activeModel = usage?.activeModel ?? t('statusBar.modelUnknown');
   const displayTokens = useMemo(() => {
-    if (isSimulated || !usage) {
+    if (!usage) {
       return { input: 0, output: 0, total: 0, projectCost: 0, sessionCost: 0 };
     }
     return {
@@ -32,7 +31,7 @@ export function TopStatusBar() {
       projectCost: usage.estimatedProjectCostUsd,
       sessionCost: usage.sessionCostUsd,
     };
-  }, [isSimulated, usage]);
+  }, [usage]);
 
   if (!project) {
     return null;
@@ -48,7 +47,7 @@ export function TopStatusBar() {
           {t('statusBar.phase')}: {t(`phase.${state.currentPhase}` as const)}
         </span>
         <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1">
-          {t('statusBar.mode')}: {isSimulated ? t('statusBar.mode.simulation') : t('statusBar.mode.live')}
+          {t('statusBar.mode')}: {t('statusBar.mode.live')}
         </span>
         <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1">
           {t('statusBar.model')}: {activeModel}
@@ -62,11 +61,6 @@ export function TopStatusBar() {
         <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-cyan-200">
           {t('statusBar.sessionCost')}: {formatUsd(displayTokens.sessionCost)}
         </span>
-        {isSimulated && (
-          <span className="rounded border border-emerald-700/60 bg-emerald-900/40 px-2 py-1 text-emerald-200">
-            {t('statusBar.simulatedBadge')}
-          </span>
-        )}
         {project.taskGraph && (
           <>
             <button
@@ -105,18 +99,13 @@ export function TopStatusBar() {
             {t('statusBar.mobileDetails')}
           </summary>
           <div className="mt-2 grid grid-cols-1 gap-1.5 rounded border border-gray-800 bg-gray-900/60 p-2 text-[10px] text-gray-200">
-            <p>{t('statusBar.mode')}: {isSimulated ? t('statusBar.mode.simulation') : t('statusBar.mode.live')}</p>
+            <p>{t('statusBar.mode')}: {t('statusBar.mode.live')}</p>
             <p>{t('statusBar.model')}: {activeModel}</p>
             <p>
               {t('statusBar.tokens')}: {formatTokens(displayTokens.input)} / {formatTokens(displayTokens.output)} / {formatTokens(displayTokens.total)}
             </p>
             <p>{t('statusBar.projectCost')}: {formatUsd(displayTokens.projectCost)}</p>
             <p>{t('statusBar.sessionCost')}: {formatUsd(displayTokens.sessionCost)}</p>
-            {isSimulated && (
-              <span className="inline-flex w-fit rounded border border-emerald-700/60 bg-emerald-900/40 px-1.5 py-0.5 text-emerald-200">
-                {t('statusBar.simulatedBadge')}
-              </span>
-            )}
             {project.taskGraph && (
               <div className="mt-1 flex items-center gap-1.5">
                 <button

@@ -44,7 +44,6 @@ interface NewProjectFormProps {
     description: string,
     projectLanguage: AppLanguage,
     outputType: OutputType,
-    simulationMode: boolean,
     debateRounds: number,
     debateMode: DebateMode,
     maxWordsPerAgent: number,
@@ -60,7 +59,6 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
   const [description, setDescription] = useState('');
   const [projectLanguage, setProjectLanguage] = useState<AppLanguage>(defaultLanguage);
   const [outputType, setOutputType] = useState<OutputType>('other');
-  const [simulationMode, setSimulationMode] = useState(true);
   const [debateRounds, setDebateRounds] = useState(3);
   const [debateMode, setDebateMode] = useState<DebateMode>('auto');
   const [maxWordsPerAgent, setMaxWordsPerAgent] = useState(180);
@@ -115,7 +113,6 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
         description.trim(),
         projectLanguage,
         outputType,
-        simulationMode,
         debateRounds,
         debateMode,
         maxWordsPerAgent,
@@ -198,31 +195,6 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
         <option value="plan">{t('outputType.plan')}</option>
         <option value="other">{t('outputType.other')}</option>
       </select>
-      <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.simulationMode')}</label>
-      <div className="mb-2 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={() => setSimulationMode(true)}
-          className={`rounded px-2 py-1.5 text-xs border transition-colors ${
-            simulationMode
-              ? 'bg-emerald-900/60 text-emerald-200 border-emerald-700/60'
-              : 'bg-gray-800 text-gray-300 border-gray-600'
-          }`}
-        >
-          {t('projectForm.simulationOn')}
-        </button>
-        <button
-          type="button"
-          onClick={() => setSimulationMode(false)}
-          className={`rounded px-2 py-1.5 text-xs border transition-colors ${
-            !simulationMode
-              ? 'bg-blue-900/60 text-blue-200 border-blue-700/60'
-              : 'bg-gray-800 text-gray-300 border-gray-600'
-          }`}
-        >
-          {t('projectForm.simulationOff')}
-        </button>
-      </div>
       <label className="block text-[10px] font-medium text-gray-300 mb-1">{t('projectForm.debateRounds')}</label>
       <select
         value={debateRounds}
@@ -361,15 +333,12 @@ export function ProjectSidebar() {
     addLog,
     startDebate,
     selectProject,
-    runDemo,
     language,
     setLanguage,
     t,
-    setProjectSimulationMode,
   } = useApp();
   const [showForm, setShowForm] = useState(false);
   const [buildInfo, setBuildInfo] = useState<{ branch: string; commit: string } | null>(null);
-  const activeProject = state.activeProject;
 
   useEffect(() => {
     let isMounted = true;
@@ -395,7 +364,6 @@ export function ProjectSidebar() {
     description: string,
     projectLanguage: AppLanguage,
     outputType: OutputType,
-    simulationMode: boolean,
     debateRounds: number,
     debateMode: DebateMode,
     maxWordsPerAgent: number,
@@ -408,7 +376,7 @@ export function ProjectSidebar() {
         description,
         projectLanguage,
         outputType,
-        simulationMode,
+        false,
         debateRounds,
         debateMode,
         maxWordsPerAgent,
@@ -589,15 +557,6 @@ export function ProjectSidebar() {
                         <span className="text-[9px] px-1.5 py-0.5 rounded border border-gray-700 bg-gray-900 text-gray-300">
                           {project.language.toUpperCase()}
                         </span>
-                        <span
-                          className={`text-[9px] px-1.5 py-0.5 rounded border ${
-                            project.simulationMode
-                              ? 'border-emerald-700/60 bg-emerald-900/40 text-emerald-200'
-                              : 'border-blue-700/60 bg-blue-900/40 text-blue-200'
-                          }`}
-                        >
-                          {project.simulationMode ? t('projectForm.simulationOn') : t('projectForm.simulationOff')}
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -608,34 +567,7 @@ export function ProjectSidebar() {
         )}
       </div>
 
-      {/* Demo button */}
       <div className="flex-shrink-0 p-3 border-t border-gray-800">
-        {activeProject && (
-          <label className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-gray-700 bg-gray-900/80 px-3 py-2">
-            <div>
-              <p className="text-[11px] font-medium text-gray-200">{t('sidebar.simulationMode')}</p>
-              <p className="text-[10px] text-gray-400">{t('sidebar.simulationModeHint')}</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setProjectSimulationMode(activeProject.id, !activeProject.simulationMode)}
-              className={`rounded-full px-2 py-1 text-[10px] font-semibold transition-colors ${
-                activeProject.simulationMode
-                  ? 'bg-emerald-900/60 text-emerald-200 border border-emerald-700/60'
-                  : 'bg-gray-800 text-gray-200 border border-gray-600'
-              }`}
-            >
-              {activeProject.simulationMode ? t('projectForm.simulationOn') : t('projectForm.simulationOff')}
-            </button>
-          </label>
-        )}
-        <button
-          onClick={runDemo}
-          className="w-full px-3 py-2 bg-purple-800/40 hover:bg-purple-700/50 border border-purple-700/40 text-purple-300 text-xs font-medium rounded-lg transition-colors"
-        >
-          ▶ {t('sidebar.runDemo')}
-        </button>
-        <p className="text-[10px] text-gray-400 text-center mt-1">{t('sidebar.simulateWorkflow')}</p>
         {buildInfo && (
           <p className="text-[9px] text-gray-500 text-center mt-2">
             {buildInfo.branch} {buildInfo.commit}

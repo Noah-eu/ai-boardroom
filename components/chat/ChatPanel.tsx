@@ -253,7 +253,6 @@ export function ChatPanel() {
     t,
     tf,
     language,
-    setProjectSimulationMode,
   } = useApp();
   const [inputValue, setInputValue] = useState('');
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
@@ -483,18 +482,6 @@ export function ChatPanel() {
             </h2>
             <p className="text-xs text-gray-400 truncate">{activeProject.description}</p>
           </div>
-          <button
-            type="button"
-            onClick={() => setProjectSimulationMode(activeProject.id, !activeProject.simulationMode)}
-            className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors ${
-              activeProject.simulationMode
-                ? 'border-emerald-700/60 bg-emerald-900/40 text-emerald-200'
-                : 'border-blue-700/60 bg-blue-900/40 text-blue-200'
-            }`}
-            title={t('sidebar.simulationMode')}
-          >
-            {activeProject.simulationMode ? t('projectForm.simulationOn') : t('projectForm.simulationOff')}
-          </button>
         </div>
       </div>
 
