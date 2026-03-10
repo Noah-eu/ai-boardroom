@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useApp } from '@/context/AppContext';
 import { translate, translateWithVars } from '@/i18n';
 import { ProjectAttachment, Task, TaskStatus } from '@/types';
@@ -26,6 +28,50 @@ function formatAttachmentSize(size?: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isMarkdownArtifact(path: string): boolean {
+  return path.toLowerCase().endsWith('.md');
+}
+
+function extractMarkdownSection(markdown: string, headingAliases: string[]): string {
+  const lines = markdown.split('\n');
+  const normalizedAliases = headingAliases.map((alias) => alias.toLowerCase());
+  let start = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith('#')) continue;
+    const title = line.replace(/^#+\s*/, '').trim().toLowerCase();
+    if (normalizedAliases.includes(title)) {
+      start = i + 1;
+      break;
+    }
+  }
+  if (start === -1) return '';
+
+  const collected: string[] = [];
+  for (let i = start; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim().startsWith('#')) break;
+    collected.push(line);
+  }
+  return collected.join('\n').trim();
+}
+
+function buildExecutionCompletionStatus(tasks: Task[]): 'completed' | 'completed_with_fallback' | 'failed' | 'in_progress' {
+  if (tasks.some((task) => task.status === 'failed')) return 'failed';
+  const hasActive = tasks.some((task) => ['queued', 'blocked', 'running'].includes(task.status));
+  if (hasActive) return 'in_progress';
+  if (tasks.some((task) => task.status === 'completed_with_fallback')) return 'completed_with_fallback';
+  return 'completed';
+}
+
+function MarkdownArtifactView({ content }: { content: string }) {
+  return (
+    <div className="prose prose-invert prose-pre:bg-black prose-pre:border prose-pre:border-gray-700 prose-code:text-blue-200 max-w-none text-[12px]">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
 }
 
 function buildImageAiStatusKeys(attachment: ProjectAttachment): Array<Parameters<typeof translate>[1]> {
@@ -130,6 +176,32 @@ export function PreviewPanel() {
       ),
     [tasks]
   );
+  const executionCompletionStatus = useMemo(() => buildExecutionCompletionStatus(tasks), [tasks]);
+  const integratorFinalArtifact = useMemo(() => {
+    const integratorTask = [...tasks].reverse().find((task) => task.agent === 'Integrator');
+    if (!integratorTask) return null;
+    const artifact = integratorTask.producesArtifacts.find((item) => item.path === 'final-summary.md') ?? null;
+    if (!artifact?.content) return null;
+
+    const whatToDoNow =
+      extractMarkdownSection(artifact.content, ['What to do now', 'Co udelat ted']) ||
+      extractMarkdownSection(artifact.content, ['Next steps', 'Doporuceny dalsi krok']);
+    const filesAffected = extractMarkdownSection(
+      artifact.content,
+      ['Files likely affected', 'Pravdepodobne dotcene soubory']
+    );
+    const recommendedNextAction =
+      extractMarkdownSection(artifact.content, ['Recommended next action', 'Doporuceny dalsi krok']) ||
+      extractMarkdownSection(artifact.content, ['Next steps', 'Dalsi kroky']);
+
+    return {
+      task: integratorTask,
+      artifact,
+      whatToDoNow,
+      filesAffected,
+      recommendedNextAction,
+    };
+  }, [tasks]);
   const projectAttachments = useMemo<ProjectAttachment[]>(() => project?.attachments ?? [], [project]);
   const groupedAttachments = useMemo(() => {
     const projectLevel = projectAttachments.filter((attachment) => (attachment.source ?? 'message') === 'project');
@@ -178,6 +250,7 @@ export function PreviewPanel() {
   const selectedArtifactMeta = selectedTask?.producesArtifacts.find(
     (artifact) => artifact.path === selectedArtifact
   );
+  const selectedArtifactOwner = selectedArtifactMeta?.producedBy ?? selectedTask?.agent ?? null;
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -237,6 +310,22 @@ export function PreviewPanel() {
               blocked: schedulerState.blocked,
               failed: schedulerState.failed,
             })}
+          </p>
+          <p className="mt-1 text-[11px] text-gray-300">
+            Execution status:{' '}
+            <span
+              className={`rounded px-1.5 py-0.5 ${
+                executionCompletionStatus === 'completed'
+                  ? 'bg-green-900/40 text-green-200'
+                  : executionCompletionStatus === 'completed_with_fallback'
+                  ? 'bg-cyan-900/40 text-cyan-200'
+                  : executionCompletionStatus === 'failed'
+                  ? 'bg-red-900/40 text-red-200'
+                  : 'bg-blue-900/40 text-blue-200'
+              }`}
+            >
+              {executionCompletionStatus}
+            </span>
           </p>
         </div>
       )}
@@ -498,6 +587,42 @@ export function PreviewPanel() {
           )}
         </div>
 
+        {integratorFinalArtifact && (
+          <div className="mb-3 rounded-lg border border-blue-700/50 bg-blue-950/20 px-3 py-3">
+            <p className="text-[10px] uppercase tracking-wider text-blue-300">Final Result / Finalni vysledek</p>
+            <p className="mt-1 text-[11px] text-blue-100">
+              Source: {integratorFinalArtifact.artifact.path} ({integratorFinalArtifact.task.status})
+            </p>
+
+            <div className="mt-2 grid gap-2">
+              <div className="rounded border border-blue-900/60 bg-gray-900/70 px-2 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-blue-200">What to do now / Co udelat ted</p>
+                <p className="mt-1 text-[11px] text-gray-100 whitespace-pre-wrap leading-relaxed">
+                  {integratorFinalArtifact.whatToDoNow || 'Read final summary and start with the first ordered task.'}
+                </p>
+              </div>
+
+              <div className="rounded border border-blue-900/60 bg-gray-900/70 px-2 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-blue-200">
+                  Files likely affected / Pravdepodobne dotcene soubory
+                </p>
+                <p className="mt-1 text-[11px] text-gray-100 whitespace-pre-wrap leading-relaxed">
+                  {integratorFinalArtifact.filesAffected || 'See execution artifacts for file-level proposal details.'}
+                </p>
+              </div>
+
+              <div className="rounded border border-blue-900/60 bg-gray-900/70 px-2 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-blue-200">
+                  Recommended next action / Doporuceny dalsi krok
+                </p>
+                <p className="mt-1 text-[11px] text-gray-100 whitespace-pre-wrap leading-relaxed">
+                  {integratorFinalArtifact.recommendedNextAction || 'Approve the top-priority implementation package and execute in order.'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {isComplete && (
           <div className="mb-3 rounded-lg border border-green-700/50 bg-green-950/20 px-3 py-3">
             <div className="flex items-center gap-2">
@@ -606,7 +731,12 @@ export function PreviewPanel() {
                       const unresolvedDependencies = task.dependsOn
                         .map((id) => tasks.find((candidate) => candidate.id === id))
                         .filter((dependency): dependency is Task =>
-                          Boolean(dependency && dependency.status !== 'done' && dependency.status !== 'failed')
+                          Boolean(
+                            dependency &&
+                              dependency.status !== 'done' &&
+                              dependency.status !== 'failed' &&
+                              dependency.status !== 'completed_with_fallback'
+                          )
                         )
                         .map((dependency) => dependency.title);
                       return (
@@ -696,11 +826,32 @@ export function PreviewPanel() {
                 )}
 
                 {selectedArtifactMeta?.content && (
-                  <div className="mt-2 rounded border border-gray-700 bg-gray-950 px-2 py-1.5">
-                    <p className="text-[10px] text-gray-400">Execution Results</p>
-                    <p className="mt-1 text-[10px] text-gray-200 whitespace-pre-wrap leading-relaxed">
-                      {selectedArtifactMeta.content}
-                    </p>
+                  <div className="mt-2 rounded border border-gray-700 bg-gray-950 px-2 py-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-[10px] text-gray-400">Execution Results</p>
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
+                        agent: {selectedArtifactOwner}
+                      </span>
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
+                        file: {selectedArtifactMeta.path}
+                      </span>
+                      <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
+                        type: {selectedArtifactMeta.kind}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 rounded border border-gray-800 bg-black/30 px-2 py-2">
+                      {isMarkdownArtifact(selectedArtifactMeta.path) ? (
+                        <MarkdownArtifactView content={selectedArtifactMeta.content} />
+                      ) : (
+                        <div className="space-y-2">
+                          <p className="text-[10px] text-gray-400">Structured preview</p>
+                          <pre className="whitespace-pre-wrap text-[10px] text-gray-200 leading-relaxed">
+                            {selectedArtifactMeta.content}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
