@@ -76,7 +76,13 @@ export interface Message {
 
 export type ProjectAttachmentKind = 'image' | 'pdf' | 'zip' | 'file' | 'url';
 
-export type AttachmentIngestionStatus = 'uploaded' | 'parsed' | 'indexed' | 'included' | 'failed';
+export type AttachmentIngestionStatus =
+  | 'uploaded'
+  | 'ingested'
+  | 'included'
+  | 'failed'
+  | 'parsed'
+  | 'indexed';
 
 export interface AttachmentIngestion {
   status: AttachmentIngestionStatus;

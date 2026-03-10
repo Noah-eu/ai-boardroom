@@ -2354,7 +2354,40 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }),
         });
 
-        const body = (await response.json()) as { ingest?: AttachmentIngestion; error?: string };
+        const contentType = response.headers.get('content-type') || 'unknown';
+        const rawBody = await response.text();
+        const preview = rawBody.slice(0, 200);
+        const isHtml = contentType.toLowerCase().includes('text/html') || rawBody.startsWith('<!DOCTYPE');
+
+        if (isHtml) {
+          const htmlError =
+            `PDF ingest endpoint returned HTML instead of JSON. ` +
+            `status=${response.status}; content-type=${contentType}; first200=${preview}`;
+          console.error(`[ingest-attachment] ${htmlError}`);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: htmlError,
+          });
+          throw new Error(htmlError);
+        }
+
+        let body: { ingest?: AttachmentIngestion; error?: string };
+        try {
+          body = JSON.parse(rawBody) as { ingest?: AttachmentIngestion; error?: string };
+        } catch (parseError) {
+          const errorMsg =
+            `Failed to parse JSON response from ingest endpoint. ` +
+            `status=${response.status}; content-type=${contentType}; first200=${preview}`;
+          console.error(`[ingest-attachment] ${errorMsg}`);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: errorMsg,
+          });
+          throw new Error(errorMsg);
+        }
+
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
           throw new Error(body.error ?? 'Attachment ingestion failed');

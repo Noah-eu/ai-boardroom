@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { load as loadHtml } from 'cheerio';
-import { PDFParse } from 'pdf-parse';
 import JSZip from 'jszip';
+
+export const runtime = 'nodejs';
 
 const requestSchema = z.object({
   kind: z.enum(['url', 'image', 'pdf', 'zip', 'file']),
@@ -13,7 +14,10 @@ const requestSchema = z.object({
 });
 
 type IngestPayload = {
-  status: 'uploaded' | 'parsed' | 'indexed' | 'failed';
+  status: 'uploaded' | 'ingested' | 'included' | 'failed' | 'parsed' | 'indexed';
+  success?: boolean;
+  title?: string;
+  pageCount?: number;
   summary?: string;
   extractedText?: string;
   excerpt?: string;
@@ -33,6 +37,53 @@ function trimText(value: string, max = 12000): string {
 function excerpt(value: string, max = 320): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max)}...`;
+}
+
+function decodePdfToken(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+async function extractPdfText(buffer: Buffer): Promise<{ pageCount: number; text: string }> {
+  const pdf2jsonModule = await import('pdf2json');
+  const PDFParser = pdf2jsonModule.default;
+
+  return new Promise((resolve, reject) => {
+    const parser = new PDFParser();
+
+    parser.on('pdfParser_dataError', (errMsg: Error | { parserError: Error }) => {
+      const parserError = errMsg instanceof Error ? errMsg : errMsg.parserError;
+      const message = parserError instanceof Error ? parserError.message : String(parserError ?? 'Unknown PDF parser error');
+      reject(new Error(message));
+    });
+
+    parser.on('pdfParser_dataReady', (pdfData: { Pages?: Array<{ Texts?: Array<{ R?: Array<{ T?: string }> }> }> }) => {
+      const pages = Array.isArray(pdfData.Pages) ? pdfData.Pages : [];
+      const tokens: string[] = [];
+
+      for (const page of pages) {
+        const textBlocks = Array.isArray(page.Texts) ? page.Texts : [];
+        for (const block of textBlocks) {
+          const runs = Array.isArray(block.R) ? block.R : [];
+          for (const run of runs) {
+            if (typeof run.T === 'string' && run.T.trim().length > 0) {
+              tokens.push(decodePdfToken(run.T));
+            }
+          }
+        }
+      }
+
+      resolve({
+        pageCount: pages.length,
+        text: tokens.join(' '),
+      });
+    });
+
+    parser.parseBuffer(buffer);
+  });
 }
 
 async function ingestUrl(sourceUrl: string): Promise<IngestPayload> {
@@ -63,22 +114,53 @@ async function ingestUrl(sourceUrl: string): Promise<IngestPayload> {
   };
 }
 
-async function ingestPdf(downloadUrl: string): Promise<IngestPayload> {
-  const response = await fetch(downloadUrl);
+async function ingestPdf(downloadUrl: string, title: string): Promise<IngestPayload> {
+  const response = await fetch(downloadUrl, {
+    headers: {
+      'Accept': 'application/pdf',
+      'User-Agent': 'AI-Boardroom-Ingest/1.0',
+    },
+  });
+
   if (!response.ok) {
-    throw new Error(`PDF download failed (${response.status})`);
+    throw new Error(`PDF download failed (HTTP ${response.status})`);
   }
+
+  const contentType = response.headers.get('content-type') || '';
+
+  // Validate that we got a PDF, not HTML or other content
+  if (!contentType.toLowerCase().includes('pdf') &&
+    !contentType.toLowerCase().includes('octet-stream')) {
+    console.error(`[PDF-INGEST] Wrong content-type: ${contentType}. Expected PDF.`);
+    throw new Error(`Expected PDF content-type, got: ${contentType}`);
+  }
+
   const arrayBuffer = await response.arrayBuffer();
-  const parser = new PDFParse({ data: Buffer.from(arrayBuffer) });
-  const parsed = await parser.getText();
-  await parser.destroy();
-  const text = trimText(parsed.text ?? '');
+  const buffer = Buffer.from(arrayBuffer);
+
+  // Validate that buffer looks like a PDF (starts with %PDF)
+  const pdfHeader = buffer.subarray(0, 4).toString('ascii');
+  if (!pdfHeader.startsWith('%PDF')) {
+    const preview = buffer.subarray(0, 50).toString('utf-8').replace(/[^\x20-\x7E]/g, '?');
+    console.error(`[PDF-INGEST] Invalid PDF header. First 50 chars: "${preview}"`);
+    throw new Error(`Invalid PDF format: buffer does not start with %PDF marker`);
+  }
+
+  const parsed = await extractPdfText(buffer);
+  const cleanText = trimText(parsed.text);
+  if (!cleanText || cleanText.length < 10) {
+    console.warn(`[PDF-INGEST] Few/no text extracted from PDF at ${downloadUrl}`);
+  }
 
   return {
-    status: 'parsed',
+    success: true,
+    status: 'ingested',
+    title,
+    pageCount: parsed.pageCount,
     summary: 'Extracted PDF text content.',
-    extractedText: text,
-    excerpt: excerpt(text),
+    extractedText: cleanText,
+    excerpt: excerpt(cleanText),
+    pageTitle: title,
   };
 }
 
@@ -175,8 +257,15 @@ export async function POST(request: Request) {
       if (!payload.downloadUrl) {
         return NextResponse.json({ error: 'downloadUrl is required for PDF ingestion.' }, { status: 400 });
       }
-      const result = await ingestPdf(payload.downloadUrl);
-      return NextResponse.json({ ingest: result });
+      const result = await ingestPdf(payload.downloadUrl, payload.title);
+      return NextResponse.json({
+        success: true,
+        title: result.title ?? payload.title,
+        pageCount: result.pageCount ?? 0,
+        excerpt: result.excerpt ?? '',
+        extractedText: result.extractedText ?? '',
+        ingest: result,
+      });
     }
 
     if (payload.kind === 'zip') {
