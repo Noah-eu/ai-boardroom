@@ -66,6 +66,27 @@ function buildExecutionCompletionStatus(tasks: Task[]): 'completed' | 'completed
   return 'completed';
 }
 
+function buildArtifactFallbackPreview(
+  artifact: { path: string; label: string; kind: string },
+  task?: Task | null
+): string {
+  const source = task ? `${task.agent} / ${task.title}` : 'Unknown task';
+  return [
+    `# ${artifact.label}`,
+    '',
+    '## Preview',
+    'Obsah artefaktu zatim neni k dispozici jako markdown/text v pameti UI.',
+    '',
+    `- Soubor: ${artifact.path}`,
+    `- Typ: ${artifact.kind}`,
+    `- Zdroj: ${source}`,
+    '',
+    '## Co udelat dal',
+    '- Pokud chcete realny obsah artefaktu, spustte projekt v Live rezimu (OpenAI).',
+    '- V simulacnim rezimu mohou byt artefakty bez textoveho obsahu.',
+  ].join('\n');
+}
+
 function MarkdownArtifactView({ content }: { content: string }) {
   return (
     <div className="prose prose-invert prose-pre:bg-black prose-pre:border prose-pre:border-gray-700 prose-code:text-blue-200 max-w-none text-[12px]">
@@ -251,6 +272,12 @@ export function PreviewPanel() {
     (artifact) => artifact.path === selectedArtifact
   );
   const selectedArtifactOwner = selectedArtifactMeta?.producedBy ?? selectedTask?.agent ?? null;
+  const selectedArtifactContent = useMemo(() => {
+    if (!selectedArtifactMeta) return '';
+    return selectedArtifactMeta.content?.trim()
+      ? selectedArtifactMeta.content
+      : buildArtifactFallbackPreview(selectedArtifactMeta, selectedTask);
+  }, [selectedArtifactMeta, selectedTask]);
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -825,7 +852,7 @@ export function PreviewPanel() {
                   </div>
                 )}
 
-                {selectedArtifactMeta?.content && (
+                {selectedArtifactMeta && (
                   <div className="mt-2 rounded border border-gray-700 bg-gray-950 px-2 py-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="text-[10px] text-gray-400">Execution Results</p>
@@ -842,12 +869,12 @@ export function PreviewPanel() {
 
                     <div className="mt-2 rounded border border-gray-800 bg-black/30 px-2 py-2">
                       {isMarkdownArtifact(selectedArtifactMeta.path) ? (
-                        <MarkdownArtifactView content={selectedArtifactMeta.content} />
+                        <MarkdownArtifactView content={selectedArtifactContent} />
                       ) : (
                         <div className="space-y-2">
                           <p className="text-[10px] text-gray-400">Structured preview</p>
                           <pre className="whitespace-pre-wrap text-[10px] text-gray-200 leading-relaxed">
-                            {selectedArtifactMeta.content}
+                            {selectedArtifactContent}
                           </pre>
                         </div>
                       )}
