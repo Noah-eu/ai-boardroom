@@ -89,8 +89,26 @@ function buildArtifactFallbackPreview(
 
 function MarkdownArtifactView({ content, isMobile = false }: { content: string; isMobile?: boolean }) {
   return (
-    <div className={`prose prose-invert prose-pre:bg-black prose-pre:border prose-pre:border-gray-700 prose-code:text-blue-200 max-w-none ${isMobile ? 'text-sm' : 'text-[12px]'}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    <div className={`prose prose-invert max-w-none break-words prose-pre:border prose-pre:border-gray-700 prose-pre:bg-black prose-code:text-blue-200 [overflow-wrap:anywhere] ${isMobile ? 'text-sm' : 'text-[12px]'}`}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          pre: ({ children }) => (
+            <pre className="overflow-x-hidden whitespace-pre-wrap break-words rounded-md border border-gray-700 bg-black p-4 text-inherit">
+              {children}
+            </pre>
+          ),
+          code: ({ className, children }) => (
+            <code className={`${className ?? ''} whitespace-pre-wrap break-words [overflow-wrap:anywhere]`}>
+              {children}
+            </code>
+          ),
+          p: ({ children }) => <p className="break-words [overflow-wrap:anywhere]">{children}</p>,
+          li: ({ children }) => <li className="break-words [overflow-wrap:anywhere]">{children}</li>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -307,25 +325,25 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   return (
     <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-t border-gray-800'}`}>
       {/* Header */}
-      <div className={`flex-shrink-0 flex items-center gap-2 border-b border-gray-800 ${isMobile ? 'px-5 py-4' : 'px-4 py-2'}`}>
-        <h3 className={`${isMobile ? 'text-sm' : 'text-xs'} font-semibold text-gray-100`}>{t('preview.title')}</h3>
+      <div className={`flex-shrink-0 flex items-center gap-3 border-b border-gray-800 ${isMobile ? 'px-6 py-5' : 'px-4 py-2'}`}>
+        <h3 className={`${isMobile ? 'text-base' : 'text-xs'} font-semibold text-gray-100`}>{t('preview.title')}</h3>
         {schedulerState.concurrencyLimit > 0 && (
-          <span className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
+          <span className={`${isMobile ? 'text-sm px-3 py-2 rounded-xl' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
             {t('preview.concurrency')}: {schedulerState.concurrencyLimit}
           </span>
         )}
         {schedulerState.concurrencyLimit > 0 && (
-          <span className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
+          <span className={`${isMobile ? 'text-sm px-3 py-2 rounded-xl' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
             {t('preview.runningNow')}: {schedulerState.runningTasks}
           </span>
         )}
         {schedulerState.retryLimit > 0 && (
-          <span className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
+          <span className={`${isMobile ? 'text-sm px-3 py-2 rounded-xl' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
             {t('preview.retryLimit')}: {schedulerState.retryLimit}
           </span>
         )}
         {totalTasksCount > 0 && (
-          <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} ml-auto text-gray-400`}>
+          <span className={`${isMobile ? 'text-sm' : 'text-[10px]'} ml-auto text-gray-400`}>
             {doneTasksCount}/{totalTasksCount} {t('preview.tasks')}
           </span>
         )}
@@ -462,7 +480,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
 
       {/* Content */}
       <div
-        className={`flex-1 overflow-y-auto ${isMobile ? 'px-3 py-3' : 'px-4 py-3'}`}
+        className={`flex-1 overflow-y-auto overflow-x-hidden ${isMobile ? 'px-5 py-5' : 'px-4 py-3'}`}
         style={isMobile ? { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' } : undefined}
       >
         {schedulerState.deadlock && !isComplete && (
@@ -881,7 +899,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       ) : (
                         <div className="space-y-2">
                           <p className="text-[10px] text-gray-400">Structured preview</p>
-                          <pre className="whitespace-pre-wrap text-[10px] text-gray-200 leading-relaxed">
+                          <pre className="overflow-x-hidden whitespace-pre-wrap break-words text-[10px] leading-relaxed text-gray-200 [overflow-wrap:anywhere]">
                             {selectedArtifactContent}
                           </pre>
                         </div>

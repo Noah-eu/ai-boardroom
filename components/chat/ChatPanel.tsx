@@ -97,10 +97,10 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
   const isApprovalResponse = message.type === 'approval-response';
   const color = senderColors[message.sender] ?? 'text-gray-300';
   const bgColor = senderBgColors[message.sender] ?? 'bg-gray-700';
-  const bubbleWidthClass = isMobile && (isUser || isApprovalResponse) ? 'max-w-sm' : 'max-w-xs';
-  const avatarClass = isMobile ? 'h-9 w-9 text-xs' : 'h-7 w-7 text-[10px]';
-  const metaTextClass = isMobile ? 'text-xs' : 'text-xs';
-  const bodyTextClass = isMobile ? 'text-sm' : 'text-xs';
+  const bubbleWidthClass = isMobile && (isUser || isApprovalResponse) ? 'max-w-md' : 'max-w-xs';
+  const avatarClass = isMobile ? 'h-11 w-11 text-sm' : 'h-7 w-7 text-[10px]';
+  const metaTextClass = isMobile ? 'text-sm' : 'text-xs';
+  const bodyTextClass = isMobile ? 'text-base' : 'text-xs';
   const messageAttachments = (message.attachmentIds ?? [])
     .map((attachmentId) => attachmentMap[attachmentId])
     .filter((attachment): attachment is ProjectAttachment => Boolean(attachment));
@@ -125,12 +125,12 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
 
   if (isSystem) {
     return (
-      <div className="flex gap-3 py-2">
+      <div className={`flex ${isMobile ? 'gap-4 py-3' : 'gap-3 py-2'}`}>
         <div className={`${avatarClass} rounded-full flex-shrink-0 flex items-center justify-center font-bold text-white ${bgColor}`}>
           {getInitials(message.sender)}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-baseline gap-2 mb-1">
+          <div className={`mb-2 flex items-baseline ${isMobile ? 'gap-3' : 'gap-2'}`}>
             <span className={`${metaTextClass} font-semibold ${color}`}>
               {message.sender === 'orchestrator' ? t('chat.orchestrator') : message.sender}
             </span>
@@ -139,7 +139,7 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
             )}
             <span className={`ml-auto ${isMobile ? 'text-xs' : 'text-[10px]'} text-gray-400`}>{formatTime(message.timestamp, locale)}</span>
           </div>
-          <div className={`${isMobile ? 'rounded-xl px-4 py-3' : 'rounded-lg px-3 py-2'} border border-purple-800/30 bg-purple-950/40`}>
+          <div className={`${isMobile ? 'rounded-[1.25rem] px-5 py-4' : 'rounded-lg px-3 py-2'} border border-purple-800/30 bg-purple-950/40`}>
             <p className={`${bodyTextClass} leading-relaxed whitespace-pre-wrap text-gray-300`}>{message.content}</p>
             {renderAttachmentList()}
           </div>
@@ -150,13 +150,13 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
 
   if (isApprovalRequest) {
     return (
-      <div className="my-3 flex flex-col items-center gap-2">
-        <div className={`${isMobile ? 'w-full max-w-xl rounded-xl px-5 py-4' : 'w-full max-w-lg rounded-lg px-4 py-3'} border border-yellow-700/40 bg-yellow-950/40`}>
+      <div className="my-4 flex flex-col items-center gap-3">
+        <div className={`${isMobile ? 'w-full max-w-none rounded-[1.25rem] px-6 py-5' : 'w-full max-w-lg rounded-lg px-4 py-3'} border border-yellow-700/40 bg-yellow-950/40`}>
           <div className="mb-2 flex items-center gap-2">
-            <span className={`${isMobile ? 'text-lg' : 'text-sm'} text-yellow-400`}>⚠</span>
-                  <span className={`${isMobile ? 'text-sm' : 'text-xs'} font-semibold text-yellow-300`}>{tf('chat.approvalRequiredRound', { round: approvalRound })}</span>
+            <span className={`${isMobile ? 'text-2xl' : 'text-sm'} text-yellow-400`}>⚠</span>
+                  <span className={`${isMobile ? 'text-base' : 'text-xs'} font-semibold text-yellow-300`}>{tf('chat.approvalRequiredRound', { round: approvalRound })}</span>
           </div>
-          <p className={`${isMobile ? 'text-sm' : 'text-xs'} leading-relaxed text-gray-300`}>{message.content}</p>
+          <p className={`${isMobile ? 'text-base' : 'text-xs'} leading-relaxed text-gray-300`}>{message.content}</p>
         </div>
       </div>
     );
@@ -166,16 +166,16 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
     return (
       <div className="flex justify-end py-2">
         <div className={bubbleWidthClass}>
-          <div className="flex items-baseline gap-2 mb-1 justify-end">
+          <div className={`mb-2 flex items-baseline justify-end ${isMobile ? 'gap-3' : 'gap-2'}`}>
             <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} text-gray-400`}>{formatTime(message.timestamp, locale)}</span>
-            <span className={`${isMobile ? 'text-sm' : 'text-xs'} font-semibold text-blue-300`}>{t('chat.you')}</span>
+            <span className={`${isMobile ? 'text-base' : 'text-xs'} font-semibold text-blue-300`}>{t('chat.you')}</span>
           </div>
-          <div className={`${isMobile ? 'rounded-xl px-4 py-3' : 'rounded-lg px-3 py-2'} ${
+          <div className={`${isMobile ? 'rounded-[1.25rem] px-5 py-4' : 'rounded-lg px-3 py-2'} ${
             isApprovedResponse
               ? 'bg-green-950/50 border border-green-700/40'
               : 'bg-red-950/50 border border-red-700/40'
           }`}>
-            <p className={`${isMobile ? 'text-sm' : 'text-xs'} text-gray-200`}>{message.content}</p>
+            <p className={`${isMobile ? 'text-base' : 'text-xs'} text-gray-200`}>{message.content}</p>
             {renderAttachmentList()}
           </div>
         </div>
@@ -187,12 +187,12 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
     return (
       <div className="flex justify-end py-2">
         <div className={bubbleWidthClass}>
-          <div className="flex items-baseline gap-2 mb-1 justify-end">
+          <div className={`mb-2 flex items-baseline justify-end ${isMobile ? 'gap-3' : 'gap-2'}`}>
             <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} text-gray-400`}>{formatTime(message.timestamp, locale)}</span>
-            <span className={`${isMobile ? 'text-sm' : 'text-xs'} font-semibold text-blue-300`}>{t('chat.you')}</span>
+            <span className={`${isMobile ? 'text-base' : 'text-xs'} font-semibold text-blue-300`}>{t('chat.you')}</span>
           </div>
-          <div className={`${isMobile ? 'rounded-xl px-4 py-3' : 'rounded-lg px-3 py-2'} border border-blue-600/30 bg-blue-600/20`}>
-            <p className={`${isMobile ? 'text-sm' : 'text-xs'} leading-relaxed text-gray-200`}>{message.content}</p>
+          <div className={`${isMobile ? 'rounded-[1.25rem] px-5 py-4' : 'rounded-lg px-3 py-2'} border border-blue-600/30 bg-blue-600/20`}>
+            <p className={`${isMobile ? 'text-base' : 'text-xs'} leading-relaxed text-gray-200`}>{message.content}</p>
             {renderAttachmentList()}
           </div>
         </div>
@@ -201,20 +201,20 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap, i
   }
 
   return (
-    <div className="flex gap-3 py-2">
+    <div className={`flex ${isMobile ? 'gap-4 py-3' : 'gap-3 py-2'}`}>
       <div className={`${avatarClass} rounded-full flex-shrink-0 flex items-center justify-center font-bold text-white ${bgColor}`}>
         {getInitials(message.sender)}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2 mb-1">
+        <div className={`mb-2 flex items-baseline ${isMobile ? 'gap-3' : 'gap-2'}`}>
           <span className={`${metaTextClass} font-semibold ${color}`}>{message.sender}</span>
           {message.agentRole && (
             <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} text-gray-400`}>{message.agentRole}</span>
           )}
           <span className={`ml-auto ${isMobile ? 'text-xs' : 'text-[10px]'} text-gray-400`}>{formatTime(message.timestamp, locale)}</span>
         </div>
-        <div className={`${isMobile ? 'rounded-xl px-4 py-3' : 'rounded-lg px-3 py-2'} border border-gray-700/40 bg-gray-800/60`}>
-          <p className={`${isMobile ? 'text-sm' : 'text-xs'} leading-relaxed whitespace-pre-wrap text-gray-300`}>{message.content}</p>
+        <div className={`${isMobile ? 'rounded-[1.25rem] px-5 py-4' : 'rounded-lg px-3 py-2'} border border-gray-700/40 bg-gray-800/60`}>
+          <p className={`${isMobile ? 'text-base' : 'text-xs'} leading-relaxed whitespace-pre-wrap text-gray-300`}>{message.content}</p>
           {renderAttachmentList()}
         </div>
       </div>
@@ -231,14 +231,14 @@ interface ApprovalActionsProps {
 function ApprovalActions({ onApprove, t, isMobile = false }: ApprovalActionsProps) {
   return (
     <div className={`flex-shrink-0 border-t border-yellow-800/30 bg-yellow-950/20 ${isMobile ? 'px-4 py-4' : 'px-4 py-3'}`}>
-      <p className={`${isMobile ? 'mb-3 text-sm' : 'mb-2 text-xs'} font-medium text-yellow-300`}>{t('chat.reviewPlan')}</p>
-      <p className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2 text-sm' : 'mb-2 rounded px-2 py-1.5 text-[11px]'} border border-yellow-700/40 bg-yellow-950/30 text-yellow-200`}>
+      <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-medium text-yellow-300`}>{t('chat.reviewPlan')}</p>
+      <p className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3 text-base' : 'mb-2 rounded px-2 py-1.5 text-[11px]'} border border-yellow-700/40 bg-yellow-950/30 text-yellow-200`}>
         {t('chat.revisionFeedbackHint')}
       </p>
       <div className="flex gap-2">
         <button
           onClick={onApprove}
-          className={`w-full bg-green-700 font-medium text-white transition-colors hover:bg-green-600 ${isMobile ? 'rounded-xl px-4 py-3 text-sm' : 'rounded-lg px-3 py-2 text-xs'}`}
+          className={`w-full bg-green-700 font-medium text-white transition-colors hover:bg-green-600 ${isMobile ? 'rounded-[1.25rem] px-5 py-4 text-lg' : 'rounded-lg px-3 py-2 text-xs'}`}
         >
           ✓ {t('chat.approve')}
         </button>
@@ -474,8 +474,8 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
     return (
       <div className={`h-full flex flex-col items-center justify-center bg-gray-950 text-center ${isMobile ? 'px-5 py-8' : 'px-8'}`}>
         <div className="text-4xl mb-4">🤖</div>
-        <h3 className="text-base font-semibold text-gray-200 mb-2">{t('chat.noProjectTitle')}</h3>
-        <p className={`text-gray-400 ${isMobile ? 'max-w-sm text-sm leading-relaxed' : 'max-w-xs text-sm'}`}>
+        <h3 className="mb-3 text-xl font-semibold text-gray-200">{t('chat.noProjectTitle')}</h3>
+        <p className={`text-gray-400 ${isMobile ? 'max-w-md text-base leading-relaxed' : 'max-w-xs text-sm'}`}>
           {t('chat.noProjectDesc')}
         </p>
       </div>
@@ -499,11 +499,11 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
       )}
 
       {/* Messages */}
-      <div className={`flex-1 overflow-y-auto space-y-1 ${isMobile ? 'px-4 py-4' : 'px-4 py-2'}`}>
+      <div className={`flex-1 overflow-y-auto ${isMobile ? 'space-y-2 px-5 py-5' : 'space-y-1 px-4 py-2'}`}>
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <div className="text-3xl mb-3">💬</div>
-            <p className={`text-gray-400 ${isMobile ? 'max-w-sm text-sm leading-relaxed' : 'text-sm'}`}>
+            <p className={`text-gray-400 ${isMobile ? 'max-w-md text-base leading-relaxed' : 'text-sm'}`}>
               {t('chat.emptyPrompt')}
             </p>
           </div>
@@ -535,10 +535,10 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
 
       {/* Input */}
       <div
-        className={`flex-shrink-0 border-t border-gray-800 ${isMobile ? 'bg-gray-950/95 px-3 pt-3 backdrop-blur' : 'px-4 py-3'}`}
-        style={isMobile ? { paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' } : undefined}
+        className={`flex-shrink-0 border-t border-gray-800 ${isMobile ? 'bg-gray-950/95 px-5 pt-5 backdrop-blur' : 'px-4 py-3'}`}
+        style={isMobile ? { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' } : undefined}
       >
-        <div className="mb-3 flex items-center justify-between rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-300">
+        <div className="mb-4 flex items-center justify-between rounded-[1.25rem] border border-gray-700 bg-gray-900 px-4 py-3 text-base text-gray-300">
           <span className="font-medium">
             {t('chat.modeNormal')}
           </span>
@@ -548,13 +548,13 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
         </div>
 
         {draftAttachments.length > 0 && (
-          <div className="mb-3 flex flex-wrap gap-2">
+          <div className="mb-4 flex flex-wrap gap-3">
             {draftAttachments.map((attachment) => (
               <div
                 key={attachment.id}
-                className="inline-flex items-center gap-2 rounded-xl border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-200"
+                className="inline-flex items-center gap-3 rounded-[1.15rem] border border-gray-700 bg-gray-900 px-4 py-3 text-base text-gray-200"
               >
-                <span className="max-w-40 truncate">{attachment.title}</span>
+                <span className="max-w-52 truncate">{attachment.title}</span>
                 <span className="text-gray-400">{t(`attachments.kind.${attachment.kind}` as TranslationKey)}</span>
                 {'file' in attachment && attachment.file.size > 0 && (
                   <span className="text-gray-500">{formatSize(attachment.file.size)}</span>
@@ -571,52 +571,52 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
           </div>
         )}
 
-        <div className={isMobile ? 'space-y-3' : 'flex gap-2'}>
-          <div className={isMobile ? 'flex gap-2' : 'contents'}>
+        <div className={isMobile ? 'space-y-4' : 'flex gap-2'}>
+          <div className={isMobile ? 'flex gap-3' : 'contents'}>
             <div className="relative self-end">
               <button
                 type="button"
                 onClick={() => setShowAttachmentMenu((previous) => !previous)}
-                className={`${isMobile ? 'h-14 w-14 text-2xl rounded-xl' : 'h-10 w-10 text-lg rounded-lg'} border border-gray-700 bg-gray-900 text-gray-200 hover:border-blue-600/60`}
+                className={`${isMobile ? 'h-16 w-16 text-[2rem] rounded-[1.25rem]' : 'h-10 w-10 text-lg rounded-lg'} border border-gray-700 bg-gray-900 text-gray-200 hover:border-blue-600/60`}
                 title={t('attachments.menuOpen')}
               >
                 +
               </button>
 
               {showAttachmentMenu && (
-                <div className={`absolute left-0 z-20 rounded-xl border border-gray-700 bg-gray-950 p-2 shadow-xl ${isMobile ? 'bottom-16 w-52' : 'bottom-12 w-36'}`}>
+                <div className={`absolute left-0 z-20 rounded-[1.25rem] border border-gray-700 bg-gray-950 p-3 shadow-xl ${isMobile ? 'bottom-20 w-64' : 'bottom-12 w-36'}`}>
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    className="w-full rounded-lg px-3 py-3 text-left text-sm text-gray-200 hover:bg-gray-900"
+                    className="w-full rounded-xl px-4 py-4 text-left text-base text-gray-200 hover:bg-gray-900"
                   >
                     {t('attachments.option.file')}
                   </button>
                   <button
                     type="button"
                     onClick={() => photoInputRef.current?.click()}
-                    className="w-full rounded-lg px-3 py-3 text-left text-sm text-gray-200 hover:bg-gray-900"
+                    className="w-full rounded-xl px-4 py-4 text-left text-base text-gray-200 hover:bg-gray-900"
                   >
                     {t('attachments.option.photo')}
                   </button>
                   <button
                     type="button"
                     onClick={() => pdfInputRef.current?.click()}
-                    className="w-full rounded-lg px-3 py-3 text-left text-sm text-gray-200 hover:bg-gray-900"
+                    className="w-full rounded-xl px-4 py-4 text-left text-base text-gray-200 hover:bg-gray-900"
                   >
                     {t('attachments.option.pdf')}
                   </button>
                   <button
                     type="button"
                     onClick={() => zipInputRef.current?.click()}
-                    className="w-full rounded-lg px-3 py-3 text-left text-sm text-gray-200 hover:bg-gray-900"
+                    className="w-full rounded-xl px-4 py-4 text-left text-base text-gray-200 hover:bg-gray-900"
                   >
                     {t('attachments.option.zip')}
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowLinkInput((previous) => !previous)}
-                    className="w-full rounded-lg px-3 py-3 text-left text-sm text-gray-200 hover:bg-gray-900"
+                    className="w-full rounded-xl px-4 py-4 text-left text-base text-gray-200 hover:bg-gray-900"
                   >
                     {t('attachments.option.link')}
                   </button>
@@ -636,35 +636,35 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
                   : t('chat.placeholderMessage')
               }
               rows={isMobile ? 3 : 2}
-              className={`flex-1 resize-none rounded-xl px-4 py-3 text-base text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
+              className={`flex-1 resize-none rounded-[1.25rem] px-5 py-4 text-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
                 isAwaitingApproval
                   ? 'bg-orange-950/30 border border-orange-600/50 focus:border-orange-500 focus:ring-orange-500/30'
                   : 'bg-gray-900 border border-gray-600 focus:border-blue-500 focus:ring-blue-500/30'
-              } ${isMobile ? 'min-h-[124px]' : ''}`}
+              } ${isMobile ? 'min-h-[168px]' : ''}`}
             />
           </div>
           <button
             onClick={() => void handleSend()}
             disabled={(isAwaitingApproval ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
-            className={`${isMobile ? 'min-h-14 w-full rounded-xl' : 'self-end px-4 rounded-lg'} bg-blue-600 px-4 py-3 text-base font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90`}
+            className={`${isMobile ? 'min-h-16 w-full rounded-[1.25rem]' : 'self-end px-4 rounded-lg'} bg-blue-600 px-5 py-4 text-lg font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90`}
           >
             {isSending ? t('attachments.sending') : t('chat.send')}
           </button>
         </div>
 
         {showLinkInput && (
-          <div className={`mt-3 ${isMobile ? 'space-y-3' : 'flex gap-2'}`}>
+          <div className={`mt-4 ${isMobile ? 'space-y-4' : 'flex gap-2'}`}>
             <input
               value={linkValue}
               onChange={(event) => setLinkValue(event.target.value)}
               placeholder={t('attachments.linkPlaceholder')}
-              className="flex-1 rounded-xl border border-gray-700 bg-gray-900 px-3 py-2.5 text-sm text-gray-100 placeholder-gray-400"
+              className="flex-1 rounded-[1.25rem] border border-gray-700 bg-gray-900 px-4 py-3 text-base text-gray-100 placeholder-gray-400"
             />
             <button
               type="button"
               onClick={handleAddLink}
               disabled={!linkValue.trim()}
-              className={`${isMobile ? 'min-h-14 w-full rounded-xl' : 'rounded'} border border-blue-700/60 bg-blue-900/40 px-3 py-2.5 text-sm text-blue-100 disabled:opacity-50`}
+              className={`${isMobile ? 'min-h-16 w-full rounded-[1.25rem]' : 'rounded'} border border-blue-700/60 bg-blue-900/40 px-4 py-3 text-base text-blue-100 disabled:opacity-50`}
             >
               {t('attachments.addLink')}
             </button>
@@ -694,11 +694,11 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
           onChange={(event) => onFilePicked(event, 'zip')}
         />
 
-        {composerNotice && <p className="mt-2 text-xs text-yellow-300">{composerNotice}</p>}
+        {composerNotice && <p className="mt-3 text-sm text-yellow-300">{composerNotice}</p>}
         {isAwaitingApproval && !inputValue.trim() && (
-          <p className="mt-2 text-xs text-gray-400">{t('chat.revisionFeedbackRequired')}</p>
+          <p className="mt-3 text-sm text-gray-400">{t('chat.revisionFeedbackRequired')}</p>
         )}
-        <p className="mt-2 text-xs text-gray-400">{t('chat.hint')}</p>
+        <p className="mt-3 text-sm text-gray-400">{t('chat.hint')}</p>
       </div>
     </div>
   );

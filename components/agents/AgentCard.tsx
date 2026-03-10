@@ -79,41 +79,41 @@ export function AgentCard({
   return (
     <div
       className={`
-        ${compact ? 'rounded-lg p-3' : 'rounded-xl p-4'} border bg-gradient-to-b transition-all duration-200
+        ${compact ? 'rounded-lg p-3' : 'rounded-[1.4rem] p-5'} border bg-gradient-to-b transition-all duration-200
         ${colors.color}
         ${isActive ? 'ring-1 ring-blue-500/50 shadow-md shadow-blue-500/10' : ''}
       `}
     >
       {/* Header */}
-      <div className={`${compact ? 'mb-2 gap-2' : 'mb-3 gap-3'} flex items-center`}>
-        <div className={`flex flex-shrink-0 items-center justify-center border border-gray-700 bg-gray-800 ${compact ? 'h-8 w-8 rounded-md' : 'h-10 w-10 rounded-lg'}`}>
-          <span className={`${compact ? 'text-[10px]' : 'text-xs'} font-bold text-gray-300`}>{agentInitials[name]}</span>
+      <div className={`${compact ? 'mb-2 gap-2' : 'mb-4 gap-4'} flex items-center`}>
+        <div className={`flex flex-shrink-0 items-center justify-center border border-gray-700 bg-gray-800 ${compact ? 'h-8 w-8 rounded-md' : 'h-12 w-12 rounded-xl'}`}>
+          <span className={`${compact ? 'text-[10px]' : 'text-sm'} font-bold text-gray-300`}>{agentInitials[name]}</span>
         </div>
         <div className="flex-1 min-w-0">
           <div className={`flex items-center ${compact ? 'gap-1.5' : 'gap-2'}`}>
-            <span className={`truncate ${compact ? 'text-sm' : 'text-base'} font-semibold text-gray-100`}>{name}</span>
-            <span className={`inline-flex items-center gap-1 font-medium ${cfg.badgeClass} ${compact ? 'rounded px-1.5 py-0.5 text-[10px]' : 'rounded-lg px-2 py-1 text-xs'}`}>
+            <span className={`truncate ${compact ? 'text-sm' : 'text-lg'} font-semibold text-gray-100`}>{name}</span>
+            <span className={`inline-flex items-center gap-1 font-medium ${cfg.badgeClass} ${compact ? 'rounded px-1.5 py-0.5 text-[10px]' : 'rounded-xl px-3 py-1.5 text-sm'}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${cfg.dotClass}`} />
               {t(cfg.labelKey)}
             </span>
           </div>
-          <p className={`truncate ${compact ? 'text-[11px]' : 'text-sm'} text-gray-300`}>{role}</p>
+          <p className={`truncate ${compact ? 'text-[11px]' : 'text-base'} text-gray-300`}>{role}</p>
         </div>
       </div>
 
       {/* Last output */}
       <div className="mt-1">
         {status === 'active' && activeTaskTitle && (
-          <p className={`${compact ? 'mb-1 text-[10px]' : 'mb-2 text-xs'} text-blue-200`}>
+          <p className={`${compact ? 'mb-1 text-[10px]' : 'mb-3 text-sm'} text-blue-200`}>
             {t('agent.activeTask')}: <span className="text-blue-100">{activeTaskTitle}</span>
           </p>
         )}
         {lastOutput ? (
-          <p className={`line-clamp-2 ${compact ? 'text-[11px]' : 'text-sm'} leading-relaxed text-gray-300`}>
+          <p className={`line-clamp-2 ${compact ? 'text-[11px]' : 'text-base'} leading-relaxed text-gray-300`}>
             {lastOutput}
           </p>
         ) : (
-          <p className={`${compact ? 'text-[11px]' : 'text-sm'} italic text-gray-400`}>{description}</p>
+          <p className={`${compact ? 'text-[11px]' : 'text-base'} italic text-gray-400`}>{description}</p>
         )}
       </div>
 
@@ -129,7 +129,7 @@ export function AgentCard({
               />
             ))}
           </div>
-          <span className={`ml-1 ${compact ? 'text-[10px]' : 'text-xs'} text-yellow-400/70`}>{t('agent.processing')}</span>
+          <span className={`ml-1 ${compact ? 'text-[10px]' : 'text-sm'} text-yellow-400/70`}>{t('agent.processing')}</span>
         </div>
       )}
     </div>

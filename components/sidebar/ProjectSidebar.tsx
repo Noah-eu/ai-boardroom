@@ -157,38 +157,38 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
   return (
     <form
       onSubmit={handleSubmit}
-      className={`${isMobile ? 'mx-4 mb-4 max-h-[calc(100vh-180px)] rounded-2xl p-4' : 'mx-3 mb-3 max-h-[calc(100vh-220px)] rounded-lg p-3'} overflow-y-auto overflow-x-hidden border border-gray-700 bg-gray-900`}
+      className={`${isMobile ? 'mx-5 mb-5 max-h-[calc(100vh-140px)] rounded-[1.75rem] p-5' : 'mx-3 mb-3 max-h-[calc(100vh-220px)] rounded-lg p-3'} overflow-y-auto overflow-x-hidden border border-gray-700 bg-gray-900`}
     >
-      <p className={`${isMobile ? 'mb-3 text-sm' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
+      <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
       <input
         type="text"
         placeholder={t('projectForm.name')}
         value={name}
         onChange={(e) => setName(e.target.value)}
         autoFocus
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       />
       <textarea
         placeholder={t('projectForm.prompt')}
         value={description}
         onChange={(e) => setDescription(e.target.value)}
-        rows={isMobile ? 4 : 3}
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full resize-none border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        rows={isMobile ? 5 : 3}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full resize-none border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       />
-      <label className={`${isMobile ? 'mb-1.5 text-xs' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.language')}</label>
+      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.language')}</label>
       <select
         value={projectLanguage}
         onChange={(e) => setProjectLanguage(e.target.value as AppLanguage)}
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       >
         <option value="en">{t('lang.en')}</option>
         <option value="cz">{t('lang.cz')}</option>
       </select>
-      <label className={`${isMobile ? 'mb-1.5 text-xs' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.outputType')}</label>
+      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.outputType')}</label>
       <select
         value={outputType}
         onChange={(e) => setOutputType(e.target.value as OutputType)}
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       >
         <option value="app">{t('outputType.app')}</option>
         <option value="website">{t('outputType.website')}</option>
@@ -196,26 +196,26 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
         <option value="plan">{t('outputType.plan')}</option>
         <option value="other">{t('outputType.other')}</option>
       </select>
-      <label className={`${isMobile ? 'mb-1.5 text-xs' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateRounds')}</label>
+      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateRounds')}</label>
       <select
         value={debateRounds}
         onChange={(e) => setDebateRounds(Number(e.target.value))}
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       >
         <option value={1}>1</option>
         <option value={2}>2</option>
         <option value={3}>3</option>
       </select>
-      <label className={`${isMobile ? 'mb-1.5 text-xs' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateMode')}</label>
+      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateMode')}</label>
       <select
         value={debateMode}
         onChange={(e) => setDebateMode(e.target.value as DebateMode)}
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       >
         <option value="auto">{t('projectForm.debateModeAuto')}</option>
         <option value="interactive">{t('projectForm.debateModeInteractive')}</option>
       </select>
-      <label className={`${isMobile ? 'mb-1.5 text-xs' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.maxWordsPerAgent')}</label>
+      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.maxWordsPerAgent')}</label>
       <input
         type="number"
         min={140}
@@ -227,34 +227,34 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
           if (Number.isNaN(next)) return;
           setMaxWordsPerAgent(Math.max(140, Math.min(220, next)));
         }}
-        className={`${isMobile ? 'mb-3 rounded-xl px-3 py-2.5 text-sm' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
       />
 
-      <div className={`${isMobile ? 'mb-3 rounded-xl p-3' : 'mb-2 rounded p-2'} border border-gray-700 bg-gray-950/40`}>
-        <div className={`flex items-center ${isMobile ? 'gap-3' : 'gap-2'}`}>
-          <p className={`${isMobile ? 'text-xs' : 'text-[10px]'} font-medium text-gray-300`}>{t('projectForm.attachments')}</p>
+      <div className={`${isMobile ? 'mb-4 rounded-[1.25rem] p-4' : 'mb-2 rounded p-2'} border border-gray-700 bg-gray-950/40`}>
+        <div className={`flex items-center ${isMobile ? 'gap-4' : 'gap-2'}`}>
+          <p className={`${isMobile ? 'text-sm' : 'text-[10px]'} font-medium text-gray-300`}>{t('projectForm.attachments')}</p>
           <div ref={attachmentMenuRef} className="relative ml-auto">
             <button
               type="button"
               onClick={() => setShowAttachmentMenu((previous) => !previous)}
-              className={`${isMobile ? 'h-10 w-10 rounded-xl text-base' : 'h-7 w-7 rounded text-sm'} border border-gray-700 bg-gray-900 text-gray-200`}
+              className={`${isMobile ? 'h-12 w-12 rounded-[1rem] text-xl' : 'h-7 w-7 rounded text-sm'} border border-gray-700 bg-gray-900 text-gray-200`}
               title={t('attachments.menuOpen')}
             >
               +
             </button>
             {showAttachmentMenu && (
-              <div className={`absolute right-0 z-20 border border-gray-700 bg-gray-950 ${isMobile ? 'top-12 w-40 rounded-xl p-1.5' : 'top-8 w-32 rounded p-1'}`}>
-                <button type="button" onClick={() => fileInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-lg px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.file')}</button>
-                <button type="button" onClick={() => photoInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-lg px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.photo')}</button>
-                <button type="button" onClick={() => pdfInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-lg px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.pdf')}</button>
-                <button type="button" onClick={() => zipInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-lg px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.zip')}</button>
+              <div className={`absolute right-0 z-20 border border-gray-700 bg-gray-950 ${isMobile ? 'top-14 w-52 rounded-[1.25rem] p-2' : 'top-8 w-32 rounded p-1'}`}>
+                <button type="button" onClick={() => fileInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-xl px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.file')}</button>
+                <button type="button" onClick={() => photoInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-xl px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.photo')}</button>
+                <button type="button" onClick={() => pdfInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-xl px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.pdf')}</button>
+                <button type="button" onClick={() => zipInputRef.current?.click()} className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-xl px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}>{t('attachments.option.zip')}</button>
                 <button
                   type="button"
                   onClick={() => {
                     setShowLinkInput(true);
                     setShowAttachmentMenu(false);
                   }}
-                  className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-lg px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}
+                  className={`w-full text-left text-gray-200 hover:bg-gray-900 ${isMobile ? 'rounded-xl px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}
                 >
                   {t('attachments.option.link')}
                 </button>
@@ -264,24 +264,24 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
         </div>
 
         {showLinkInput && (
-          <div className={`${isMobile ? 'mt-3 gap-2' : 'mt-2 gap-1.5'} flex`}>
+          <div className={`${isMobile ? 'mt-4 gap-3' : 'mt-2 gap-1.5'} flex`}>
             <input
               value={linkValue}
               onChange={(event) => setLinkValue(event.target.value)}
               placeholder={t('attachments.linkPlaceholder')}
-              className={`flex-1 border border-gray-700 bg-gray-900 text-gray-100 placeholder-gray-400 ${isMobile ? 'rounded-xl px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}
+              className={`flex-1 border border-gray-700 bg-gray-900 text-gray-100 placeholder-gray-400 ${isMobile ? 'rounded-[1.25rem] px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}
             />
-            <button type="button" onClick={addLinkAttachment} disabled={!linkValue.trim()} className={`border border-blue-700/60 bg-blue-900/40 text-blue-100 disabled:opacity-50 ${isMobile ? 'rounded-xl px-3 py-2 text-sm' : 'rounded px-2 py-1 text-[11px]'}`}>
+            <button type="button" onClick={addLinkAttachment} disabled={!linkValue.trim()} className={`border border-blue-700/60 bg-blue-900/40 text-blue-100 disabled:opacity-50 ${isMobile ? 'rounded-[1.25rem] px-4 py-3 text-base' : 'rounded px-2 py-1 text-[11px]'}`}>
               {t('attachments.addLink')}
             </button>
           </div>
         )}
 
         {attachments.length > 0 ? (
-          <div className={`flex flex-wrap ${isMobile ? 'mt-3 gap-2' : 'mt-2 gap-1'}`}>
+          <div className={`flex flex-wrap ${isMobile ? 'mt-4 gap-3' : 'mt-2 gap-1'}`}>
             {attachments.map((attachment) => (
-              <div key={attachment.id} className={`inline-flex items-center border border-gray-700 bg-gray-900 text-gray-200 ${isMobile ? 'gap-2 rounded-xl px-2.5 py-2 text-xs' : 'gap-1 rounded px-1.5 py-1 text-[10px]'}`}>
-                <span className={`${isMobile ? 'max-w-36' : 'max-w-28'} truncate`}>{attachment.title}</span>
+              <div key={attachment.id} className={`inline-flex items-center border border-gray-700 bg-gray-900 text-gray-200 ${isMobile ? 'gap-3 rounded-[1.1rem] px-3 py-3 text-sm' : 'gap-1 rounded px-1.5 py-1 text-[10px]'}`}>
+                <span className={`${isMobile ? 'max-w-44' : 'max-w-28'} truncate`}>{attachment.title}</span>
                 <span className="text-gray-400">{t(`attachments.kind.${attachment.kind}` as const)}</span>
                 {'file' in attachment && attachment.file.size > 0 && (
                   <span className="text-gray-500">{formatSize(attachment.file.size)}</span>
@@ -289,7 +289,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
                 <button
                   type="button"
                   onClick={() => setAttachments((previous) => previous.filter((item) => item.id !== attachment.id))}
-                  className={`rounded border border-gray-700 text-gray-300 ${isMobile ? 'px-1.5' : 'px-1'}`}
+                  className={`rounded border border-gray-700 text-gray-300 ${isMobile ? 'px-2' : 'px-1'}`}
                 >
                   ×
                 </button>
@@ -297,7 +297,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
             ))}
           </div>
         ) : (
-          <p className={`${isMobile ? 'mt-2 text-xs' : 'mt-1 text-[10px]'} text-gray-500`}>{t('projectForm.attachmentsEmpty')}</p>
+          <p className={`${isMobile ? 'mt-3 text-sm' : 'mt-1 text-[10px]'} text-gray-500`}>{t('projectForm.attachmentsEmpty')}</p>
         )}
 
         <input ref={fileInputRef} type="file" className="hidden" onChange={(event) => onFilePicked(event, 'file')} />
@@ -306,18 +306,18 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
         <input ref={zipInputRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" className="hidden" onChange={(event) => onFilePicked(event, 'zip')} />
       </div>
 
-      <div className={`flex ${isMobile ? 'gap-3' : 'gap-2'}`}>
+      <div className={`flex ${isMobile ? 'gap-4' : 'gap-2'}`}>
         <button
           type="submit"
           disabled={!name.trim() || !description.trim()}
-          className={`flex-1 bg-blue-600 font-medium text-white transition-colors hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-80 ${isMobile ? 'rounded-xl py-3 text-sm' : 'rounded py-1.5 text-xs'}`}
+          className={`flex-1 bg-blue-600 font-medium text-white transition-colors hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-80 ${isMobile ? 'rounded-[1.25rem] py-4 text-lg' : 'rounded py-1.5 text-xs'}`}
         >
           {t('projectForm.create')}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className={`flex-1 bg-gray-700 text-gray-300 transition-colors hover:bg-gray-600 ${isMobile ? 'rounded-xl py-3 text-sm' : 'rounded py-1.5 text-xs'}`}
+          className={`flex-1 bg-gray-700 text-gray-300 transition-colors hover:bg-gray-600 ${isMobile ? 'rounded-[1.25rem] py-4 text-lg' : 'rounded py-1.5 text-xs'}`}
         >
           {t('projectForm.cancel')}
         </button>
@@ -501,14 +501,14 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
       )}
 
       {/* Projects label + new button */}
-      <div className={`flex-shrink-0 flex items-center justify-between ${isMobile ? 'border-b border-gray-800 px-5 py-4' : 'px-3 py-2'}`}>
-        <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} font-semibold text-gray-400 uppercase tracking-widest`}>
+      <div className={`flex-shrink-0 flex items-center justify-between ${isMobile ? 'border-b border-gray-800 px-6 py-5' : 'px-3 py-2'}`}>
+        <span className={`${isMobile ? 'text-sm' : 'text-[10px]'} font-semibold text-gray-400 uppercase tracking-widest`}>
           {t('sidebar.projects')}
         </span>
         <button
           onClick={() => setShowForm(true)}
           title={t('sidebar.newProject')}
-          className={`${isMobile ? 'min-h-12 min-w-12 rounded-xl border border-gray-700 bg-gray-900 text-xl' : 'w-5 h-5 rounded text-sm'} flex items-center justify-center text-gray-300 transition-colors hover:bg-gray-800 hover:text-gray-100`}
+          className={`${isMobile ? 'min-h-14 min-w-14 rounded-[1.1rem] border border-gray-700 bg-gray-900 text-2xl' : 'w-5 h-5 rounded text-sm'} flex items-center justify-center text-gray-300 transition-colors hover:bg-gray-800 hover:text-gray-100`}
         >
           +
         </button>
@@ -528,17 +528,17 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
       {/* Project list */}
       <div className="flex-1 overflow-y-auto">
         {state.projects.length === 0 ? (
-          <div className="px-5 py-8 text-center">
-            <p className="mb-4 text-sm text-gray-400">{t('sidebar.noProjects')}</p>
+          <div className="px-6 py-10 text-center">
+            <p className="mb-5 text-base text-gray-400">{t('sidebar.noProjects')}</p>
             <button
               onClick={() => setShowForm(true)}
-              className="rounded-xl bg-blue-700 px-4 py-3 text-sm text-white transition-colors hover:bg-blue-600"
+              className="rounded-[1.25rem] bg-blue-700 px-5 py-4 text-lg text-white transition-colors hover:bg-blue-600"
             >
               {t('sidebar.createFirst')}
             </button>
           </div>
         ) : (
-          <div className="py-2">
+          <div className="py-3">
             {state.projects.map((project) => {
               const isSelected = project.id === state.selectedProjectId;
               const sCfg = statusConfig[project.status];
@@ -550,25 +550,25 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
                     selectProject(project.id);
                     onProjectActivated?.();
                   }}
-                  className={`w-full text-left transition-colors ${isMobile ? 'px-5 py-4.5' : 'px-3 py-2.5'} ${
+                  className={`w-full text-left transition-colors ${isMobile ? 'px-6 py-5' : 'px-3 py-2.5'} ${
                     isSelected
                       ? 'bg-blue-600/20 border-r-2 border-blue-500'
                       : 'hover:bg-gray-800/60'
                   }`}
                 >
-                  <div className="flex items-start gap-3">
-                    <span className={`mt-2 h-2 w-2 rounded-full flex-shrink-0 ${sCfg.dot}`} />
+                  <div className="flex items-start gap-4">
+                    <span className={`mt-2.5 h-2.5 w-2.5 rounded-full flex-shrink-0 ${sCfg.dot}`} />
                     <div className="flex-1 min-w-0">
                       <p
-                        className={`${isMobile ? 'text-sm' : 'text-xs'} font-medium truncate ${
+                        className={`${isMobile ? 'text-base' : 'text-xs'} font-medium truncate ${
                           isSelected ? 'text-blue-300' : 'text-gray-300'
                         }`}
                       >
                         {project.name}
                       </p>
-                      <p className={`mt-1 ${isMobile ? 'text-xs' : 'text-[10px]'} ${sCfg.color}`}>{statusLabel}</p>
-                      <div className="mt-2 flex items-center gap-2">
-                        <span className={`${isMobile ? 'text-[11px] px-2 py-1 rounded-lg' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
+                      <p className={`mt-2 ${isMobile ? 'text-sm' : 'text-[10px]'} ${sCfg.color}`}>{statusLabel}</p>
+                      <div className="mt-3 flex items-center gap-2">
+                        <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
                           {project.language.toUpperCase()}
                         </span>
                       </div>
@@ -582,11 +582,11 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
       </div>
 
       <div
-        className={`flex-shrink-0 border-t border-gray-800 p-3 ${isMobile ? 'px-5 pt-4 pb-6' : ''}`}
-        style={isMobile ? { paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' } : undefined}
+        className={`flex-shrink-0 border-t border-gray-800 p-3 ${isMobile ? 'px-6 pt-5 pb-7' : ''}`}
+        style={isMobile ? { paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))' } : undefined}
       >
         {buildInfo && (
-          <p className="mt-2 text-center text-[11px] text-gray-500">
+          <p className="mt-2 text-center text-xs text-gray-500">
             {buildInfo.branch} {buildInfo.commit}
           </p>
         )}
