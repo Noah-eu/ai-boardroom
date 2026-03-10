@@ -219,30 +219,22 @@ function MessageBubble({ message, t, tf, locale, approvalRound, attachmentMap }:
 
 interface ApprovalActionsProps {
   onApprove: () => void;
-  onRejectRequest: () => void;
-  isRevisionMode: boolean;
   t: (key: TranslationKey) => string;
 }
 
-function ApprovalActions({ onApprove, onRejectRequest, isRevisionMode, t }: ApprovalActionsProps) {
+function ApprovalActions({ onApprove, t }: ApprovalActionsProps) {
   return (
     <div className="flex-shrink-0 border-t border-yellow-800/30 bg-yellow-950/20 px-4 py-3">
       <p className="text-xs text-yellow-300 mb-2 font-medium">{t('chat.reviewPlan')}</p>
       <p className="mb-2 rounded border border-yellow-700/40 bg-yellow-950/30 px-2 py-1.5 text-[11px] text-yellow-200">
-        {isRevisionMode ? t('chat.revisionModeActiveHint') : t('chat.revisionFeedbackHint')}
+        {t('chat.revisionFeedbackHint')}
       </p>
       <div className="flex gap-2">
         <button
           onClick={onApprove}
-          className="flex-1 px-3 py-2 bg-green-700 hover:bg-green-600 text-white text-xs font-medium rounded-lg transition-colors"
+          className="w-full px-3 py-2 bg-green-700 hover:bg-green-600 text-white text-xs font-medium rounded-lg transition-colors"
         >
           ✓ {t('chat.approve')}
-        </button>
-        <button
-          onClick={onRejectRequest}
-          className="flex-1 px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-xs font-medium rounded-lg transition-colors"
-        >
-          ✕ {t('chat.reject')}
         </button>
       </div>
     </div>
@@ -263,7 +255,6 @@ export function ChatPanel() {
     language,
     setProjectSimulationMode,
   } = useApp();
-  const [composerMode, setComposerMode] = useState<'normal' | 'revision'>('normal');
   const [inputValue, setInputValue] = useState('');
   const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
@@ -298,22 +289,11 @@ export function ChatPanel() {
     .reduce((current, value) => Math.max(current, value), -1);
   const hasPendingApprovalRequest = lastApprovalRequestIndex > lastApprovalResponseIndex;
   const showApprovalActionsResolved = isAwaitingApproval && hasPendingApprovalRequest;
-  const isRevisionMode = composerMode === 'revision';
 
   const messagesCount = messages.length;
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messagesCount]);
-
-  useEffect(() => {
-    if (!isAwaitingApproval && isRevisionMode) {
-      setComposerMode('normal');
-      setInputValue('');
-      setDraftAttachments([]);
-      setShowLinkInput(false);
-      setShowAttachmentMenu(false);
-    }
-  }, [isAwaitingApproval, isRevisionMode]);
 
   useEffect(() => {
     if (state.currentPhase !== 'debate') {
@@ -437,7 +417,7 @@ export function ChatPanel() {
     }
   };
 
-  const handleRevisionSend = async () => {
+  const handleApprovalFeedbackSend = async () => {
     if (!isAwaitingApproval) return;
     if (!inputValue.trim()) return;
     if (!activeProject) return;
@@ -450,16 +430,15 @@ export function ChatPanel() {
       setInputValue('');
       setLinkValue('');
       setDraftAttachments([]);
-      setComposerMode('normal');
       setComposerNotice(null);
       rejectPlan(feedback, attachmentIds);
       addLog(
-        `Project/message attachment link success: source=message(revision) count=${attachmentIds.length}`,
+        `Project/message attachment link success: source=message(awaiting-approval) count=${attachmentIds.length}`,
         'success'
       );
     } catch (error) {
-      const detail = error instanceof Error ? error.message : 'revision message link failed';
-      addLog(`Project/message attachment link failed: source=message(revision) ${detail}`, 'error');
+      const detail = error instanceof Error ? error.message : 'approval feedback link failed';
+      addLog(`Project/message attachment link failed: source=message(awaiting-approval) ${detail}`, 'error');
       throw error;
     } finally {
       setIsSending(false);
@@ -467,24 +446,11 @@ export function ChatPanel() {
   };
 
   const handleSend = async () => {
-    if (isRevisionMode) {
-      await handleRevisionSend();
+    if (isAwaitingApproval) {
+      await handleApprovalFeedbackSend();
       return;
     }
     await handleNormalSend();
-  };
-
-  const enterRevisionMode = () => {
-    setComposerMode('revision');
-    setComposerNotice(null);
-  };
-
-  const cancelRevisionMode = () => {
-    setComposerMode('normal');
-    setInputValue('');
-    setDraftAttachments([]);
-    setShowLinkInput(false);
-    setShowAttachmentMenu(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -561,24 +527,18 @@ export function ChatPanel() {
       {showApprovalActionsResolved && (
         <ApprovalActions
           onApprove={approvePlan}
-          onRejectRequest={enterRevisionMode}
-          isRevisionMode={isRevisionMode}
           t={t}
         />
       )}
 
       {/* Input */}
       <div className="flex-shrink-0 border-t border-gray-800 px-4 py-3">
-        <div className={`mb-2 flex items-center justify-between rounded border px-2 py-1 text-[11px] ${
-          isRevisionMode
-            ? 'border-orange-700/50 bg-orange-950/40 text-orange-200'
-            : 'border-gray-700 bg-gray-900 text-gray-300'
-        }`}>
+        <div className="mb-2 flex items-center justify-between rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[11px] text-gray-300">
           <span className="font-medium">
-            {isRevisionMode ? t('chat.modeRevision') : t('chat.modeNormal')}
+            {t('chat.modeNormal')}
           </span>
-          {isAwaitingApproval && !isRevisionMode ? (
-            <span className="text-yellow-300">{t('chat.approvalComposerHint')}</span>
+          {isAwaitingApproval ? (
+            <span className="text-yellow-300">{t('chat.revisionModeActiveHint')}</span>
           ) : null}
         </div>
 
@@ -663,7 +623,7 @@ export function ChatPanel() {
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              isRevisionMode
+              isAwaitingApproval
                 ? t('chat.revisionFeedbackPlaceholder')
                 : state.currentPhase === 'idle'
                 ? t('chat.placeholderStart')
@@ -671,26 +631,17 @@ export function ChatPanel() {
             }
             rows={2}
             className={`flex-1 resize-none rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
-              isRevisionMode
+              isAwaitingApproval
                 ? 'bg-orange-950/30 border border-orange-600/50 focus:border-orange-500 focus:ring-orange-500/30'
                 : 'bg-gray-900 border border-gray-600 focus:border-blue-500 focus:ring-blue-500/30'
             }`}
           />
-          {isRevisionMode && (
-            <button
-              type="button"
-              onClick={cancelRevisionMode}
-              className="px-3 py-2 border border-gray-600 bg-gray-900 hover:bg-gray-800 text-gray-100 text-sm font-medium rounded-lg transition-colors self-end"
-            >
-              {t('chat.cancel')}
-            </button>
-          )}
           <button
             onClick={() => void handleSend()}
-            disabled={(isRevisionMode ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
+            disabled={(isAwaitingApproval ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors self-end"
           >
-            {isSending ? t('attachments.sending') : isRevisionMode ? t('chat.sendRevision') : t('chat.send')}
+            {isSending ? t('attachments.sending') : t('chat.send')}
           </button>
         </div>
 
@@ -737,7 +688,7 @@ export function ChatPanel() {
         />
 
         {composerNotice && <p className="text-[10px] text-yellow-300 mt-1">{composerNotice}</p>}
-        {isRevisionMode && !inputValue.trim() && (
+        {isAwaitingApproval && !inputValue.trim() && (
           <p className="text-[10px] text-gray-400 mt-1">{t('chat.revisionFeedbackRequired')}</p>
         )}
         <p className="text-[10px] text-gray-400 mt-1">{t('chat.hint')}</p>

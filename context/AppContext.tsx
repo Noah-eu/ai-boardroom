@@ -1018,7 +1018,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
   const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
-  const [language, setLanguage] = useState<Language>('en');
+  const [language, setLanguage] = useState<Language>('cz');
   const [executionSpeed, setExecutionSpeed] = useState<ExecutionSpeed>('normal');
   const [autoPauseCheckpoints, setAutoPauseCheckpoints] = useState(true);
   const executionTaskTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);

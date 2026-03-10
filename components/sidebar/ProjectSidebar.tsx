@@ -72,6 +72,21 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
   const photoInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
+  const attachmentMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!attachmentMenuRef.current) return;
+      if (!attachmentMenuRef.current.contains(event.target as Node)) {
+        setShowAttachmentMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -142,7 +157,10 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
   };
 
   return (
-    <form onSubmit={handleSubmit} className="mx-3 mb-3 bg-gray-900 rounded-lg border border-gray-700 p-3">
+    <form
+      onSubmit={handleSubmit}
+      className="mx-3 mb-3 max-h-[calc(100vh-220px)] overflow-y-auto overflow-x-hidden bg-gray-900 rounded-lg border border-gray-700 p-3"
+    >
       <p className="text-xs font-semibold text-gray-100 mb-2">{t('projectForm.title')}</p>
       <input
         type="text"
@@ -242,7 +260,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
       <div className="mb-2 rounded border border-gray-700 bg-gray-950/40 p-2">
         <div className="flex items-center gap-2">
           <p className="text-[10px] font-medium text-gray-300">{t('projectForm.attachments')}</p>
-          <div className="relative ml-auto">
+          <div ref={attachmentMenuRef} className="relative ml-auto">
             <button
               type="button"
               onClick={() => setShowAttachmentMenu((previous) => !previous)}
@@ -257,7 +275,16 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage }: NewProjectFo
                 <button type="button" onClick={() => photoInputRef.current?.click()} className="w-full rounded px-2 py-1 text-left text-[11px] text-gray-200 hover:bg-gray-900">{t('attachments.option.photo')}</button>
                 <button type="button" onClick={() => pdfInputRef.current?.click()} className="w-full rounded px-2 py-1 text-left text-[11px] text-gray-200 hover:bg-gray-900">{t('attachments.option.pdf')}</button>
                 <button type="button" onClick={() => zipInputRef.current?.click()} className="w-full rounded px-2 py-1 text-left text-[11px] text-gray-200 hover:bg-gray-900">{t('attachments.option.zip')}</button>
-                <button type="button" onClick={() => setShowLinkInput((previous) => !previous)} className="w-full rounded px-2 py-1 text-left text-[11px] text-gray-200 hover:bg-gray-900">{t('attachments.option.link')}</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLinkInput(true);
+                    setShowAttachmentMenu(false);
+                  }}
+                  className="w-full rounded px-2 py-1 text-left text-[11px] text-gray-200 hover:bg-gray-900"
+                >
+                  {t('attachments.option.link')}
+                </button>
               </div>
             )}
           </div>
