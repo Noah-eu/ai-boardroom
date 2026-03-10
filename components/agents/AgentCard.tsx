@@ -12,6 +12,7 @@ interface AgentCardProps {
   description: string;
   isActive?: boolean;
   activeTaskTitle?: string | null;
+  compact?: boolean;
 }
 
 const statusConfig: Record<AgentStatus, { labelKey: 'agent.status.idle' | 'agent.status.active' | 'agent.status.thinking' | 'agent.status.error'; dotClass: string; badgeClass: string }> = {
@@ -69,6 +70,7 @@ export function AgentCard({
   description,
   isActive = false,
   activeTaskTitle = null,
+  compact = true,
 }: AgentCardProps) {
   const { t } = useApp();
   const cfg = statusConfig[status];
@@ -77,57 +79,57 @@ export function AgentCard({
   return (
     <div
       className={`
-        rounded-lg border bg-gradient-to-b p-3 transition-all duration-200
+        ${compact ? 'rounded-lg p-3' : 'rounded-xl p-4'} border bg-gradient-to-b transition-all duration-200
         ${colors.color}
         ${isActive ? 'ring-1 ring-blue-500/50 shadow-md shadow-blue-500/10' : ''}
       `}
     >
       {/* Header */}
-      <div className="flex items-center gap-2 mb-2">
-        <div className="w-8 h-8 rounded-md bg-gray-800 flex items-center justify-center flex-shrink-0 border border-gray-700">
-          <span className="text-[10px] font-bold text-gray-300">{agentInitials[name]}</span>
+      <div className={`${compact ? 'mb-2 gap-2' : 'mb-3 gap-3'} flex items-center`}>
+        <div className={`flex flex-shrink-0 items-center justify-center border border-gray-700 bg-gray-800 ${compact ? 'h-8 w-8 rounded-md' : 'h-10 w-10 rounded-lg'}`}>
+          <span className={`${compact ? 'text-[10px]' : 'text-xs'} font-bold text-gray-300`}>{agentInitials[name]}</span>
         </div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-semibold text-gray-100 truncate">{name}</span>
-            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${cfg.badgeClass}`}>
+          <div className={`flex items-center ${compact ? 'gap-1.5' : 'gap-2'}`}>
+            <span className={`truncate ${compact ? 'text-sm' : 'text-base'} font-semibold text-gray-100`}>{name}</span>
+            <span className={`inline-flex items-center gap-1 font-medium ${cfg.badgeClass} ${compact ? 'rounded px-1.5 py-0.5 text-[10px]' : 'rounded-lg px-2 py-1 text-xs'}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${cfg.dotClass}`} />
               {t(cfg.labelKey)}
             </span>
           </div>
-          <p className="text-[11px] text-gray-300 truncate">{role}</p>
+          <p className={`truncate ${compact ? 'text-[11px]' : 'text-sm'} text-gray-300`}>{role}</p>
         </div>
       </div>
 
       {/* Last output */}
       <div className="mt-1">
         {status === 'active' && activeTaskTitle && (
-          <p className="text-[10px] text-blue-200 mb-1">
+          <p className={`${compact ? 'mb-1 text-[10px]' : 'mb-2 text-xs'} text-blue-200`}>
             {t('agent.activeTask')}: <span className="text-blue-100">{activeTaskTitle}</span>
           </p>
         )}
         {lastOutput ? (
-          <p className="text-[11px] text-gray-300 line-clamp-2 leading-relaxed">
+          <p className={`line-clamp-2 ${compact ? 'text-[11px]' : 'text-sm'} leading-relaxed text-gray-300`}>
             {lastOutput}
           </p>
         ) : (
-          <p className="text-[11px] text-gray-400 italic">{description}</p>
+          <p className={`${compact ? 'text-[11px]' : 'text-sm'} italic text-gray-400`}>{description}</p>
         )}
       </div>
 
       {/* Thinking indicator */}
       {status === 'thinking' && (
-        <div className="mt-2 flex items-center gap-1">
+        <div className={`${compact ? 'mt-2 gap-1' : 'mt-3 gap-2'} flex items-center`}>
           <div className="flex gap-0.5">
             {[0, 1, 2].map((i) => (
               <div
                 key={i}
-                className="w-1 h-1 bg-yellow-400 rounded-full animate-bounce"
+                className={`${compact ? 'h-1 w-1' : 'h-1.5 w-1.5'} rounded-full bg-yellow-400 animate-bounce`}
                 style={{ animationDelay: `${i * 150}ms` }}
               />
             ))}
           </div>
-          <span className="text-[10px] text-yellow-400/70 ml-1">{t('agent.processing')}</span>
+          <span className={`ml-1 ${compact ? 'text-[10px]' : 'text-xs'} text-yellow-400/70`}>{t('agent.processing')}</span>
         </div>
       )}
     </div>

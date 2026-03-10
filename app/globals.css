@@ -36,20 +36,41 @@ body {
   html,
   body {
     overflow-x: hidden;
+    font-size: 18px;
   }
 
   button,
   select,
   input,
   textarea {
-    min-height: 44px;
+    min-height: 52px;
   }
 
   .text-xs {
-    font-size: 0.8125rem;
+    font-size: 0.9375rem;
+    line-height: 1.45;
   }
 
   .text-sm {
+    font-size: 1.0625rem;
+    line-height: 1.5;
+  }
+
+  .text-\[10px\],
+  .text-\[11px\],
+  .text-\[12px\] {
+    line-height: 1.45;
+  }
+
+  .text-\[10px\] {
+    font-size: 0.875rem;
+  }
+
+  .text-\[11px\] {
     font-size: 0.9375rem;
+  }
+
+  .text-\[12px\] {
+    font-size: 1rem;
   }
 }

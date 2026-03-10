@@ -62,9 +62,9 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
   return (
     <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-l border-gray-800'}`}>
       {/* Header */}
-      <div className="flex-shrink-0 px-4 py-3 border-b border-gray-800">
-        <h2 className="text-sm font-semibold text-gray-100">{t('agents.title')}</h2>
-        <p className="text-xs text-gray-400 mt-0.5">
+      <div className={`flex-shrink-0 border-b border-gray-800 ${isMobile ? 'px-5 py-4' : 'px-4 py-3'}`}>
+        <h2 className={`${isMobile ? 'text-base' : 'text-sm'} font-semibold text-gray-100`}>{t('agents.title')}</h2>
+        <p className={`${isMobile ? 'mt-1 text-sm' : 'mt-0.5 text-xs'} text-gray-400`}>
           {t('agents.phase')}:{' '}
           <span className="text-blue-400 font-medium">
             {phaseLabels[currentPhase]}
@@ -73,8 +73,8 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
       </div>
 
       {/* Workflow progress */}
-      <div className="flex-shrink-0 px-4 py-2 border-b border-gray-800/50">
-        <div className="flex items-center gap-1 flex-wrap">
+      <div className={`flex-shrink-0 border-b border-gray-800/50 ${isMobile ? 'px-5 py-3' : 'px-4 py-2'}`}>
+        <div className="flex flex-wrap items-center gap-2">
           {phaseOrder.filter((p) => p !== 'idle' && p !== 'summary').map((phase) => {
             const actualIdx = phaseOrder.indexOf(phase);
             const isDone = actualIdx < currentPhaseIdx;
@@ -82,7 +82,7 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
             return (
               <span
                 key={phase}
-                className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[9px] px-1.5 py-0.5 rounded'} font-medium ${
                   isCurrent
                     ? 'bg-blue-600 text-white'
                     : isDone
@@ -98,10 +98,10 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
       </div>
 
       {/* Agent list */}
-      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
+      <div className={`flex-1 overflow-y-auto space-y-5 ${isMobile ? 'px-4 py-4' : 'px-3 py-3'}`}>
         {/* Debate group */}
         <div>
-          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">
+          <p className={`${isMobile ? 'mb-3 text-xs' : 'mb-2 text-[10px]'} px-1 font-semibold uppercase tracking-widest text-gray-400`}>
             {t('agents.group.debate')}
           </p>
           <div className="space-y-2">
@@ -115,6 +115,7 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
                 description={agent.description}
                 activeTaskTitle={activeTaskByAgent[agent.name] ?? null}
                 isActive={agent.status === 'thinking' || agent.status === 'active'}
+                compact={!isMobile}
               />
             ))}
           </div>
@@ -122,7 +123,7 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
 
         {/* Execution group */}
         <div>
-          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">
+          <p className={`${isMobile ? 'mb-3 text-xs' : 'mb-2 text-[10px]'} px-1 font-semibold uppercase tracking-widest text-gray-400`}>
             {t('agents.group.execution')}
           </p>
           <div className="space-y-2">
@@ -136,6 +137,7 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
                 description={agent.description}
                 activeTaskTitle={activeTaskByAgent[agent.name] ?? null}
                 isActive={agent.status === 'thinking' || agent.status === 'active'}
+                compact={!isMobile}
               />
             ))}
           </div>
@@ -143,7 +145,7 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
 
         {/* Review / QA group */}
         <div>
-          <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2 px-1">
+          <p className={`${isMobile ? 'mb-3 text-xs' : 'mb-2 text-[10px]'} px-1 font-semibold uppercase tracking-widest text-gray-400`}>
             {t('agents.group.review')}
           </p>
           <div className="space-y-2">
@@ -157,6 +159,7 @@ export function AgentsPanel({ mode = 'desktop' }: AgentsPanelProps) {
                 description={agent.description}
                 activeTaskTitle={activeTaskByAgent[agent.name] ?? null}
                 isActive={agent.status === 'thinking' || agent.status === 'active'}
+                compact={!isMobile}
               />
             ))}
           </div>

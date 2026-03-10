@@ -87,9 +87,9 @@ function buildArtifactFallbackPreview(
   ].join('\n');
 }
 
-function MarkdownArtifactView({ content }: { content: string }) {
+function MarkdownArtifactView({ content, isMobile = false }: { content: string; isMobile?: boolean }) {
   return (
-    <div className="prose prose-invert prose-pre:bg-black prose-pre:border prose-pre:border-gray-700 prose-code:text-blue-200 max-w-none text-[12px]">
+    <div className={`prose prose-invert prose-pre:bg-black prose-pre:border prose-pre:border-gray-700 prose-code:text-blue-200 max-w-none ${isMobile ? 'text-sm' : 'text-[12px]'}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>
   );
@@ -307,25 +307,25 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   return (
     <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-t border-gray-800'}`}>
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2 border-b border-gray-800">
-        <h3 className="text-xs font-semibold text-gray-100">{t('preview.title')}</h3>
+      <div className={`flex-shrink-0 flex items-center gap-2 border-b border-gray-800 ${isMobile ? 'px-5 py-4' : 'px-4 py-2'}`}>
+        <h3 className={`${isMobile ? 'text-sm' : 'text-xs'} font-semibold text-gray-100`}>{t('preview.title')}</h3>
         {schedulerState.concurrencyLimit > 0 && (
-          <span className="text-[10px] text-gray-300 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5">
+          <span className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
             {t('preview.concurrency')}: {schedulerState.concurrencyLimit}
           </span>
         )}
         {schedulerState.concurrencyLimit > 0 && (
-          <span className="text-[10px] text-gray-300 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5">
+          <span className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
             {t('preview.runningNow')}: {schedulerState.runningTasks}
           </span>
         )}
         {schedulerState.retryLimit > 0 && (
-          <span className="text-[10px] text-gray-300 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5">
+          <span className={`${isMobile ? 'text-xs px-2 py-1 rounded-lg' : 'text-[10px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
             {t('preview.retryLimit')}: {schedulerState.retryLimit}
           </span>
         )}
         {totalTasksCount > 0 && (
-          <span className="text-[10px] text-gray-400 ml-auto">
+          <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} ml-auto text-gray-400`}>
             {doneTasksCount}/{totalTasksCount} {t('preview.tasks')}
           </span>
         )}
@@ -877,7 +877,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
 
                     <div className="mt-2 rounded border border-gray-800 bg-black/30 px-2 py-2">
                       {isMarkdownArtifact(selectedArtifactMeta.path) ? (
-                        <MarkdownArtifactView content={selectedArtifactContent} />
+                        <MarkdownArtifactView content={selectedArtifactContent} isMobile={isMobile} />
                       ) : (
                         <div className="space-y-2">
                           <p className="text-[10px] text-gray-400">Structured preview</p>

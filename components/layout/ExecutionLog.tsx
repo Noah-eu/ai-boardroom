@@ -61,21 +61,21 @@ export function ExecutionLog({ mode = 'desktop' }: ExecutionLogProps) {
   return (
     <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-t border-gray-800'}`}>
       {/* Header */}
-      <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-900/70">
+      <div className={`flex-shrink-0 flex items-center gap-3 border-b border-gray-700 bg-gray-900/70 ${isMobile ? 'px-5 py-4' : 'px-4 py-2'}`}>
         <div className="flex items-center gap-1.5">
           <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <h3 className="text-xs font-semibold text-gray-100 tracking-wide">{t('log.title')}</h3>
+          <h3 className={`${isMobile ? 'text-sm' : 'text-xs'} font-semibold tracking-wide text-gray-100`}>{t('log.title')}</h3>
         </div>
-        <span className="text-[10px] text-gray-300 ml-auto font-medium">
+        <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} ml-auto font-medium text-gray-300`}>
           {state.executionLog.length} {t('log.entries')}
         </span>
       </div>
 
       {/* Log entries */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 font-mono">
+      <div className={`flex-1 overflow-y-auto font-mono ${isMobile ? 'px-4 py-4' : 'px-3 py-2'}`}>
         {state.executionLog.length === 0 ? (
           <div className="flex items-center justify-center h-full">
-            <p className="text-xs text-gray-400">{t('log.empty')}</p>
+            <p className={`${isMobile ? 'text-sm' : 'text-xs'} text-gray-400`}>{t('log.empty')}</p>
           </div>
         ) : (
           state.executionLog.map((entry) => {
@@ -83,21 +83,21 @@ export function ExecutionLog({ mode = 'desktop' }: ExecutionLogProps) {
             return (
               <div
                 key={entry.id}
-                className={`mb-1 grid grid-cols-[72px_52px_minmax(0,1fr)] items-start gap-2 rounded-md border px-2 py-1.5 ${cfg.rowClass}`}
+                className={`mb-2 grid ${isMobile ? 'grid-cols-[84px_60px_minmax(0,1fr)] gap-3 rounded-xl px-3 py-3' : 'grid-cols-[72px_52px_minmax(0,1fr)] gap-2 rounded-md px-2 py-1.5'} items-start border ${cfg.rowClass}`}
               >
-                <span className="text-[10px] text-gray-200 flex-shrink-0 tabular-nums">
+                <span className={`${isMobile ? 'text-xs' : 'text-[10px]'} flex-shrink-0 tabular-nums text-gray-200`}>
                   {formatTimestamp(entry.timestamp)}
                 </span>
-                <span className={`inline-flex justify-center rounded px-1 py-0.5 text-[9px] font-semibold ${cfg.badgeClass}`}>
+                <span className={`inline-flex justify-center rounded px-1.5 py-1 ${isMobile ? 'text-[10px]' : 'text-[9px]'} font-semibold ${cfg.badgeClass}`}>
                   {cfg.icon}
                 </span>
                 <div className="min-w-0">
                   {entry.agent && (
-                    <span className="inline-block text-[10px] text-cyan-200 bg-cyan-950/40 border border-cyan-800/50 rounded px-1.5 py-0.5 mb-1">
+                    <span className={`mb-1 inline-block rounded border border-cyan-800/50 bg-cyan-950/40 px-2 py-1 ${isMobile ? 'text-xs' : 'text-[10px]'} text-cyan-200`}>
                       {entry.agent}
                     </span>
                   )}
-                  <p className={`text-[11px] leading-relaxed break-words ${cfg.messageClass}`}>
+                  <p className={`${isMobile ? 'text-sm' : 'text-[11px]'} break-words leading-relaxed ${cfg.messageClass}`}>
                     {entry.message}
                   </p>
                 </div>
