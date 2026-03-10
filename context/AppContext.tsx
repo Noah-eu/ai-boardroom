@@ -71,6 +71,12 @@ const MAX_REVISION_ROUNDS = 5;
 const MIN_EXECUTION_TASK_TIMEOUT_MS = 60_000;
 const MAX_EXECUTION_TASK_TIMEOUT_MS = 120_000;
 const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
+const REAL_PLANNER_BUILD_MARKER =
+  (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
+    process.env.NEXT_PUBLIC_BUILD_MARKER ||
+    'local')
+    .toString()
+    .slice(0, 7);
 
 function resolveExecutionTaskTimeoutMs(): number {
   const raw = process.env.NEXT_PUBLIC_EXECUTION_TASK_TIMEOUT_MS;
@@ -2875,6 +2881,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const startTask = useCallback(
     (project: Project, task: Task) => {
+      if (task.agent === 'Planner') {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'warning',
+          agent: 'Planner',
+          message:
+            `REAL PLANNER PATH REACHED ${REAL_PLANNER_BUILD_MARKER} ` +
+            `(startTask -> ${project.simulationMode ? 'simulation' : 'runLiveTaskExecution'})`,
+        });
+      }
+
       dispatch({
         type: 'UPDATE_TASK',
         projectId: project.id,
@@ -2909,6 +2926,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (!project.simulationMode) {
         void runLiveTaskExecution(project.id, task.id);
         return;
+      }
+
+      if (task.agent === 'Planner') {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'warning',
+          agent: 'Planner',
+          message: 'planner final status: simulation_branch_no_openai',
+        });
       }
 
       const speed = executionSpeedRef.current;
