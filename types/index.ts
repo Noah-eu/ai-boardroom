@@ -34,6 +34,9 @@ export interface TaskArtifact {
   path: string;
   label: string;
   kind: ArtifactKind;
+  content?: string;
+  producedBy?: AgentName;
+  generatedAt?: Date;
 }
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'blocked';
@@ -198,7 +201,47 @@ export interface Project {
   tasks: Task[];
   messages: Message[];
   attachments: ProjectAttachment[];
+  executionSnapshot?: ExecutionSnapshot | null;
   usage: ProjectUsage;
+}
+
+export interface ExecutionSnapshot {
+  id: string;
+  createdAt: Date;
+  projectPrompt: string;
+  approvedDebateSummary: string;
+  projectAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
+  messageAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
+  imageInputs: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    url: string;
+    description?: string;
+  }>;
+  pdfTexts: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    text: string;
+  }>;
+  zipSnapshots: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    fileTree: string[];
+    keyFiles: Array<{ path: string; content: string }>;
+  }>;
+  siteSnapshots: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    pageTitle?: string;
+    summary?: string;
+    extractedText?: string;
+    pages?: Array<{ url: string; title: string; summary?: string; excerpt?: string }>;
+  }>;
+  missingInputNotes: string[];
 }
 
 // Orchestrator types

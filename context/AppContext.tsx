@@ -20,6 +20,7 @@ import {
   AgentName,
   AgentStatus,
   DebateMode,
+  ExecutionSnapshot,
   LogEntry,
   ProjectAttachment,
   ProjectAttachmentKind,
@@ -33,7 +34,6 @@ import {
   UsageTotals,
   WorkflowPhase,
 } from '@/types';
-import { z } from 'zod';
 import { getFirebaseClient, getFirebaseInitError, getFirebaseStorageBucketName } from '@/lib/firebase';
 import {
   createInitialState,
@@ -68,36 +68,6 @@ const SPEED_CONFIG: Record<ExecutionSpeed, { tickMs: number; minTaskMs: number; 
 };
 
 const MAX_REVISION_ROUNDS = 5;
-
-const plannerAgentSchema = z.enum([
-  'Planner',
-  'Architect',
-  'Builder',
-  'Reviewer',
-  'Tester',
-  'Integrator',
-]);
-
-const plannerArtifactSchema = z.object({
-  path: z.string().min(1),
-  label: z.string().min(1),
-  kind: z.enum(['doc', 'json', 'report', 'zip', 'image']),
-});
-
-const plannerTaskSchema = z.object({
-  id: z.string().min(1),
-  title: z.string().min(1),
-  description: z.string().min(1),
-  agent: plannerAgentSchema,
-  dependsOn: z.array(z.string()).default([]),
-  artifacts: z.array(plannerArtifactSchema).default([]),
-});
-
-const plannerTaskGraphSchema = z.object({
-  tasks: z.array(plannerTaskSchema).min(1),
-  concurrencyLimit: z.number().int().min(1).max(4).default(2),
-  maxRetries: z.number().int().min(0).max(4).default(2),
-});
 
 type AiRespondPayload = {
   projectId: string;
@@ -433,6 +403,11 @@ type Action =
       attachmentId: string;
       ingestion: Partial<AttachmentIngestion>;
     }
+  | {
+      type: 'SET_EXECUTION_SNAPSHOT';
+      projectId: string;
+      snapshot: ExecutionSnapshot;
+    }
   | { type: 'RESET' };
 
 interface AppState extends OrchestratorState {
@@ -493,6 +468,29 @@ function getLatestOrchestratorSummary(project: Project): string | null {
     .reverse()
     .find((entry) => entry.sender === 'orchestrator' && entry.type === 'system');
   return message?.content ?? null;
+}
+
+function shorten(value: string | undefined, maxChars: number): string {
+  if (!value) return '';
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}...`;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (Object.isFrozen(value)) {
+    return value;
+  }
+  Object.freeze(value);
+  Object.getOwnPropertyNames(value).forEach((prop) => {
+    const nested = (value as Record<string, unknown>)[prop];
+    if (nested && typeof nested === 'object') {
+      deepFreeze(nested);
+    }
+  });
+  return value;
 }
 
 function appReducer(state: AppState, action: Action): AppState {
@@ -892,6 +890,14 @@ function appReducer(state: AppState, action: Action): AppState {
       }));
     }
 
+    case 'SET_EXECUTION_SNAPSHOT': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        executionSnapshot: action.snapshot,
+        updatedAt: new Date(),
+      }));
+    }
+
     case 'RESET': {
       return createInitialAppState();
     }
@@ -1211,6 +1217,107 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  const createExecutionSnapshot = useCallback((project: Project): ExecutionSnapshot => {
+    const approvedDebateSummary = getLatestOrchestratorSummary(project) ?? '';
+    const attachmentContext = buildAttachmentContext(project);
+    const imageInputs: ExecutionSnapshot['imageInputs'] = [];
+    const pdfTexts: ExecutionSnapshot['pdfTexts'] = [];
+    const zipSnapshots: ExecutionSnapshot['zipSnapshots'] = [];
+    const siteSnapshots: ExecutionSnapshot['siteSnapshots'] = [];
+    const missingInputNotes: string[] = [];
+
+    for (const attachment of project.attachments) {
+      const source = (attachment.source ?? 'message') as 'project' | 'message';
+      const ingestion = attachment.ingestion;
+
+      if (attachment.kind === 'image') {
+        const resolvedUrl = resolveAttachmentImageUrl(attachment);
+        if (resolvedUrl) {
+          imageInputs.push({
+            attachmentId: attachment.id,
+            title: attachment.title,
+            source,
+            url: resolvedUrl,
+            description: ingestion?.summary ?? ingestion?.excerpt,
+          });
+        } else {
+          missingInputNotes.push(`Image input missing URL: ${attachment.title}`);
+        }
+      }
+
+      if (attachment.kind === 'pdf') {
+        if (ingestion?.extractedText?.trim()) {
+          pdfTexts.push({
+            attachmentId: attachment.id,
+            title: attachment.title,
+            source,
+            text: shorten(ingestion.extractedText, 24_000),
+          });
+        } else {
+          missingInputNotes.push(`PDF text missing or unreadable: ${attachment.title}`);
+        }
+      }
+
+      if (attachment.kind === 'zip') {
+        if (ingestion?.zipFileTree?.length) {
+          zipSnapshots.push({
+            attachmentId: attachment.id,
+            title: attachment.title,
+            source,
+            fileTree: ingestion.zipFileTree.slice(0, 300),
+            keyFiles: (ingestion.zipKeyFiles ?? []).slice(0, 12).map((file) => ({
+              path: file.path,
+              content: shorten(file.content, 3_500),
+            })),
+          });
+        } else {
+          missingInputNotes.push(`ZIP tree missing or unreadable: ${attachment.title}`);
+        }
+      }
+
+      if (attachment.kind === 'url') {
+        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
+          siteSnapshots.push({
+            attachmentId: attachment.id,
+            title: attachment.title,
+            source,
+            pageTitle: ingestion?.pageTitle,
+            summary: ingestion?.summary,
+            extractedText: shorten(ingestion?.extractedText, 24_000),
+            pages: ingestion?.urlPages?.slice(0, 10).map((page) => ({
+              url: page.url,
+              title: page.title,
+              summary: page.summary,
+              excerpt: shorten(page.excerpt, 700),
+            })),
+          });
+        } else {
+          missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
+        }
+      }
+    }
+
+    if (!approvedDebateSummary.trim()) {
+      missingInputNotes.push('Approved debate summary missing.');
+    }
+
+    const snapshot: ExecutionSnapshot = {
+      id: `snapshot-${generateId()}`,
+      createdAt: new Date(),
+      projectPrompt: project.description,
+      approvedDebateSummary,
+      projectAttachments: attachmentContext.projectAttachments,
+      messageAttachments: attachmentContext.messageAttachments,
+      imageInputs,
+      pdfTexts,
+      zipSnapshots,
+      siteSnapshots,
+      missingInputNotes,
+    };
+
+    return deepFreeze(snapshot);
+  }, [buildAttachmentContext]);
+
   const callAiRespond = useCallback(
     async (
       payload: AiRespondPayload,
@@ -1464,57 +1571,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [buildAttachmentContext, resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
   );
 
-  const materializePlannerGraph = useCallback((rawGraph: z.infer<typeof plannerTaskGraphSchema>): TaskGraph => {
-    const idMap = new Map<string, string>();
-    rawGraph.tasks.forEach((task) => {
-      idMap.set(task.id, generateId());
-    });
-
-    const now = new Date();
-    const tasks: Task[] = rawGraph.tasks.map((task) => {
-      const dependsOn = task.dependsOn
-        .map((dependencyId) => idMap.get(dependencyId))
-        .filter((dependencyId): dependencyId is string => Boolean(dependencyId));
-      return {
-        id: idMap.get(task.id) as string,
-        title: task.title,
-        description: task.description,
-        agent: task.agent,
-        status: dependsOn.length === 0 ? 'queued' : 'blocked',
-        dependsOn,
-        producesArtifacts: task.artifacts,
-        createdAt: now,
-        updatedAt: now,
-        retryCount: 0,
-        maxRetries: rawGraph.maxRetries,
-      };
-    });
-
-    return {
-      tasks,
-      concurrencyLimit: rawGraph.concurrencyLimit,
-      maxRetries: rawGraph.maxRetries,
-    };
-  }, []);
-
-  const buildPlannerPrompt = useCallback((project: Project, strictJsonOnly: boolean) => {
-    const instructions = [
-      'Build a TaskGraph for this project.',
-      'Return JSON with shape: {"tasks":[...],"concurrencyLimit":number,"maxRetries":number}.',
-      'Each task must contain: id,title,description,agent,dependsOn,artifacts.',
-      'Use agent values only from: Planner, Architect, Builder, Reviewer, Tester, Integrator.',
-      'Use artifact kind values only from: doc,json,report,zip,image.',
-      'dependsOn must reference task ids from the same payload.',
-      'Include enough tasks to cover planning, architecture, implementation, review, testing, integration.',
-    ];
-
-    if (strictJsonOnly) {
-      instructions.push('Return ONLY valid JSON.');
-    }
-
-    return `${instructions.join(' ')}\n\nProject name: ${project.name}\nProject description: ${project.description}\nOutput type: ${project.outputType}`;
-  }, []);
-
   const setSchedulerPaused = useCallback(
     (projectId: string, paused: boolean, withLog: boolean) => {
       schedulerPausedRef.current = {
@@ -1747,6 +1803,103 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const agentStartLogKey: Record<AgentName, TranslationKey | null> = useMemo(
+    () => ({
+      Strategist: null,
+      Skeptic: null,
+      Pragmatist: null,
+      Planner: 'workflow.exec.log.planner.start',
+      Architect: 'workflow.exec.log.architect.start',
+      Builder: 'workflow.exec.log.builder.start',
+      Reviewer: 'workflow.exec.log.reviewer.start',
+      Tester: 'workflow.exec.log.tester.start',
+      Integrator: 'workflow.exec.log.integrator.start',
+    }),
+    []
+  );
+
+  const agentDoneLogKey: Record<AgentName, TranslationKey | null> = useMemo(
+    () => ({
+      Strategist: null,
+      Skeptic: null,
+      Pragmatist: null,
+      Planner: 'workflow.exec.log.planner.done',
+      Architect: 'workflow.exec.log.architect.done',
+      Builder: 'workflow.exec.log.builder.done',
+      Reviewer: 'workflow.exec.log.reviewer.done',
+      Tester: 'workflow.exec.log.tester.done',
+      Integrator: 'workflow.exec.log.integrator.done',
+    }),
+    []
+  );
+
+  const buildExecutionArtifactPrompt = useCallback(
+    (task: Task, artifact: Task['producesArtifacts'][number], snapshot: ExecutionSnapshot, project: Project) => {
+      const requiredSectionsByArtifact: Record<string, string[]> = {
+        'execution-plan.md': [
+          'Prioritized task list',
+          'Milestones',
+          'Dependencies',
+          'Estimated implementation order',
+        ],
+        'architecture-review.md': [
+          'Affected modules/components/files',
+          'Proposed structural changes',
+          'Technical constraints and assumptions',
+        ],
+        'implementation-proposal.md': [
+          'Concrete proposed file changes',
+          'New files/components suggestions',
+          'Code-level recommendations grounded in ZIP/site inputs',
+        ],
+        'patch-plan.md': [
+          'Ordered patch steps',
+          'Target files and reasons',
+          'Dependencies and rollout notes',
+        ],
+        'review-notes.md': [
+          'Quality concerns',
+          'Missing requirements',
+          'Risks and ambiguity list',
+          'Suggested corrections to Builder output',
+        ],
+        'test-checklist.md': [
+          'Functional test cases',
+          'Regression checklist',
+          'Edge cases',
+          'Acceptance criteria',
+        ],
+        'final-summary.md': [
+          'Final merged implementation recommendation',
+          'Ordered execution package',
+          'What should be changed first',
+          'What can wait for v2',
+        ],
+      };
+
+      const sectionList = requiredSectionsByArtifact[artifact.path] ?? ['Key recommendations'];
+      const missingInputs = snapshot.missingInputNotes.length
+        ? `Missing inputs to mention explicitly if relevant:\n- ${snapshot.missingInputNotes.join('\n- ')}`
+        : 'Missing inputs: none detected.';
+
+      return [
+        project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
+        `You are ${task.agent}. Produce artifact \"${artifact.path}\" only in Markdown.`,
+        'Do not produce placeholder text. Ground claims in provided inputs (ZIP tree, site snapshot, PDF text, images).',
+        'If an expected input is missing, explicitly state that in a short "Missing Inputs" section.',
+        `Required sections:\n- ${sectionList.join('\n- ')}`,
+        missingInputs,
+        `Project prompt:\n${snapshot.projectPrompt}`,
+        `Approved debate summary:\n${snapshot.approvedDebateSummary}`,
+        `ZIP snapshots count: ${snapshot.zipSnapshots.length}`,
+        `Site snapshots count: ${snapshot.siteSnapshots.length}`,
+        `PDF snapshots count: ${snapshot.pdfTexts.length}`,
+        `Image inputs count: ${snapshot.imageInputs.length}`,
+      ].join('\n\n');
+    },
+    []
+  );
+
   const rerouteDependencies = useCallback((project: Project, fromTaskId: string, toTaskId: string) => {
     project.tasks
       .filter(
@@ -1772,7 +1925,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const completeTask = useCallback(
-    (projectId: string, taskId: string) => {
+    (
+      projectId: string,
+      taskId: string,
+      options?: { skipFailure?: boolean; lastOutput?: string }
+    ) => {
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
       const task = project?.tasks.find((candidate) => candidate.id === taskId);
       if (!project || !task || task.status !== 'running') {
@@ -1782,7 +1939,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const lang = project.language;
       const retryCount = task.retryCount ?? 0;
       const maxRetries = task.maxRetries ?? project.taskGraph?.maxRetries ?? 2;
-      const failProbability = task.agent === 'Tester' ? 0.25 : task.agent === 'Reviewer' ? 0.15 : 0;
+      const failProbability = options?.skipFailure
+        ? 0
+        : project.simulationMode
+        ? task.agent === 'Tester'
+          ? 0.25
+          : task.agent === 'Reviewer'
+          ? 0.15
+          : 0
+        : 0;
       const shouldFail = failProbability > 0 && retryCount < maxRetries && Math.random() < failProbability;
 
       if (shouldFail) {
@@ -1901,15 +2066,162 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           type: 'UPDATE_AGENT_STATUS',
           agent: task.agent,
           status: 'idle',
-          lastOutput: translateProjectWithVars(lang, 'workflow.task.doneSummary', {
-            title: task.title,
-          }),
+          lastOutput:
+            options?.lastOutput ??
+            translateProjectWithVars(lang, 'workflow.task.doneSummary', {
+              title: task.title,
+            }),
         });
+
+        const doneLogKey = agentDoneLogKey[task.agent];
+        if (doneLogKey) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'success',
+            agent: task.agent,
+            message: translateProject(lang, doneLogKey),
+          });
+        }
       }
 
       delete taskTimersRef.current[taskId];
     },
-    [autoPauseCheckpoints, rerouteDependencies, setSchedulerPaused, translateProject, translateProjectWithVars]
+    [
+      agentDoneLogKey,
+      autoPauseCheckpoints,
+      rerouteDependencies,
+      setSchedulerPaused,
+      translateProject,
+      translateProjectWithVars,
+    ]
+  );
+
+  const runLiveTaskExecution = useCallback(
+    async (projectId: string, taskId: string) => {
+      const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+      if (!project) return;
+
+      const task = project.tasks.find((candidate) => candidate.id === taskId);
+      if (!task || task.status !== 'running') return;
+
+      const snapshot = project.executionSnapshot;
+      if (!snapshot) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          agent: task.agent,
+          message: 'Execution snapshot missing; task cannot use approved immutable context.',
+        });
+        dispatch({
+          type: 'UPDATE_TASK',
+          projectId,
+          taskId,
+          patch: { status: 'failed', errorMessage: 'Execution snapshot missing.' },
+        });
+        return;
+      }
+
+      const snapshotAttachmentContext: AttachmentContextSnapshot = {
+        projectAttachments: snapshot.projectAttachments,
+        messageAttachments: snapshot.messageAttachments,
+        textSections: [
+          ...snapshot.pdfTexts.map((entry) => ({
+            title: entry.title,
+            kind: 'pdf' as const,
+            source: entry.source,
+            text: entry.text,
+          })),
+          ...snapshot.zipSnapshots.map((entry) => ({
+            title: entry.title,
+            kind: 'zip' as const,
+            source: entry.source,
+            text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
+              .map((file) => `${file.path}\n${file.content}`)
+              .join('\n\n')}`,
+          })),
+          ...snapshot.siteSnapshots.map((entry) => ({
+            title: entry.title,
+            kind: 'url' as const,
+            source: entry.source,
+            text: [
+              entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
+              entry.summary ? `Summary: ${entry.summary}` : '',
+              entry.extractedText ?? '',
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+          })),
+        ],
+        images: snapshot.imageInputs.map((entry) => ({
+          url: entry.url,
+          title: entry.title,
+          source: entry.source,
+          attachmentId: entry.attachmentId,
+        })),
+        droppedImageAttachments: [],
+        includedAttachmentIds: [
+          ...snapshot.imageInputs.map((entry) => entry.attachmentId),
+          ...snapshot.pdfTexts.map((entry) => entry.attachmentId),
+          ...snapshot.zipSnapshots.map((entry) => entry.attachmentId),
+          ...snapshot.siteSnapshots.map((entry) => entry.attachmentId),
+        ],
+      };
+
+      const updatedArtifacts = [...task.producesArtifacts];
+      for (let index = 0; index < updatedArtifacts.length; index += 1) {
+        const artifact = updatedArtifacts[index];
+        const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
+
+        try {
+          const response = await callAiRespond(
+            {
+              projectId,
+              language: project.language,
+              agentRole: task.agent,
+              inputText: prompt,
+              context: {
+                snapshotId: snapshot.id,
+                artifactPath: artifact.path,
+                approvedDebateSummary: snapshot.approvedDebateSummary,
+                projectPrompt: snapshot.projectPrompt,
+                zipSnapshots: snapshot.zipSnapshots,
+                siteSnapshots: snapshot.siteSnapshots,
+                pdfTexts: snapshot.pdfTexts,
+                imageInputs: snapshot.imageInputs,
+                missingInputNotes: snapshot.missingInputNotes,
+              },
+            },
+            { agent: task.agent },
+            snapshotAttachmentContext
+          );
+
+          updatedArtifacts[index] = {
+            ...artifact,
+            content: response.text,
+            producedBy: task.agent,
+            generatedAt: new Date(),
+          };
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Unknown execution artifact error';
+          updatedArtifacts[index] = {
+            ...artifact,
+            content: `# ${artifact.label}\n\n## Missing Inputs\n- Artifact generation failed: ${detail}`,
+            producedBy: task.agent,
+            generatedAt: new Date(),
+          };
+        }
+      }
+
+      dispatch({
+        type: 'UPDATE_TASK',
+        projectId,
+        taskId,
+        patch: { producesArtifacts: updatedArtifacts },
+      });
+
+      completeTask(projectId, taskId, { skipFailure: true, lastOutput: task.title });
+    },
+    [buildExecutionArtifactPrompt, callAiRespond, completeTask]
   );
 
   const startTask = useCallback(
@@ -1935,13 +2247,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }),
       });
 
+      const startLogKey = agentStartLogKey[task.agent];
+      if (startLogKey) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          agent: task.agent,
+          message: translateProject(project.language, startLogKey),
+        });
+      }
+
+      if (!project.simulationMode) {
+        void runLiveTaskExecution(project.id, task.id);
+        return;
+      }
+
       const speed = executionSpeedRef.current;
       const config = SPEED_CONFIG[speed];
       const durationMs =
         config.minTaskMs + Math.round(Math.random() * (config.maxTaskMs - config.minTaskMs));
       taskTimersRef.current[task.id] = setTimeout(() => completeTask(project.id, task.id), durationMs);
     },
-    [completeTask, translateProjectWithVars]
+    [agentStartLogKey, completeTask, runLiveTaskExecution, translateProject, translateProjectWithVars]
   );
 
   const schedulerTick = useCallback(
@@ -2076,137 +2403,89 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     ]
   );
 
-  const generateSimulatedTaskGraph = useCallback(
+  const generateExecutionTaskGraph = useCallback(
     (project: Project): TaskGraph => {
-      const lang = project.language;
-      const maxRetries = 2;
+      const maxRetries = project.simulationMode ? 2 : 1;
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
 
       const planner = createTask({
-        title: translateProject(lang, 'workflow.task.title.planMvp'),
-        description: translateProject(lang, 'workflow.task.desc.planMvp'),
+        title: 'Planner: Execution plan',
+        description: 'Generate a prioritized plan with milestones, dependencies, and implementation order.',
         agent: 'Planner',
         dependsOn: [],
         status: 'queued',
         producesArtifacts: [
-          { path: 'docs/execution-plan.md', label: translateProject(lang, 'workflow.artifact.executionPlan'), kind: 'doc' },
+          { path: 'execution-plan.md', label: 'Execution Plan', kind: 'doc' },
         ],
       });
 
       const architect = createTask({
-        title: translateProject(lang, 'workflow.task.title.defineArchitecture'),
-        description: translateProject(lang, 'workflow.task.desc.defineArchitecture'),
+        title: 'Architect: Architecture review',
+        description: 'Review architecture impacts, module boundaries, and implementation constraints.',
         agent: 'Architect',
         dependsOn: [planner.id],
         status: statusFor([planner.id]),
         producesArtifacts: [
-          { path: 'docs/architecture-overview.md', label: translateProject(lang, 'workflow.artifact.architectureOverview'), kind: 'doc' },
+          { path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' },
         ],
       });
 
-      const buildUi = createTask({
-        title: translateProject(lang, 'workflow.task.title.buildUiSkeleton'),
-        description: translateProject(lang, 'workflow.task.desc.buildUiSkeleton'),
+      const builder = createTask({
+        title: 'Builder: Implementation proposal',
+        description: 'Draft concrete file-level change proposals and patch plan based on ingested inputs.',
         agent: 'Builder',
         dependsOn: [architect.id],
         status: statusFor([architect.id]),
         producesArtifacts: [
-          { path: 'artifacts/ui-skeleton.json', label: translateProject(lang, 'workflow.artifact.uiSkeleton'), kind: 'json' },
-        ],
-      });
-
-      const buildEngine = createTask({
-        title: translateProject(lang, 'workflow.task.title.buildEngine'),
-        description: translateProject(lang, 'workflow.task.desc.buildEngine'),
-        agent: 'Builder',
-        dependsOn: [architect.id],
-        status: statusFor([architect.id]),
-        producesArtifacts: [
-          {
-            path: 'artifacts/orchestration-engine.json',
-            label: translateProject(lang, 'workflow.artifact.orchestrationEngine'),
-            kind: 'json',
-          },
+          { path: 'implementation-proposal.md', label: 'Implementation Proposal', kind: 'doc' },
+          { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
         ],
       });
 
       const reviewer = createTask({
-        title: translateProject(lang, 'workflow.task.title.reviewQuality'),
-        description: translateProject(lang, 'workflow.task.desc.reviewQuality'),
+        title: 'Reviewer: Quality and risk review',
+        description: 'Audit Builder outputs for quality, requirement coverage, and risks.',
         agent: 'Reviewer',
-        dependsOn: [buildUi.id, buildEngine.id],
-        status: statusFor([buildUi.id, buildEngine.id]),
+        dependsOn: [builder.id],
+        status: statusFor([builder.id]),
         producesArtifacts: [
-          { path: 'reports/review-notes.md', label: translateProject(lang, 'workflow.artifact.reviewNotes'), kind: 'report' },
+          { path: 'review-notes.md', label: 'Review Notes', kind: 'report' },
         ],
         retryCount: 0,
         maxRetries,
       });
 
       const tester = createTask({
-        title: translateProject(lang, 'workflow.task.title.runQaChecks'),
-        description: translateProject(lang, 'workflow.task.desc.runQaChecks'),
+        title: 'Tester: Test checklist and acceptance criteria',
+        description: 'Create functional, regression, and edge-case test checklist with acceptance criteria.',
         agent: 'Tester',
         dependsOn: [reviewer.id],
         status: statusFor([reviewer.id]),
         producesArtifacts: [
-          { path: 'reports/test-results.md', label: translateProject(lang, 'workflow.artifact.testResults'), kind: 'report' },
+          { path: 'test-checklist.md', label: 'Test Checklist', kind: 'report' },
         ],
         retryCount: 0,
         maxRetries,
       });
 
       const integrator = createTask({
-        title: translateProject(lang, 'workflow.task.title.integrateOutputs'),
-        description: translateProject(lang, 'workflow.task.desc.integrateOutputs'),
+        title: 'Integrator: Final merged recommendation',
+        description: 'Merge all execution outputs into a final ordered package and phased recommendation.',
         agent: 'Integrator',
         dependsOn: [tester.id],
         status: statusFor([tester.id]),
         producesArtifacts: [
-          { path: 'release/final-package.zip', label: translateProject(lang, 'workflow.artifact.finalPackage'), kind: 'zip' },
+          { path: 'final-summary.md', label: 'Final Summary', kind: 'doc' },
         ],
       });
 
-      const tasks =
-        project.outputType === 'app' || project.outputType === 'website'
-          ? [planner, architect, buildUi, buildEngine, reviewer, tester, integrator]
-          : [planner, architect, buildEngine, reviewer, tester, integrator];
-
       return {
-        tasks,
+        tasks: [planner, architect, builder, reviewer, tester, integrator],
         concurrencyLimit: 2,
         maxRetries,
       };
     },
-    [translateProject]
-  );
-
-  const generatePlannerTaskGraph = useCallback(
-    async (project: Project): Promise<TaskGraph> => {
-      const attemptPlannerRequest = async (strictJsonOnly: boolean) => {
-        const plannerResponse = await callAiRespond({
-          projectId: project.id,
-          language: project.language,
-          agentRole: 'Planner',
-          inputText: buildPlannerPrompt(project, strictJsonOnly),
-          context: {
-            projectName: project.name,
-            projectDescription: project.description,
-            outputType: project.outputType,
-          },
-        }, { agent: 'Planner' });
-
-        const parsed = plannerTaskGraphSchema.parse(JSON.parse(plannerResponse.text));
-        return materializePlannerGraph(parsed);
-      };
-
-      try {
-        return await attemptPlannerRequest(false);
-      } catch {
-        return await attemptPlannerRequest(true);
-      }
-    },
-    [buildPlannerPrompt, callAiRespond, materializePlannerGraph]
+    []
   );
 
   const startTaskGraphExecution = useCallback(
@@ -2216,23 +2495,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearInterval(previous);
       }
 
-      let taskGraph: TaskGraph;
-      if (project.simulationMode) {
-        taskGraph = generateSimulatedTaskGraph(project);
-      } else {
-        try {
-          taskGraph = await generatePlannerTaskGraph(project);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown planner error';
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'error',
-            agent: 'Planner',
-            message: `OpenAI planner failed, falling back to simulation: ${message}`,
-          });
-          taskGraph = generateSimulatedTaskGraph(project);
-        }
-      }
+      const taskGraph = generateExecutionTaskGraph(project);
 
       const normalizedTaskGraph: TaskGraph = {
         ...taskGraph,
@@ -2254,8 +2517,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }, SPEED_CONFIG[executionSpeedRef.current].tickMs);
     },
     [
-      generatePlannerTaskGraph,
-      generateSimulatedTaskGraph,
+      generateExecutionTaskGraph,
       schedulerTick,
       setSchedulerPaused,
       translateProject,
@@ -2265,11 +2527,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const approvePlan = useCallback(() => {
     if (!state.activeProject) return;
     const project = state.activeProject;
+    const snapshot = createExecutionSnapshot(project);
+
+    dispatch({
+      type: 'SET_EXECUTION_SNAPSHOT',
+      projectId: project.id,
+      snapshot,
+    });
+    dispatch({
+      type: 'ADD_LOG',
+      level: 'info',
+      message: `Execution snapshot prepared (${snapshot.id})`,
+    });
+
     dispatch({ type: 'APPROVE_PLAN' });
     setTimeout(() => {
-      void startTaskGraphExecution(project);
+      const latestProject = stateRef.current.projects.find((candidate) => candidate.id === project.id);
+      if (latestProject) {
+        void startTaskGraphExecution(latestProject);
+      }
     }, 0);
-  }, [startTaskGraphExecution, state.activeProject]);
+  }, [createExecutionSnapshot, startTaskGraphExecution, state.activeProject]);
 
   const pauseExecution = useCallback(() => {
     const project = stateRef.current.activeProject;

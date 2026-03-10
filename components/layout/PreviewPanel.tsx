@@ -99,6 +99,19 @@ export function PreviewPanel() {
         ),
     [tasks]
   );
+  const executionResultItems = useMemo(
+    () =>
+      tasks.flatMap((task) =>
+        task.producesArtifacts.map((artifact) => ({
+          ...artifact,
+          taskId: task.id,
+          taskTitle: task.title,
+          taskStatus: task.status,
+          taskAgent: task.agent,
+        }))
+      ),
+    [tasks]
+  );
   const projectAttachments = useMemo<ProjectAttachment[]>(() => project?.attachments ?? [], [project]);
   const groupedAttachments = useMemo(() => {
     const projectLevel = projectAttachments.filter((attachment) => (attachment.source ?? 'message') === 'project');
@@ -645,10 +658,21 @@ export function PreviewPanel() {
                   </div>
                 )}
 
+                {selectedArtifactMeta?.content && (
+                  <div className="mt-2 rounded border border-gray-700 bg-gray-950 px-2 py-1.5">
+                    <p className="text-[10px] text-gray-400">Execution Results</p>
+                    <p className="mt-1 text-[10px] text-gray-200 whitespace-pre-wrap leading-relaxed">
+                      {selectedArtifactMeta.content}
+                    </p>
+                  </div>
+                )}
+
                 <div className="mt-2 rounded border border-gray-800 bg-black/40 px-2 py-1.5">
                   <p className="text-[10px] text-gray-400">{t('preview.snippet')}</p>
                   <p className="mt-1 text-[10px] text-gray-200 font-mono">
-                    {selectedArtifactMeta ? `${selectedArtifactMeta.label} [${selectedArtifactMeta.kind}]` : ''}
+                    {selectedArtifactMeta
+                      ? `${selectedArtifactMeta.label} [${selectedArtifactMeta.kind}]`
+                      : ''}
                     {!selectedArtifactMeta && selectedTask.agent === 'Planner' && t('preview.snippet.planner')}
                     {!selectedArtifactMeta && selectedTask.agent === 'Architect' && t('preview.snippet.architect')}
                     {!selectedArtifactMeta && selectedTask.agent === 'Builder' && t('preview.snippet.builder')}
@@ -656,6 +680,45 @@ export function PreviewPanel() {
                     {!selectedArtifactMeta && selectedTask.agent === 'Tester' && t('preview.snippet.tester')}
                     {!selectedArtifactMeta && selectedTask.agent === 'Integrator' && t('preview.snippet.integrator')}
                   </p>
+                </div>
+              </div>
+            )}
+
+            {executionResultItems.length > 0 && (
+              <div className="mt-2 rounded-lg border border-gray-700 bg-gray-900/80 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-gray-400">Execution Results</p>
+                <div className="mt-2 space-y-1">
+                  {executionResultItems.map((artifact) => (
+                    <button
+                      key={`${artifact.taskId}:${artifact.path}:result`}
+                      onClick={() => {
+                        setSelectedTaskId(artifact.taskId);
+                        setSelectedArtifact(artifact.path);
+                      }}
+                      className={`w-full rounded border px-2 py-1 text-left transition-colors ${
+                        selectedTaskId === artifact.taskId && selectedArtifact === artifact.path
+                          ? 'bg-blue-900/40 border-blue-700/60 text-blue-100'
+                          : 'bg-gray-900 border-gray-700 text-gray-300 hover:border-blue-700/50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <p className="text-[10px] font-medium">{artifact.label}</p>
+                        <span className="text-[10px] text-gray-400">{artifact.taskAgent}</span>
+                        <span className={`ml-auto text-[10px] rounded px-1 py-0.5 ${
+                          artifact.taskStatus === 'done'
+                            ? 'bg-green-900/50 text-green-300'
+                            : artifact.taskStatus === 'running'
+                            ? 'bg-blue-900/50 text-blue-300'
+                            : artifact.taskStatus === 'queued' || artifact.taskStatus === 'blocked'
+                            ? 'bg-gray-800 text-gray-300'
+                            : 'bg-red-900/50 text-red-300'
+                        }`}>
+                          {artifact.taskStatus}
+                        </span>
+                      </div>
+                      <p className="text-[10px] font-mono text-gray-300">{artifact.path}</p>
+                    </button>
+                  ))}
                 </div>
               </div>
             )}

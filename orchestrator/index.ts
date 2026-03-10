@@ -244,6 +244,7 @@ export function createProject(
     tasks: [],
     messages: [],
     attachments: [],
+    executionSnapshot: null,
     usage: initialUsage,
   };
 }
