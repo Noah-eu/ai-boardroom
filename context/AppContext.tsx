@@ -2383,6 +2383,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const runLiveTaskExecution = useCallback(
     async (projectId: string, taskId: string) => {
+      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
       const getLiveTask = () => {
         const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
         const liveTask = liveProject?.tasks.find((candidate) => candidate.id === taskId);
@@ -2436,8 +2437,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
       if (!project) return;
 
-      const task = project.tasks.find((candidate) => candidate.id === taskId);
-      if (!task || task.status !== 'running') return;
+      let task = project.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) return;
+
+      if (task.status !== 'running') {
+        for (let attempt = 1; attempt <= 20; attempt += 1) {
+          await sleep(100);
+          const refreshed = stateRef.current.projects
+            .find((candidate) => candidate.id === projectId)
+            ?.tasks.find((candidate) => candidate.id === taskId);
+          if (!refreshed) return;
+          task = refreshed;
+          if (task.status === 'running') {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: task.agent,
+              message: `planner/live runner synchronized after status commit (attempt ${attempt}).`,
+            });
+            break;
+          }
+        }
+      }
+
+      if (task.status !== 'running') {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          agent: task.agent,
+          message: `Live runner aborted: task status stayed ${task.status} and never reached running.`,
+        });
+        return;
+      }
 
       dispatch({
         type: 'ADD_LOG',
@@ -2924,7 +2955,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (!project.simulationMode) {
-        void runLiveTaskExecution(project.id, task.id);
+        setTimeout(() => {
+          void runLiveTaskExecution(project.id, task.id);
+        }, 0);
         return;
       }
 
