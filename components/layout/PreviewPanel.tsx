@@ -412,6 +412,32 @@ export function PreviewPanel() {
                                 ? `Parsed content ready (${attachment.ingestion.extractedText.length} chars)`
                                 : 'Parsed content pending'}
                             </p>
+                            {typeof attachment.ingestion?.urlPageCount === 'number' && (
+                              <p className="text-[10px] text-gray-400">
+                                Pages indexed: {attachment.ingestion.urlPageCount}
+                              </p>
+                            )}
+                            {attachment.ingestion?.urlPages && attachment.ingestion.urlPages.length > 0 && (
+                              <div className="rounded border border-gray-800 bg-black/30 px-1.5 py-1">
+                                <p className="text-[10px] text-gray-500">Visited pages</p>
+                                <div className="mt-1 space-y-1">
+                                  {attachment.ingestion.urlPages.slice(0, 6).map((page) => (
+                                    <div key={`${attachment.id}-${page.url}`} className="rounded border border-gray-800 bg-black/20 px-1.5 py-1">
+                                      <a
+                                        href={page.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-[10px] text-blue-300 underline break-all"
+                                      >
+                                        {page.title}
+                                      </a>
+                                      <p className="text-[10px] text-gray-500 break-all">{page.url}</p>
+                                      <p className="text-[10px] text-gray-400 leading-relaxed">{page.summary || page.excerpt}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         )}
 

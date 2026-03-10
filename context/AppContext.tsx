@@ -136,6 +136,11 @@ type AiRespondLogContext = {
   agent?: AgentName;
 };
 
+type AttachmentIngestApiResponse = {
+  ingest?: AttachmentIngestion & { crawlEvents?: string[] };
+  error?: string;
+};
+
 type AttachmentContextSnapshot = {
   projectAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
   messageAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
@@ -1315,6 +1320,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
         }
 
+        const urlSnapshotSections =
+          attachmentContext?.textSections.filter((section) => section.kind === 'url').length ?? 0;
+        if (urlSnapshotSections > 0) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: logContext.agent,
+            message: `Site snapshot included in AI context: ${urlSnapshotSections}`,
+          });
+        }
+
         const totalImageAttachments = project
           ? project.attachments.filter((attachment) => attachment.kind === 'image').length
           : 0;
@@ -2370,16 +2386,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             sourceUrl: attachment.sourceUrl,
             downloadUrl: attachment.downloadUrl,
             mimeType: attachment.mimeType,
+            ...(attachment.kind === 'url'
+              ? {
+                  maxPages: 5,
+                  maxDepth: 1,
+                }
+              : {}),
           }),
         });
 
-        const body = (await response.json()) as { ingest?: AttachmentIngestion; error?: string };
+        const body = (await response.json()) as AttachmentIngestApiResponse;
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
           throw new Error(body.error ?? 'Attachment ingestion failed');
         }
 
         if (attachment.kind === 'url') {
+          ingest.crawlEvents?.forEach((eventMessage) => {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: eventMessage,
+            });
+          });
+
           dispatch({
             type: 'ADD_LOG',
             level: 'success',

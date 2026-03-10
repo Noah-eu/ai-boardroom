@@ -91,6 +91,19 @@ export interface AttachmentIngestion {
   excerpt?: string;
   pageTitle?: string;
   sourceUrl?: string;
+  urlPageCount?: number;
+  urlCrawlDepth?: number;
+  urlCrawlMaxPages?: number;
+  urlPages?: Array<{
+    url: string;
+    title: string;
+    metaDescription?: string;
+    excerpt: string;
+    summary: string;
+    extractedText: string;
+    depth: number;
+    rendered?: boolean;
+  }>;
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
   error?: string;
