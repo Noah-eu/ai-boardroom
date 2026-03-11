@@ -19,8 +19,8 @@ function resolveOpenAiResponseProfile(
 
   const maxOutputTokens = isStructuredBundle
     ? retry
-      ? 1_800
-      : 3_200
+      ? 6_000
+      : 10_000
     : retry
     ? 700
     : isExecution

@@ -332,7 +332,19 @@ function parseExecutionOutputBundle(
   try {
     parsed = parseJsonObjectFromModelText(raw);
   } catch {
-    return { bundle: null, error: 'Execution output is not valid JSON.' };
+    const trimmed = raw.trim();
+    const looksLikeTruncated =
+      trimmed.length > 200 &&
+      !trimmed.endsWith('}') &&
+      !trimmed.endsWith(']') &&
+      !trimmed.endsWith('"');
+    if (looksLikeTruncated) {
+      return {
+        bundle: null,
+        error: `Execution output was truncated (${trimmed.length} chars). The model likely hit the output token limit. Try a shorter prompt or simpler project.`,
+      };
+    }
+    return { bundle: null, error: `Execution output is not valid JSON (${trimmed.length} chars).` };
   }
 
   const result = executionOutputSchema.safeParse(parsed);
