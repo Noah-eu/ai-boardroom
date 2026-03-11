@@ -71,6 +71,9 @@ const MAX_REVISION_ROUNDS = 5;
 const MIN_EXECUTION_TASK_TIMEOUT_MS = 60_000;
 const MAX_EXECUTION_TASK_TIMEOUT_MS = 120_000;
 const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
+const MAX_AI_ATTACHMENT_SECTIONS = 6;
+const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
+const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
     process.env.NEXT_PUBLIC_BUILD_MARKER ||
@@ -516,6 +519,55 @@ function shorten(value: string | undefined, maxChars: number): string {
   if (!value) return '';
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}...`;
+}
+
+function compactAttachmentContextSnapshot(snapshot: AttachmentContextSnapshot): {
+  snapshot: AttachmentContextSnapshot;
+  originalSectionCount: number;
+  keptSectionCount: number;
+  originalChars: number;
+  keptChars: number;
+  truncatedSections: number;
+} {
+  const originalSectionCount = snapshot.textSections.length;
+  const originalChars = snapshot.textSections.reduce((sum, section) => sum + section.text.length, 0);
+  let remainingChars = MAX_AI_ATTACHMENT_TOTAL_CHARS;
+  let truncatedSections = 0;
+
+  const textSections = snapshot.textSections
+    .slice(0, MAX_AI_ATTACHMENT_SECTIONS)
+    .map((section) => {
+      if (remainingChars <= 0) {
+        truncatedSections += 1;
+        return null;
+      }
+
+      const budget = Math.min(MAX_AI_ATTACHMENT_SECTION_CHARS, remainingChars);
+      const text = shorten(section.text, budget);
+      if (text.length < section.text.length) {
+        truncatedSections += 1;
+      }
+      remainingChars -= text.length;
+      return {
+        ...section,
+        text,
+      };
+    })
+    .filter((section): section is AttachmentContextSnapshot['textSections'][number] => Boolean(section));
+
+  truncatedSections += Math.max(0, snapshot.textSections.length - MAX_AI_ATTACHMENT_SECTIONS);
+
+  return {
+    snapshot: {
+      ...snapshot,
+      textSections,
+    },
+    originalSectionCount,
+    keptSectionCount: textSections.length,
+    originalChars,
+    keptChars: textSections.reduce((sum, section) => sum + section.text.length, 0),
+    truncatedSections,
+  };
 }
 
 function deepFreeze<T>(value: T): T {
@@ -1371,6 +1423,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const role = payload.agentRole;
       const project = stateRef.current.projects.find((candidate) => candidate.id === payload.projectId);
       const attachmentContext = attachmentSnapshot ?? (project ? buildAttachmentContext(project) : null);
+      const compactedAttachmentContext = attachmentContext
+        ? compactAttachmentContextSnapshot(attachmentContext)
+        : null;
+      const requestAttachmentContext = compactedAttachmentContext?.snapshot ?? attachmentContext;
       const imageContextByUrl = new Map<
         string,
         {
@@ -1381,8 +1437,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       >();
 
-      if (attachmentContext) {
-        attachmentContext.images.forEach((image) => {
+      if (requestAttachmentContext) {
+        requestAttachmentContext.images.forEach((image) => {
           const existing = imageContextByUrl.get(image.url);
           if (existing) {
             if (!existing.attachmentIds.includes(image.attachmentId)) {
@@ -1404,11 +1460,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ...payload,
         context: {
           ...(typeof payload.context === 'object' && payload.context !== null ? payload.context : { raw: payload.context ?? null }),
-          attachments: attachmentContext
+          attachments: requestAttachmentContext
             ? {
-                projectAttachments: attachmentContext.projectAttachments,
-                messageAttachments: attachmentContext.messageAttachments,
-                extractedSections: attachmentContext.textSections.map((section) => ({
+                projectAttachments: requestAttachmentContext.projectAttachments,
+                messageAttachments: requestAttachmentContext.messageAttachments,
+                extractedSections: requestAttachmentContext.textSections.map((section) => ({
                   title: section.title,
                   source: section.source,
                   kind: section.kind,
@@ -1443,7 +1499,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
         }
 
-        if (attachmentContext && attachmentContext.images.length > aiImages.length) {
+        if (compactedAttachmentContext && compactedAttachmentContext.truncatedSections > 0) {
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: logContext.agent,
+            message:
+              `AI context trimmed: kept ${compactedAttachmentContext.keptSectionCount}/` +
+              `${compactedAttachmentContext.originalSectionCount} text sections, ` +
+              `chars ${compactedAttachmentContext.keptChars}/${compactedAttachmentContext.originalChars}.`,
+          });
+        }
+
+        if (requestAttachmentContext && requestAttachmentContext.images.length > aiImages.length) {
           dispatch({
             type: 'ADD_LOG',
             level: 'warning',
@@ -1453,10 +1521,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (
-          attachmentContext &&
-          attachmentContext.droppedImageAttachments.length > 0
+          requestAttachmentContext &&
+          requestAttachmentContext.droppedImageAttachments.length > 0
         ) {
-          const droppedTitles = attachmentContext.droppedImageAttachments
+          const droppedTitles = requestAttachmentContext.droppedImageAttachments
             .map((image) => image.title)
             .slice(0, 3)
             .join(', ');
@@ -1465,7 +1533,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             level: 'warning',
             agent: logContext.agent,
             message:
-              `Image attachment warning: ${attachmentContext.droppedImageAttachments.length} image(s) ` +
+              `Image attachment warning: ${requestAttachmentContext.droppedImageAttachments.length} image(s) ` +
               `could not be linked to AI (missing server-reachable URL).` +
               (droppedTitles ? ` Example: ${droppedTitles}` : ''),
           });
@@ -1974,7 +2042,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const buildExecutionAgentContext = useCallback(
     (task: Task, snapshot: ExecutionSnapshot) => {
-      const compact = {
+      return {
         snapshotId: snapshot.id,
         projectPrompt: shorten(snapshot.projectPrompt, 1_800),
         approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 3_000),
@@ -2019,20 +2087,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           source: entry.source,
         })),
         missingInputNotes: snapshot.missingInputNotes,
-      };
-
-      if (task.agent === 'Planner') {
-        return compact;
-      }
-
-      return {
-        ...compact,
-        detailed: {
-          zipSnapshots: snapshot.zipSnapshots,
-          siteSnapshots: snapshot.siteSnapshots,
-          pdfTexts: snapshot.pdfTexts,
-          imageInputs: snapshot.imageInputs,
-        },
       };
     },
     []
