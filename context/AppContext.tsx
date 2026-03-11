@@ -328,72 +328,11 @@ function parseExecutionOutputBundle(
   task: Task,
   project: Project
 ): { bundle: ExecutionOutputBundle; error: null } | { bundle: null; error: string } {
-  const normalizedRaw = raw.trim();
-  const stripCodeFence = (value: string) =>
-    value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  const extractFirstJsonObject = (value: string): string | null => {
-    const start = value.indexOf('{');
-    if (start < 0) return null;
-
-    let depth = 0;
-    let inString = false;
-    let escaping = false;
-
-    for (let index = start; index < value.length; index += 1) {
-      const char = value[index];
-
-      if (inString) {
-        if (escaping) {
-          escaping = false;
-          continue;
-        }
-        if (char === '\\') {
-          escaping = true;
-          continue;
-        }
-        if (char === '"') {
-          inString = false;
-        }
-        continue;
-      }
-
-      if (char === '"') {
-        inString = true;
-        continue;
-      }
-
-      if (char === '{') {
-        depth += 1;
-      } else if (char === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          return value.slice(start, index + 1);
-        }
-      }
-    }
-
-    return null;
-  };
-
   let parsed: unknown;
   try {
-    parsed = JSON.parse(normalizedRaw);
+    parsed = parseJsonObjectFromModelText(raw);
   } catch {
-    const fencedCandidate = stripCodeFence(normalizedRaw);
-    try {
-      parsed = JSON.parse(fencedCandidate);
-    } catch {
-      const extracted = extractFirstJsonObject(fencedCandidate);
-      if (!extracted) {
-        return { bundle: null, error: 'Execution output is not valid JSON.' };
-      }
-
-      try {
-        parsed = JSON.parse(extracted);
-      } catch {
-        return { bundle: null, error: 'Execution output is not valid JSON.' };
-      }
-    }
+    return { bundle: null, error: 'Execution output is not valid JSON.' };
   }
 
   const result = executionOutputSchema.safeParse(parsed);
@@ -444,70 +383,150 @@ function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['p
   return task.agent === 'Builder' && artifact.path === 'generated-files.json';
 }
 
-function parseJsonObjectFromModelText(raw: string): unknown {
-  const normalizedRaw = raw.trim();
-  const stripCodeFence = (value: string) =>
-    value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  const extractFirstJsonObject = (value: string): string | null => {
-    const start = value.indexOf('{');
-    if (start < 0) return null;
+function stripJsonCodeFence(value: string): string {
+  return value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+}
 
-    let depth = 0;
-    let inString = false;
-    let escaping = false;
+function extractFirstJsonObject(value: string): string | null {
+  const start = value.indexOf('{');
+  if (start < 0) return null;
 
-    for (let index = start; index < value.length; index += 1) {
-      const char = value[index];
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
 
-      if (inString) {
-        if (escaping) {
-          escaping = false;
-          continue;
-        }
-        if (char === '\\') {
-          escaping = true;
-          continue;
-        }
-        if (char === '"') {
-          inString = false;
-        }
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+
+    if (inString) {
+      if (escaping) {
+        escaping = false;
         continue;
       }
-
+      if (char === '\\') {
+        escaping = true;
+        continue;
+      }
       if (char === '"') {
-        inString = true;
-        continue;
+        inString = false;
       }
-
-      if (char === '{') {
-        depth += 1;
-      } else if (char === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          return value.slice(start, index + 1);
-        }
-      }
+      continue;
     }
 
-    return null;
-  };
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
 
-  try {
-    return JSON.parse(normalizedRaw);
-  } catch (initialError) {
-    const fencedCandidate = stripCodeFence(normalizedRaw);
-
-    try {
-      return JSON.parse(fencedCandidate);
-    } catch {
-      const extracted = extractFirstJsonObject(fencedCandidate);
-      if (!extracted) {
-        throw initialError;
+    if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, index + 1);
       }
-
-      return JSON.parse(extracted);
     }
   }
+
+  return null;
+}
+
+function repairJsonStringEscapes(value: string): string {
+  let repaired = '';
+  let inString = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+
+    if (!inString) {
+      repaired += char;
+      if (char === '"') {
+        inString = true;
+      }
+      continue;
+    }
+
+    if (char === '\\') {
+      const next = value[index + 1];
+      if (next === undefined) {
+        repaired += '\\\\';
+        continue;
+      }
+
+      if (/^["\\/bfnrt]$/.test(next)) {
+        repaired += `\\${next}`;
+        index += 1;
+        continue;
+      }
+
+      if (next === 'u') {
+        const unicodeDigits = value.slice(index + 2, index + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
+          repaired += `\\u${unicodeDigits}`;
+          index += 5;
+          continue;
+        }
+      }
+
+      if (/\s/.test(next)) {
+        continue;
+      }
+
+      repaired += '\\\\';
+      continue;
+    }
+
+    if (char === '"') {
+      inString = false;
+      repaired += char;
+      continue;
+    }
+
+    if (char === '\n') {
+      repaired += '\\n';
+      continue;
+    }
+
+    if (char === '\r') {
+      repaired += '\\r';
+      continue;
+    }
+
+    if (char === '\t') {
+      repaired += '\\t';
+      continue;
+    }
+
+    repaired += char;
+  }
+
+  return repaired;
+}
+
+function parseJsonObjectFromModelText(raw: string): unknown {
+  const normalizedRaw = raw.trim();
+  const candidates = [
+    normalizedRaw,
+    stripJsonCodeFence(normalizedRaw),
+    extractFirstJsonObject(stripJsonCodeFence(normalizedRaw)),
+  ].filter((candidate, index, all): candidate is string => Boolean(candidate) && all.indexOf(candidate) === index);
+
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch (error) {
+      lastError = error;
+    }
+
+    try {
+      return JSON.parse(repairJsonStringEscapes(candidate));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Invalid JSON payload.');
 }
 
 function createEmptyUsage(): ProjectUsage {

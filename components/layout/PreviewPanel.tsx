@@ -188,6 +188,40 @@ function MarkdownArtifactView({ content, isMobile = false }: { content: string; 
   );
 }
 
+function PreformattedArtifactView({ content, isMobile = false }: { content: string; isMobile?: boolean }) {
+  return (
+    <pre
+      className={`overflow-x-auto whitespace-pre rounded border border-gray-800 bg-black/40 px-3 py-3 font-mono leading-relaxed text-gray-200 ${
+        isMobile ? 'text-xs' : 'text-[11px]'
+      }`}
+    >
+      {content}
+    </pre>
+  );
+}
+
+function getPreferredArtifactSelection(tasks: Task[]): { taskId: string; artifactPath: string } | null {
+  for (const task of [...tasks].reverse()) {
+    const bundleArtifact = task.producesArtifacts.find((artifact) => artifact.executionOutput?.files.length);
+    if (bundleArtifact) {
+      return { taskId: task.id, artifactPath: bundleArtifact.path };
+    }
+  }
+
+  for (const task of [...tasks].reverse()) {
+    const filledArtifact = task.producesArtifacts.find(
+      (artifact) => artifact.content?.trim() || artifact.rawContent?.trim()
+    );
+    if (filledArtifact) {
+      return { taskId: task.id, artifactPath: filledArtifact.path };
+    }
+  }
+
+  return tasks[0]?.producesArtifacts[0]
+    ? { taskId: tasks[0].id, artifactPath: tasks[0].producesArtifacts[0].path }
+    : null;
+}
+
 function buildImageAiStatusKeys(attachment: ProjectAttachment): Array<Parameters<typeof translate>[1]> {
   const keys: Array<Parameters<typeof translate>[1]> = ['attachments.aiStatus.uploaded'];
   if (attachment.ingestion?.linkedToAi || attachment.ingestion?.includedInContext) {
@@ -254,6 +288,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedGeneratedFilePath, setSelectedGeneratedFilePath] = useState<string | null>(null);
+  const [isResultExpanded, setIsResultExpanded] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const executionTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
   const isMobile = mode === 'mobile';
@@ -298,6 +333,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
       ),
     [tasks]
   );
+  const preferredResultSelection = useMemo(() => getPreferredArtifactSelection(tasks), [tasks]);
   const executionCompletionStatus = useMemo(() => buildExecutionCompletionStatus(tasks), [tasks]);
   const integratorFinalArtifact = useMemo(() => {
     const integratorTask = [...tasks].reverse().find((task) => task.agent === 'Integrator');
@@ -358,10 +394,11 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   }, [project]);
 
   useEffect(() => {
-    if (!selectedTaskId && tasks[0]) {
-      setSelectedTaskId(tasks[0].id);
+    if (!selectedTaskId && preferredResultSelection) {
+      setSelectedTaskId(preferredResultSelection.taskId);
+      setSelectedArtifact(preferredResultSelection.artifactPath);
     }
-  }, [tasks, selectedTaskId]);
+  }, [preferredResultSelection, selectedTaskId]);
 
   useEffect(() => {
     const timer = setInterval(() => setNowTick(Date.now()), 1000);
@@ -389,6 +426,10 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     [selectedExecutionBundle]
   );
 
+  const resultModalTitle = selectedExecutionBundle
+    ? selectedGeneratedFile?.path ?? selectedArtifactMeta?.path ?? 'Generated result'
+    : selectedArtifactMeta?.path ?? 'Result';
+
   useEffect(() => {
     if (!selectedTask) return;
     if (!selectedTask.producesArtifacts.length) {
@@ -399,6 +440,14 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
       setSelectedArtifact(selectedTask.producesArtifacts[0].path);
     }
   }, [selectedArtifact, selectedTask]);
+
+  useEffect(() => {
+    if (!preferredResultSelection) return;
+    if (!selectedTask || !selectedArtifactMeta) {
+      setSelectedTaskId(preferredResultSelection.taskId);
+      setSelectedArtifact(preferredResultSelection.artifactPath);
+    }
+  }, [preferredResultSelection, selectedArtifactMeta, selectedTask]);
 
   useEffect(() => {
     if (!selectedExecutionBundle) {
@@ -468,6 +517,18 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
           <span className={`${isMobile ? 'text-sm' : 'text-[10px]'} ml-auto text-gray-400`}>
             {doneTasksCount}/{totalTasksCount} {t('preview.tasks')}
           </span>
+        )}
+        {preferredResultSelection && (
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedTaskId(preferredResultSelection.taskId);
+              setSelectedArtifact(preferredResultSelection.artifactPath);
+            }}
+            className={`${isMobile ? 'text-sm px-3 py-2 rounded-xl' : 'text-[10px] px-2 py-1 rounded'} border border-emerald-700/60 bg-emerald-950/30 text-emerald-100 hover:border-emerald-500`}
+          >
+            Open result
+          </button>
         )}
       </div>
 
@@ -1020,6 +1081,13 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
                         type: {selectedArtifactMeta.kind}
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsResultExpanded(true)}
+                        className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[10px] text-gray-200 transition-colors hover:border-blue-500"
+                      >
+                        Expand
+                      </button>
                       {selectedExecutionBundle && (
                         <button
                           type="button"
@@ -1111,9 +1179,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                                     {isBundleMarkdownFile(selectedGeneratedFile.path) ? (
                                       <MarkdownArtifactView content={selectedGeneratedFile.content} isMobile={isMobile} />
                                     ) : (
-                                      <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-gray-200 [overflow-wrap:anywhere]">
-                                        {selectedGeneratedFile.content}
-                                      </pre>
+                                      <PreformattedArtifactView content={selectedGeneratedFile.content} isMobile={isMobile} />
                                     )}
                                   </div>
                                 </div>
@@ -1122,9 +1188,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                               {selectedArtifactMeta.rawContent?.trim() && (
                                 <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
                                   <p className="text-[10px] uppercase tracking-wider text-gray-400">Raw model output</p>
-                                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded border border-gray-800 bg-black/40 px-2 py-2 text-[10px] leading-relaxed text-gray-300 [overflow-wrap:anywhere]">
-                                    {selectedArtifactMeta.rawContent}
-                                  </pre>
+                                  <div className="mt-2">
+                                    <PreformattedArtifactView content={selectedArtifactMeta.rawContent} isMobile={isMobile} />
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -1135,13 +1201,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       ) : (
                         <div className="space-y-2">
                           <p className="text-[10px] text-gray-400">Structured preview</p>
-                          <pre className="overflow-x-hidden whitespace-pre-wrap break-words text-[10px] leading-relaxed text-gray-200 [overflow-wrap:anywhere]">
-                            {selectedArtifactContent}
-                          </pre>
+                          <PreformattedArtifactView content={selectedArtifactContent} isMobile={isMobile} />
                           {selectedArtifactMeta.rawContent?.trim() && (
-                            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded border border-gray-800 bg-black/40 px-2 py-2 text-[10px] leading-relaxed text-gray-300 [overflow-wrap:anywhere]">
-                              {selectedArtifactMeta.rawContent}
-                            </pre>
+                            <PreformattedArtifactView content={selectedArtifactMeta.rawContent} isMobile={isMobile} />
                           )}
                         </div>
                       )}
@@ -1212,6 +1274,49 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
           </div>
         )}
       </div>
+
+      {isResultExpanded && selectedArtifactMeta && (
+        <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/80 p-3 backdrop-blur-sm">
+          <div className="flex h-full w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-gray-700 bg-gray-950 shadow-2xl">
+            <div className="flex items-center gap-3 border-b border-gray-800 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs uppercase tracking-wider text-gray-400">Expanded result</p>
+                <p className="truncate text-sm text-gray-100">{resultModalTitle}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsResultExpanded(false)}
+                className="rounded border border-gray-700 bg-gray-900 px-3 py-1.5 text-xs text-gray-100 hover:border-blue-500"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {selectedExecutionBundle && selectedArtifactPreviewHtml ? (
+                <div className="space-y-4">
+                  <iframe
+                    title="Expanded generated app preview"
+                    sandbox="allow-scripts"
+                    srcDoc={selectedArtifactPreviewHtml}
+                    className="h-[70vh] w-full rounded-xl border border-gray-800 bg-white"
+                  />
+                  {selectedGeneratedFile && (
+                    <PreformattedArtifactView content={selectedGeneratedFile.content} isMobile={false} />
+                  )}
+                </div>
+              ) : isMarkdownArtifact(selectedArtifactMeta.path) ? (
+                <MarkdownArtifactView content={selectedArtifactContent} isMobile={false} />
+              ) : (
+                <PreformattedArtifactView
+                  content={selectedArtifactMeta.rawContent?.trim() || selectedArtifactContent}
+                  isMobile={false}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
