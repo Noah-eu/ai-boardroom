@@ -1,18 +1,9 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { resolveOpenAiModel } from '../../types';
+import { resolveOpenAiModel, resolveReasoningConfig } from '../../types';
 
 const OPENAI_PRIMARY_TIMEOUT_MS = 18_000;
 const OPENAI_RETRY_TIMEOUT_MS = 8_000;
-
-function supportsReasoningControls(model: string): boolean {
-  return (
-    model.startsWith('gpt-5') ||
-    model.startsWith('o1') ||
-    model.startsWith('o3') ||
-    model.startsWith('o4')
-  );
-}
 
 function resolveOpenAiResponseProfile(agentRole: string, model: string, retry = false) {
   const role = agentRole.trim().toLowerCase();
@@ -21,17 +12,12 @@ function resolveOpenAiResponseProfile(agentRole: string, model: string, retry = 
 
   const maxOutputTokens = retry ? 700 : isExecution ? 1_000 : isPlanner ? 850 : 650;
   const verbosity = retry ? 'low' : isExecution ? 'medium' : 'low';
+  const reasoning = resolveReasoningConfig(model);
 
   return {
     max_output_tokens: maxOutputTokens,
     text: { verbosity } as const,
-    ...(supportsReasoningControls(model)
-      ? {
-          reasoning: {
-            effort: 'minimal' as const,
-          },
-        }
-      : {}),
+    ...(reasoning ? { reasoning } : {}),
   };
 }
 

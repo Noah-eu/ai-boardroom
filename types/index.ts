@@ -19,6 +19,16 @@ export function resolveOpenAiModel(
   return fallback;
 }
 
+export function resolveReasoningConfig(
+  model?: string | null
+): { effort: 'minimal' } | undefined {
+  if (model !== 'gpt-5.4') {
+    return undefined;
+  }
+
+  return { effort: 'minimal' };
+}
+
 // Agent types
 export type AgentName =
   | 'Strategist'
