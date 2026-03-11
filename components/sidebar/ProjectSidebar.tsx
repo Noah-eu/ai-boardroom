@@ -621,6 +621,9 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
                         <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
                           {project.language.toUpperCase()}
                         </span>
+                        <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-cyan-900/60 bg-cyan-950/30 text-cyan-200`}>
+                          {project.model}
+                        </span>
                       </div>
                     </div>
                   </div>

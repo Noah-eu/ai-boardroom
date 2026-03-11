@@ -151,12 +151,22 @@ async function createOpenAiResponse(
   agentRole: string,
   input: OpenAI.Responses.ResponseCreateParams['input']
 ): Promise<OpenAI.Responses.Response> {
+  const primaryProfile = resolveOpenAiResponseProfile(agentRole, model);
   try {
+    console.info(
+      '[netlify/ai-respond] OpenAI request',
+      JSON.stringify({
+        agentRole,
+        resolvedModel: model,
+        reasoningIncluded: Boolean(primaryProfile.reasoning),
+        retry: false,
+      })
+    );
     return await client.responses.create(
       {
         model,
         input,
-        ...resolveOpenAiResponseProfile(agentRole, model),
+        ...primaryProfile,
       },
       {
         timeout: OPENAI_PRIMARY_TIMEOUT_MS,
@@ -169,11 +179,21 @@ async function createOpenAiResponse(
     }
 
     console.warn(`[netlify/ai-respond] Primary OpenAI request failed for ${agentRole}; retrying with tighter limits.`);
+    const retryProfile = resolveOpenAiResponseProfile(agentRole, model, true);
+    console.info(
+      '[netlify/ai-respond] OpenAI request',
+      JSON.stringify({
+        agentRole,
+        resolvedModel: model,
+        reasoningIncluded: Boolean(retryProfile.reasoning),
+        retry: true,
+      })
+    );
     return client.responses.create(
       {
         model,
         input,
-        ...resolveOpenAiResponseProfile(agentRole, model, true),
+        ...retryProfile,
       },
       {
         timeout: OPENAI_RETRY_TIMEOUT_MS,
@@ -190,6 +210,9 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
 
   const apiKey = process.env.OPENAI_API_KEY;
   const envModel = resolveOpenAiModel(process.env.OPENAI_MODEL);
+  let debugSelectedModel: string | null = null;
+  let debugResolvedModel = envModel;
+  let debugReasoningIncluded = false;
 
   if (!apiKey) {
     return json(500, { error: 'OPENAI_API_KEY not configured' });
@@ -203,8 +226,25 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
     }
 
     const { language, projectId, agentRole, inputText, context, attachmentContext } = parsed.data;
+    const selectedModel = parsed.data.model ?? null;
     const model = resolveOpenAiModel(parsed.data.model, envModel);
+    const reasoningIncluded = Boolean(resolveOpenAiResponseProfile(agentRole, model).reasoning);
+    debugSelectedModel = selectedModel;
+    debugResolvedModel = model;
+    debugReasoningIncluded = reasoningIncluded;
     const languageInstruction = language === 'cz' ? 'Respond in Czech language.' : 'Respond in English.';
+
+    console.info(
+      '[netlify/ai-respond] Request boundary',
+      JSON.stringify({
+        projectId,
+        agentRole,
+        selectedModel,
+        resolvedModel: model,
+        envModel,
+        reasoningIncluded,
+      })
+    );
 
     const client = new OpenAI({ apiKey });
     const requestedImages = attachmentContext?.images ?? [];
@@ -263,6 +303,9 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
     return json(200, {
       text,
       meta: {
+        requestedModel: selectedModel,
+        resolvedModel: model,
+        reasoningIncluded,
         model: response.model,
         usage: extractUsage(response),
         imageContext: {
@@ -276,6 +319,15 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     const short = message.slice(0, 180);
+    console.error(
+      '[netlify/ai-respond] Request failed',
+      JSON.stringify({
+        selectedModel: debugSelectedModel,
+        resolvedModel: debugResolvedModel,
+        reasoningIncluded: debugReasoningIncluded,
+        error: short,
+      })
+    );
     return json(500, { error: `OpenAI request failed: ${short}` });
   }
 }

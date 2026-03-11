@@ -19,7 +19,7 @@ export function TopStatusBar() {
   const t = (key: string) => translate(projectLanguage, key as TranslationKey);
 
   const usage = project?.usage;
-  const activeModel = usage?.activeModel ?? t('statusBar.modelUnknown');
+  const activeModel = usage?.activeModel ?? project?.model ?? t('statusBar.modelUnknown');
   const displayTokens = useMemo(() => {
     if (!usage) {
       return { input: 0, output: 0, total: 0, projectCost: 0, sessionCost: 0 };

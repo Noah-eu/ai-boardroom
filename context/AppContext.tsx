@@ -131,6 +131,9 @@ type AiUsageMeta = {
 };
 
 type AiRespondMeta = {
+  requestedModel: string | null;
+  resolvedModel: string;
+  reasoningIncluded: boolean;
   model: string;
   usage: AiUsageMeta;
   imageContext?: {
@@ -1578,8 +1581,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       const aiImages = Array.from(imageContextByUrl.values()).slice(0, 8);
+      const requestedModel = payload.model ?? project?.model ?? undefined;
       const requestPayload: AiRespondPayload = {
         ...payload,
+        model: requestedModel,
         context: {
           ...(typeof payload.context === 'object' && payload.context !== null ? payload.context : { raw: payload.context ?? null }),
           attachments: requestAttachmentContext
@@ -1603,6 +1608,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           })),
         },
       };
+
+      console.info(
+        '[ai/respond][client] request boundary',
+        JSON.stringify({
+          projectId: payload.projectId,
+          agentRole: payload.agentRole,
+          selectedModel: requestedModel ?? null,
+          projectModel: project?.model ?? null,
+          imageCount: aiImages.length,
+        })
+      );
 
       if (logContext) {
         dispatch({
@@ -1729,6 +1745,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           throw new Error(`AI request failed.${detail}`);
         }
 
+        console.info(
+          '[ai/respond][client] response meta',
+          JSON.stringify({
+            projectId: payload.projectId,
+            agentRole: payload.agentRole,
+            selectedModel: requestedModel ?? null,
+            resolvedModel: data.meta?.resolvedModel ?? null,
+            actualModel: data.meta?.model ?? null,
+            reasoningIncluded: data.meta?.reasoningIncluded ?? null,
+          })
+        );
+
         if (logContext && data.meta?.imageContext) {
           dispatch({
             type: 'ADD_LOG',
@@ -1754,6 +1782,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             agent: logContext.agent,
             message: translateProject(payload.language, 'workflow.openai.callSuccess'),
           });
+
+          if (data.meta) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: logContext.agent,
+              message:
+                `OpenAI meta: selected=${data.meta.requestedModel ?? 'none'}, ` +
+                `resolved=${data.meta.resolvedModel}, actual=${data.meta.model}, ` +
+                `reasoning=${data.meta.reasoningIncluded ? 'included' : 'omitted'}`,
+            });
+          }
         }
 
         if (project && attachmentContext && attachmentContext.includedAttachmentIds.length > 0) {
@@ -1788,7 +1828,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_PROJECT_USAGE',
             projectId: payload.projectId,
-            model: data.meta.model,
+            model: data.meta.model || data.meta.resolvedModel,
             usage: data.meta.usage,
           });
         }
@@ -1802,6 +1842,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           error instanceof DOMException && error.name === 'AbortError'
             ? new Error(`OpenAI request timeout after ${options?.timeoutMs ?? 0} ms.`)
             : error;
+        console.warn(
+          '[ai/respond][client] request failed',
+          JSON.stringify({
+            projectId: payload.projectId,
+            agentRole: payload.agentRole,
+            selectedModel: requestedModel ?? null,
+            projectModel: project?.model ?? null,
+            error: timeoutError instanceof Error ? timeoutError.message : 'Unknown OpenAI error',
+          })
+        );
         if (logContext) {
           const message = timeoutError instanceof Error ? timeoutError.message : 'Unknown OpenAI error';
           const shortError = message.length > 140 ? `${message.slice(0, 137)}...` : message;
