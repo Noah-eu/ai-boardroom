@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import JSZip from 'jszip';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -289,6 +290,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedGeneratedFilePath, setSelectedGeneratedFilePath] = useState<string | null>(null);
   const [isResultExpanded, setIsResultExpanded] = useState(false);
+  const [autoExpandedOnce, setAutoExpandedOnce] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const executionTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
   const isMobile = mode === 'mobile';
@@ -399,6 +401,19 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
       setSelectedArtifact(preferredResultSelection.artifactPath);
     }
   }, [preferredResultSelection, selectedTaskId]);
+
+  useEffect(() => {
+    if (
+      !autoExpandedOnce &&
+      executionCompletionStatus === 'completed' &&
+      preferredResultSelection
+    ) {
+      setSelectedTaskId(preferredResultSelection.taskId);
+      setSelectedArtifact(preferredResultSelection.artifactPath);
+      setIsResultExpanded(true);
+      setAutoExpandedOnce(true);
+    }
+  }, [autoExpandedOnce, executionCompletionStatus, preferredResultSelection]);
 
   useEffect(() => {
     const timer = setInterval(() => setNowTick(Date.now()), 1000);
@@ -1275,14 +1290,26 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
         )}
       </div>
 
-      {isResultExpanded && selectedArtifactMeta && (
-        <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/80 p-3 backdrop-blur-sm">
+      {isResultExpanded && selectedArtifactMeta && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-[9999] flex items-stretch justify-center bg-black/80 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setIsResultExpanded(false); }}
+        >
           <div className="flex h-full w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-gray-700 bg-gray-950 shadow-2xl">
-            <div className="flex items-center gap-3 border-b border-gray-800 px-4 py-3">
+            <div className="flex items-center gap-3 border-b border-gray-800 px-5 py-3">
               <div className="min-w-0 flex-1">
                 <p className="text-xs uppercase tracking-wider text-gray-400">Expanded result</p>
                 <p className="truncate text-sm text-gray-100">{resultModalTitle}</p>
               </div>
+              {selectedExecutionBundle && (
+                <button
+                  type="button"
+                  onClick={() => void downloadExecutionBundle(selectedArtifactMeta)}
+                  className="rounded border border-blue-700/60 bg-blue-950/30 px-3 py-1.5 text-xs text-blue-100 hover:border-blue-500"
+                >
+                  Download ZIP
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setIsResultExpanded(false)}
@@ -1294,15 +1321,20 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
 
             <div className="min-h-0 flex-1 overflow-auto p-4">
               {selectedExecutionBundle && selectedArtifactPreviewHtml ? (
-                <div className="space-y-4">
+                <div className="flex flex-col gap-4 h-full">
                   <iframe
                     title="Expanded generated app preview"
                     sandbox="allow-scripts"
                     srcDoc={selectedArtifactPreviewHtml}
-                    className="h-[70vh] w-full rounded-xl border border-gray-800 bg-white"
+                    className="min-h-[60vh] flex-1 w-full rounded-xl border border-gray-800 bg-white"
                   />
                   {selectedGeneratedFile && (
-                    <PreformattedArtifactView content={selectedGeneratedFile.content} isMobile={false} />
+                    <details className="rounded border border-gray-800 bg-black/40">
+                      <summary className="cursor-pointer px-3 py-2 text-xs text-gray-400 hover:text-gray-200">
+                        Source: {selectedGeneratedFile.path}
+                      </summary>
+                      <PreformattedArtifactView content={selectedGeneratedFile.content} isMobile={false} />
+                    </details>
                   )}
                 </div>
               ) : isMarkdownArtifact(selectedArtifactMeta.path) ? (
@@ -1315,7 +1347,8 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
