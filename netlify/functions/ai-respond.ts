@@ -159,6 +159,7 @@ async function createOpenAiResponse(
         agentRole,
         resolvedModel: model,
         reasoningIncluded: Boolean(primaryProfile.reasoning),
+        reasoningEffort: primaryProfile.reasoning?.effort ?? null,
         retry: false,
       })
     );
@@ -186,6 +187,7 @@ async function createOpenAiResponse(
         agentRole,
         resolvedModel: model,
         reasoningIncluded: Boolean(retryProfile.reasoning),
+        reasoningEffort: retryProfile.reasoning?.effort ?? null,
         retry: true,
       })
     );
@@ -243,6 +245,7 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
         resolvedModel: model,
         envModel,
         reasoningIncluded,
+        reasoningEffort: resolveOpenAiResponseProfile(agentRole, model).reasoning?.effort ?? null,
       })
     );
 
@@ -306,6 +309,7 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
         requestedModel: selectedModel,
         resolvedModel: model,
         reasoningIncluded,
+        reasoningEffort: resolveOpenAiResponseProfile(agentRole, model).reasoning?.effort ?? null,
         model: response.model,
         usage: extractUsage(response),
         imageContext: {
@@ -325,6 +329,7 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
         selectedModel: debugSelectedModel,
         resolvedModel: debugResolvedModel,
         reasoningIncluded: debugReasoningIncluded,
+        reasoningEffort: resolveOpenAiResponseProfile('unknown', debugResolvedModel).reasoning?.effort ?? null,
         error: short,
       })
     );

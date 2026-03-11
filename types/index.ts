@@ -21,12 +21,12 @@ export function resolveOpenAiModel(
 
 export function resolveReasoningConfig(
   model?: string | null
-): { effort: 'minimal' } | undefined {
+): { effort: 'low' } | undefined {
   if (model !== 'gpt-5.4') {
     return undefined;
   }
 
-  return { effort: 'minimal' };
+  return { effort: 'low' };
 }
 
 // Agent types
