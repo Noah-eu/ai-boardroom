@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { z } from 'zod';
+import { resolveOpenAiModel } from '@/types';
 
 const OPENAI_PRIMARY_TIMEOUT_MS = 18_000;
 const OPENAI_RETRY_TIMEOUT_MS = 8_000;
@@ -51,6 +52,7 @@ const requestSchema = z.object({
   projectId: z.string().min(1),
   language: z.enum(['cz', 'en']),
   agentRole: z.string().min(1),
+  model: z.string().optional(),
   inputText: z.string().min(1),
   context: z.unknown().optional(),
   attachmentContext: z
@@ -181,10 +183,10 @@ async function createOpenAiResponse(
 
 export async function POST(request: Request) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_MODEL || 'gpt-5.4';
+  const envModel = resolveOpenAiModel(process.env.OPENAI_MODEL);
 
   if (!process.env.OPENAI_MODEL) {
-    console.warn('[ai/respond] OPENAI_MODEL not set; using default gpt-5.4');
+    console.warn('[ai/respond] OPENAI_MODEL not set; using default gpt-4.1-mini');
   }
 
   if (!apiKey) {
@@ -209,6 +211,7 @@ export async function POST(request: Request) {
     }
 
     const { language, projectId, agentRole, inputText, context, attachmentContext } = parsed.data;
+    const model = resolveOpenAiModel(parsed.data.model, envModel);
     const languageInstruction =
       language === 'cz'
         ? 'Respond in Czech language.'

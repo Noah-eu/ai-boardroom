@@ -1,9 +1,11 @@
 import {
+  AIProvider,
   AppLanguage,
   Agent,
   AgentName,
   AgentStatus,
   DebateMode,
+  OpenAIModel,
   LogEntry,
   Message,
   MessageSender,
@@ -208,7 +210,9 @@ export function createProject(
   debateRounds = 3,
   debateMode: DebateMode = 'auto',
   maxWordsPerAgent = 180,
-  projectId?: string
+  projectId?: string,
+  provider: AIProvider = 'openai',
+  model: OpenAIModel = 'gpt-4.1-mini'
 ): Project {
   const now = new Date();
   const normalizedRounds = Math.min(3, Math.max(1, debateRounds));
@@ -217,7 +221,7 @@ export function createProject(
     session: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     estimatedProjectCostUsd: 0,
     sessionCostUsd: 0,
-    activeModel: null,
+    activeModel: model,
     models: [],
     lastUpdatedAt: null,
     persistence: {
@@ -230,6 +234,8 @@ export function createProject(
     name,
     description,
     language,
+    provider,
+    model,
     simulationMode,
     debateRounds: normalizedRounds,
     debateMode,

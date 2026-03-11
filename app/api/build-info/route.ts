@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
 import { NextResponse } from 'next/server';
+import { resolveOpenAiModel } from '@/types';
 
 function readGit(command: string, fallback: string): string {
   try {
@@ -23,5 +24,6 @@ export async function GET() {
   return NextResponse.json({
     branch,
     commit: commitFull.slice(0, 7),
+    openaiModelDefault: resolveOpenAiModel(process.env.OPENAI_MODEL),
   });
 }

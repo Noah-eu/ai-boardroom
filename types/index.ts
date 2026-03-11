@@ -1,6 +1,23 @@
 export type AppLanguage = 'en' | 'cz';
 export type OutputType = 'app' | 'website' | 'document' | 'plan' | 'other';
 export type DebateMode = 'auto' | 'interactive';
+export const ALLOWED_OPENAI_MODELS = ['gpt-4.1-mini', 'gpt-5.4'] as const;
+export type OpenAIModel = typeof ALLOWED_OPENAI_MODELS[number];
+export type AIProvider = 'openai';
+
+export function isAllowedOpenAiModel(value: string): value is OpenAIModel {
+  return (ALLOWED_OPENAI_MODELS as readonly string[]).includes(value);
+}
+
+export function resolveOpenAiModel(
+  value?: string | null,
+  fallback: OpenAIModel = 'gpt-4.1-mini'
+): OpenAIModel {
+  if (typeof value === 'string' && isAllowedOpenAiModel(value)) {
+    return value;
+  }
+  return fallback;
+}
 
 // Agent types
 export type AgentName =
@@ -52,6 +69,8 @@ export interface Task {
   title: string;
   description: string;
   agent: AgentName;
+  provider: AIProvider;
+  model: OpenAIModel;
   status: TaskStatus;
   dependsOn: string[];
   producesArtifacts: TaskArtifact[];
@@ -193,6 +212,8 @@ export interface Project {
   name: string;
   description: string;
   language: AppLanguage;
+  provider: AIProvider;
+  model: OpenAIModel;
   simulationMode: boolean;
   debateRounds: number;
   debateMode: DebateMode;

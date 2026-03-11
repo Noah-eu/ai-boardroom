@@ -14,6 +14,7 @@ import { onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import {
+  AIProvider,
   AttachmentIngestion,
   AppLanguage,
   Agent,
@@ -31,6 +32,8 @@ import {
   ProjectStatus,
   Task,
   TaskGraph,
+  OpenAIModel,
+  resolveOpenAiModel,
   UsageTotals,
   WorkflowPhase,
 } from '@/types';
@@ -109,6 +112,7 @@ type AiRespondPayload = {
   projectId: string;
   language: AppLanguage;
   agentRole: string;
+  model?: OpenAIModel;
   inputText: string;
   context?: unknown;
   attachmentContext?: {
@@ -239,9 +243,9 @@ type DraftAttachmentInput =
   | { kind: 'url'; url: string; source?: 'project' | 'message' };
 
 const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number }> = {
-  'gpt-5.4': { input: 2.5, output: 15.0 },
   'gpt-4.1': { input: 2.0, output: 8.0 },
   'gpt-4.1-mini': { input: 0.4, output: 1.6 },
+  'gpt-5.4': { input: 2.5, output: 15.0 },
   'gpt-4.1-nano': { input: 0.1, output: 0.4 },
   'gpt-4o': { input: 2.5, output: 10.0 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
@@ -249,9 +253,9 @@ const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number 
 
 function resolveModelRates(modelName: string | null): { input: number; output: number } {
   if (!modelName) {
-    return MODEL_PRICING_PER_MILLION['gpt-5.4'];
+    return MODEL_PRICING_PER_MILLION['gpt-4.1-mini'];
   }
-  return MODEL_PRICING_PER_MILLION[modelName] ?? MODEL_PRICING_PER_MILLION['gpt-5.4'];
+  return MODEL_PRICING_PER_MILLION[modelName] ?? MODEL_PRICING_PER_MILLION['gpt-4.1-mini'];
 }
 
 function estimateCostUsd(totals: UsageTotals, modelName: string | null): number {
@@ -259,6 +263,17 @@ function estimateCostUsd(totals: UsageTotals, modelName: string | null): number 
   const inputCost = (totals.inputTokens / 1_000_000) * rates.input;
   const outputCost = (totals.outputTokens / 1_000_000) * rates.output;
   return Number((inputCost + outputCost).toFixed(6));
+}
+
+function estimateUsageCostUsd(usage: AiUsageMeta, modelName: string | null): number {
+  return estimateCostUsd(
+    {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      totalTokens: usage.totalTokens,
+    },
+    modelName
+  );
 }
 
 function createEmptyUsage(): ProjectUsage {
@@ -392,6 +407,8 @@ type Action =
       name: string;
       description: string;
       language: AppLanguage;
+      provider: AIProvider;
+      model: OpenAIModel;
       outputType: OutputType;
       simulationMode: boolean;
       debateRounds: number;
@@ -599,7 +616,9 @@ function appReducer(state: AppState, action: Action): AppState {
         action.debateRounds,
         action.debateMode,
         action.maxWordsPerAgent,
-        action.projectId
+        action.projectId,
+        action.provider,
+        action.model
       );
       return {
         ...state,
@@ -898,9 +917,10 @@ function appReducer(state: AppState, action: Action): AppState {
             currentUsage.session.totalTokens +
             (action.usage.totalTokens || action.usage.inputTokens + action.usage.outputTokens),
         };
-        const modelName = action.model || currentUsage.activeModel || null;
+        const modelName = action.model || project.model || currentUsage.activeModel || null;
         const modelIndex = currentUsage.models.findIndex((entry) => entry.model === action.model);
         const nextModels = [...currentUsage.models];
+        const incrementalCostUsd = estimateUsageCostUsd(action.usage, action.model || project.model || null);
 
         if (modelIndex >= 0) {
           const current = nextModels[modelIndex];
@@ -935,8 +955,8 @@ function appReducer(state: AppState, action: Action): AppState {
             session: nextSession,
             activeModel: modelName,
             models: nextModels,
-            estimatedProjectCostUsd: estimateCostUsd(nextTotals, modelName),
-            sessionCostUsd: estimateCostUsd(nextSession, modelName),
+            estimatedProjectCostUsd: Number((currentUsage.estimatedProjectCostUsd + incrementalCostUsd).toFixed(6)),
+            sessionCostUsd: Number((currentUsage.sessionCostUsd + incrementalCostUsd).toFixed(6)),
             lastUpdatedAt: new Date(),
             persistence: {
               ...currentUsage.persistence,
@@ -1020,6 +1040,7 @@ interface AppContextValue {
     name: string,
     description: string,
     projectLanguage: AppLanguage,
+    model: OpenAIModel,
     outputType: OutputType,
     simulationMode: boolean,
     debateRounds: number,
@@ -1726,6 +1747,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       name: string,
       description: string,
       projectLanguage: AppLanguage,
+      model: OpenAIModel,
       outputType: OutputType,
       simulationMode: boolean,
       debateRounds: number,
@@ -1743,7 +1765,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         debateRounds,
         debateMode,
         maxWordsPerAgent,
-        projectId
+        projectId,
+        'openai',
+        model
       );
 
       dispatch({
@@ -1752,6 +1776,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         name,
         description,
         language: projectLanguage,
+        provider: 'openai',
+        model,
         outputType,
         simulationMode,
         debateRounds,
@@ -2315,6 +2341,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             title: task.title,
           }),
           agent: 'Builder',
+          provider: task.provider,
+          model: task.model,
           dependsOn: [task.id],
           status: 'blocked',
           producesArtifacts: [
@@ -2338,6 +2366,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             title: task.title,
           }),
           agent: task.agent,
+          provider: task.provider,
+          model: task.model,
           dependsOn: [reworkTask.id],
           status: 'blocked',
           producesArtifacts: task.producesArtifacts,
@@ -2641,6 +2671,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectId,
                 language: project.language,
                 agentRole: 'Planner',
+                model: task.model,
                 inputText: plannerStageAPrompt,
                 context: plannerStageAContext,
               },
@@ -2689,6 +2720,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectId,
                 language: project.language,
                 agentRole: 'Planner',
+                model: task.model,
                 inputText: plannerStageBPrompt,
                 context: {
                   snapshotId: snapshot.id,
@@ -2882,6 +2914,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectId,
                 language: project.language,
                 agentRole: task.agent,
+                model: task.model,
                 inputText: prompt,
                 context: {
                   artifactPath: artifact.path,
@@ -3178,11 +3211,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     (project: Project): TaskGraph => {
       const maxRetries = project.simulationMode ? 2 : 1;
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
+      const taskModel = resolveOpenAiModel(project.model);
 
       const planner = createTask({
         title: 'Planner: Execution plan',
         description: 'Generate a prioritized plan with milestones, dependencies, and implementation order.',
         agent: 'Planner',
+        provider: 'openai',
+        model: taskModel,
         dependsOn: [],
         status: 'queued',
         producesArtifacts: [
@@ -3194,6 +3230,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         title: 'Architect: Architecture review',
         description: 'Review architecture impacts, module boundaries, and implementation constraints.',
         agent: 'Architect',
+        provider: 'openai',
+        model: taskModel,
         dependsOn: [planner.id],
         status: statusFor([planner.id]),
         producesArtifacts: [
@@ -3205,6 +3243,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         title: 'Builder: Implementation proposal',
         description: 'Draft concrete file-level change proposals and patch plan based on ingested inputs.',
         agent: 'Builder',
+        provider: 'openai',
+        model: taskModel,
         dependsOn: [architect.id],
         status: statusFor([architect.id]),
         producesArtifacts: [
@@ -3217,6 +3257,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         title: 'Reviewer: Quality and risk review',
         description: 'Audit Builder outputs for quality, requirement coverage, and risks.',
         agent: 'Reviewer',
+        provider: 'openai',
+        model: taskModel,
         dependsOn: [builder.id],
         status: statusFor([builder.id]),
         producesArtifacts: [
@@ -3230,6 +3272,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         title: 'Tester: Test checklist and acceptance criteria',
         description: 'Create functional, regression, and edge-case test checklist with acceptance criteria.',
         agent: 'Tester',
+        provider: 'openai',
+        model: taskModel,
         dependsOn: [reviewer.id],
         status: statusFor([reviewer.id]),
         producesArtifacts: [
@@ -3243,6 +3287,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         title: 'Integrator: Final merged recommendation',
         description: 'Merge all execution outputs into a final ordered package and phased recommendation.',
         agent: 'Integrator',
+        provider: 'openai',
+        model: taskModel,
         dependsOn: [tester.id],
         status: statusFor([tester.id]),
         producesArtifacts: [
@@ -4262,6 +4308,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       projectId,
                       language,
                       agentRole: agent,
+                      model: refreshedProject.model,
                       inputText: prompt,
                       context: {
                         projectName: refreshedProject.name,
@@ -4405,6 +4452,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   projectId,
                   language,
                   agentRole: 'Orchestrator',
+                  model: refreshedProject.model,
                   inputText: summaryPrompt,
                   context: {
                     projectName: refreshedProject.name,
@@ -4541,6 +4589,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       name: demoProject.name,
       description: demoProject.description,
       language,
+      provider: demoProject.provider,
+      model: demoProject.model,
       outputType: demoProject.outputType,
       simulationMode: demoProject.simulationMode,
       debateRounds: demoProject.debateRounds,

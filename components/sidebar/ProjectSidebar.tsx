@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
-import { AppLanguage, DebateMode, OutputType, ProjectStatus } from '@/types';
+import { AppLanguage, DebateMode, OpenAIModel, OutputType, ProjectStatus, resolveOpenAiModel } from '@/types';
 
 const statusConfig: Record<ProjectStatus, { color: string; dot: string }> = {
   idle: { color: 'text-gray-400', dot: 'bg-gray-500' },
@@ -43,6 +43,7 @@ interface NewProjectFormProps {
     name: string,
     description: string,
     projectLanguage: AppLanguage,
+    model: OpenAIModel,
     outputType: OutputType,
     debateRounds: number,
     debateMode: DebateMode,
@@ -52,13 +53,16 @@ interface NewProjectFormProps {
   onCancel: () => void;
   t: ReturnType<typeof useApp>['t'];
   defaultLanguage: AppLanguage;
+  defaultModel: OpenAIModel;
   isMobile?: boolean;
 }
 
-function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = false }: NewProjectFormProps) {
+function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, isMobile = false }: NewProjectFormProps) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [projectLanguage, setProjectLanguage] = useState<AppLanguage>(defaultLanguage);
+  const [selectedModel, setSelectedModel] = useState<OpenAIModel>(defaultModel);
+  const [modelTouched, setModelTouched] = useState(false);
   const [outputType, setOutputType] = useState<OutputType>('other');
   const [debateRounds, setDebateRounds] = useState(3);
   const [debateMode, setDebateMode] = useState<DebateMode>('auto');
@@ -72,6 +76,12 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
   const attachmentMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!modelTouched) {
+      setSelectedModel(defaultModel);
+    }
+  }, [defaultModel, modelTouched]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -113,6 +123,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
         name.trim(),
         description.trim(),
         projectLanguage,
+        selectedModel,
         outputType,
         debateRounds,
         debateMode,
@@ -185,6 +196,21 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, isMobile = fal
         <option value="cz">{t('lang.cz')}</option>
       </select>
       <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.outputType')}</label>
+      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>OpenAI model</label>
+      <select
+        value={selectedModel}
+        onChange={(e) => {
+          setSelectedModel(resolveOpenAiModel(e.target.value));
+          setModelTouched(true);
+        }}
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+      >
+        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+        <option value="gpt-5.4">gpt-5.4</option>
+      </select>
+      <p className={`${isMobile ? 'mb-4 text-sm' : 'mb-2 text-[10px]'} text-gray-500`}>
+        Light tasks default to the cheaper model. Switch to gpt-5.4 for heavier runs.
+      </p>
       <select
         value={outputType}
         onChange={(e) => setOutputType(e.target.value as OutputType)}
@@ -344,7 +370,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
     t,
   } = useApp();
   const [showForm, setShowForm] = useState(false);
-  const [buildInfo, setBuildInfo] = useState<{ branch: string; commit: string } | null>(null);
+  const [buildInfo, setBuildInfo] = useState<{ branch: string; commit: string; openaiModelDefault: OpenAIModel } | null>(null);
   const isMobile = mode === 'mobile';
 
   useEffect(() => {
@@ -354,7 +380,11 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
       .then((data) => {
         if (!isMounted || !data) return;
         if (typeof data.branch === 'string' && typeof data.commit === 'string') {
-          setBuildInfo({ branch: data.branch, commit: data.commit });
+          setBuildInfo({
+            branch: data.branch,
+            commit: data.commit,
+            openaiModelDefault: resolveOpenAiModel(data.openaiModelDefault),
+          });
         }
       })
       .catch(() => {
@@ -370,6 +400,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
     name: string,
     description: string,
     projectLanguage: AppLanguage,
+    model: OpenAIModel,
     outputType: OutputType,
     debateRounds: number,
     debateMode: DebateMode,
@@ -382,6 +413,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
         name,
         description,
         projectLanguage,
+        model,
         outputType,
         false,
         debateRounds,
@@ -521,6 +553,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
           onCancel={() => setShowForm(false)}
           t={t}
           defaultLanguage={language}
+          defaultModel={buildInfo?.openaiModelDefault ?? 'gpt-4.1-mini'}
           isMobile={isMobile}
         />
       )}

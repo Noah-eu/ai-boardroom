@@ -1,10 +1,12 @@
-import { AgentName, Task, TaskArtifact, TaskStatus } from '@/types';
+import { AIProvider, AgentName, OpenAIModel, Task, TaskArtifact, TaskStatus } from '@/types';
 import { generateId } from '@/orchestrator';
 
 interface CreateTaskInput {
   title: string;
   description: string;
   agent: AgentName;
+  provider?: AIProvider;
+  model?: OpenAIModel;
   dependsOn?: string[];
   producesArtifacts?: TaskArtifact[];
   status?: TaskStatus;
@@ -21,6 +23,8 @@ export function createTask(
     title: input.title,
     description: input.description,
     agent: input.agent,
+    provider: input.provider ?? 'openai',
+    model: input.model ?? 'gpt-4.1-mini',
     status: input.status ?? 'queued',
     dependsOn: input.dependsOn ?? [],
     producesArtifacts: input.producesArtifacts ?? [],
