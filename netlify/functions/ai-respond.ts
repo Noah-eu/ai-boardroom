@@ -1,6 +1,51 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
 
+const OPENAI_PRIMARY_TIMEOUT_MS = 18_000;
+const OPENAI_RETRY_TIMEOUT_MS = 8_000;
+
+function supportsReasoningControls(model: string): boolean {
+  return (
+    model.startsWith('gpt-5') ||
+    model.startsWith('o1') ||
+    model.startsWith('o3') ||
+    model.startsWith('o4')
+  );
+}
+
+function resolveOpenAiResponseProfile(agentRole: string, model: string, retry = false) {
+  const role = agentRole.trim().toLowerCase();
+  const isPlanner = role === 'planner';
+  const isExecution = ['architect', 'builder', 'reviewer', 'tester', 'integrator'].includes(role);
+
+  const maxOutputTokens = retry ? 700 : isExecution ? 1_000 : isPlanner ? 850 : 650;
+  const verbosity = retry ? 'low' : isExecution ? 'medium' : 'low';
+
+  return {
+    max_output_tokens: maxOutputTokens,
+    text: { verbosity } as const,
+    ...(supportsReasoningControls(model)
+      ? {
+          reasoning: {
+            effort: 'minimal' as const,
+          },
+        }
+      : {}),
+  };
+}
+
+function shouldRetryOpenAiRequest(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  return (
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('network') ||
+    message.includes('503') ||
+    message.includes('502') ||
+    message.includes('overloaded')
+  );
+}
+
 type NetlifyEvent = {
   httpMethod?: string;
   body?: string | null;
@@ -112,6 +157,44 @@ function normalizeRemoteImageUrl(url: string): string | null {
   }
 }
 
+async function createOpenAiResponse(
+  client: OpenAI,
+  model: string,
+  agentRole: string,
+  input: OpenAI.Responses.ResponseCreateParams['input']
+): Promise<OpenAI.Responses.Response> {
+  try {
+    return await client.responses.create(
+      {
+        model,
+        input,
+        ...resolveOpenAiResponseProfile(agentRole, model),
+      },
+      {
+        timeout: OPENAI_PRIMARY_TIMEOUT_MS,
+        maxRetries: 0,
+      }
+    );
+  } catch (error) {
+    if (!shouldRetryOpenAiRequest(error)) {
+      throw error;
+    }
+
+    console.warn(`[netlify/ai-respond] Primary OpenAI request failed for ${agentRole}; retrying with tighter limits.`);
+    return client.responses.create(
+      {
+        model,
+        input,
+        ...resolveOpenAiResponseProfile(agentRole, model, true),
+      },
+      {
+        timeout: OPENAI_RETRY_TIMEOUT_MS,
+        maxRetries: 0,
+      }
+    );
+  }
+}
+
 export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
   if (event.httpMethod !== 'POST') {
     return json(405, { error: 'Method not allowed' });
@@ -181,10 +264,7 @@ export async function handler(event: NetlifyEvent): Promise<NetlifyResult> {
         },
       ] as unknown as OpenAI.Responses.ResponseCreateParams['input'];
 
-    const response = await client.responses.create({
-      model,
-      input: requestInput,
-    });
+    const response = await createOpenAiResponse(client, model, agentRole, requestInput);
 
     const text = extractResponseText(response);
     if (!text) {
