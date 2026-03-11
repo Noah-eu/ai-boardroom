@@ -87,6 +87,10 @@ function buildArtifactFallbackPreview(
   ].join('\n');
 }
 
+function formatTaskModelLabel(task: Task): string {
+  return `${task.provider}/${task.model}`;
+}
+
 function MarkdownArtifactView({ content, isMobile = false }: { content: string; isMobile?: boolean }) {
   return (
     <div className={`prose prose-invert max-w-none break-words prose-pre:border prose-pre:border-gray-700 prose-pre:bg-black prose-code:text-blue-200 [overflow-wrap:anywhere] ${isMobile ? 'text-sm' : 'text-[12px]'}`}>
@@ -216,6 +220,8 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
           taskTitle: task.title,
           taskStatus: task.status,
           taskAgent: task.agent,
+          provider: task.provider,
+          model: task.model,
         }))
       ),
     [tasks]
@@ -820,6 +826,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                         </span>
                         <span className="text-xs text-gray-100 truncate">{task.title}</span>
                         <span className="text-[10px] text-gray-400 flex-shrink-0">{task.agent}</span>
+                        <span className="text-[10px] text-cyan-200 rounded border border-cyan-900/60 bg-cyan-950/30 px-1.5 py-0.5 flex-shrink-0">
+                          {formatTaskModelLabel(task)}
+                        </span>
                       </div>
                       {task.status === 'running' && (
                         <p className={`mt-1 text-[10px] ${isStalled ? 'text-red-300' : 'text-blue-300'}`}>
@@ -850,6 +859,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                 <p className="mt-1 text-[11px] text-gray-100">{selectedTask.title}</p>
                 <p className="mt-1 text-[11px] text-gray-300 leading-relaxed">{selectedTask.description}</p>
                 <p className="mt-1 text-[11px] text-gray-200">{t('preview.owner')}: {selectedTask.agent}</p>
+                <p className="mt-1 text-[11px] text-cyan-200">Model: {formatTaskModelLabel(selectedTask)}</p>
                 <p className="mt-1 text-[11px] text-gray-300">
                   {t('preview.dependsOn')}: {selectedTask.dependsOn.length
                     ? selectedTask.dependsOn.map((id) => taskTitleMap[id] ?? id).join(', ')
@@ -884,6 +894,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       <p className="text-[10px] text-gray-400">Execution Results</p>
                       <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
                         agent: {selectedArtifactOwner}
+                      </span>
+                      <span className="rounded bg-cyan-950/30 px-1.5 py-0.5 text-[10px] text-cyan-200">
+                        model: {formatTaskModelLabel(selectedTask)}
                       </span>
                       <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
                         file: {selectedArtifactMeta.path}
@@ -945,6 +958,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       <div className="flex items-center gap-2">
                         <p className="text-[10px] font-medium">{artifact.label}</p>
                         <span className="text-[10px] text-gray-400">{artifact.taskAgent}</span>
+                        <span className="text-[10px] rounded border border-cyan-900/60 bg-cyan-950/30 px-1 py-0.5 text-cyan-200">
+                          {artifact.provider}/{artifact.model}
+                        </span>
                         <span className={`ml-auto text-[10px] rounded px-1 py-0.5 ${
                           artifact.taskStatus === 'done'
                             ? 'bg-green-900/50 text-green-300'

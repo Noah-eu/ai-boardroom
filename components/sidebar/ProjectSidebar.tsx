@@ -38,6 +38,13 @@ function normalizeUserUrl(rawUrl: string): string {
   return `https://${trimmed}`;
 }
 
+function modelCostHint(model: OpenAIModel): string {
+  if (model === 'gpt-5.4') {
+    return 'Higher cost profile: roughly 6.25x input and 9.4x output cost versus gpt-4.1-mini.';
+  }
+  return 'Lower-cost default for lighter runs.';
+}
+
 interface NewProjectFormProps {
   onSubmit: (
     name: string,
@@ -211,6 +218,16 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
       <p className={`${isMobile ? 'mb-4 text-sm' : 'mb-2 text-[10px]'} text-gray-500`}>
         Light tasks default to the cheaper model. Switch to gpt-5.4 for heavier runs.
       </p>
+      <div
+        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3 text-sm' : 'mb-2 rounded px-2 py-1.5 text-[10px]'} border ${
+          selectedModel === 'gpt-5.4'
+            ? 'border-amber-700/60 bg-amber-950/30 text-amber-200'
+            : 'border-emerald-800/50 bg-emerald-950/20 text-emerald-200'
+        }`}
+      >
+        {selectedModel === 'gpt-5.4' ? 'Cost note: ' : 'Model note: '}
+        {modelCostHint(selectedModel)}
+      </div>
       <select
         value={outputType}
         onChange={(e) => setOutputType(e.target.value as OutputType)}
