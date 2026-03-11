@@ -15,7 +15,7 @@ AI Boardroom is an MVP boardroom for AI-led discussion and planning. The current
 - MVP currently supports selecting between OpenAI models only.
 - The default model is the cheaper option: `gpt-4.1-mini`.
 - Heavier tasks can be switched to `gpt-5.4`.
-- Reasoning configuration is model-dependent: `gpt-4.1-mini` runs without an explicit reasoning block, while `gpt-5.4` may use explicit reasoning controls with the supported `low` effort setting.
+- OpenAI response controls are model-dependent: `gpt-4.1-mini` runs without an explicit reasoning block and uses supported `medium` verbosity, while `gpt-5.4` may use explicit reasoning controls with the supported `low` effort setting.
 - Future versions may support multiple providers, but provider selection is not implemented yet.
 
 ## OpenAI Setup

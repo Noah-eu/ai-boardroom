@@ -4,6 +4,7 @@ export type DebateMode = 'auto' | 'interactive';
 export const ALLOWED_OPENAI_MODELS = ['gpt-4.1-mini', 'gpt-5.4'] as const;
 export type OpenAIModel = typeof ALLOWED_OPENAI_MODELS[number];
 export type AIProvider = 'openai';
+export type OpenAITextVerbosity = 'low' | 'medium' | 'high';
 
 export function isAllowedOpenAiModel(value: string): value is OpenAIModel {
   return (ALLOWED_OPENAI_MODELS as readonly string[]).includes(value);
@@ -27,6 +28,21 @@ export function resolveReasoningConfig(
   }
 
   return { effort: 'low' };
+}
+
+export function resolveTextVerbosity(
+  model?: string | null,
+  preferred: OpenAITextVerbosity = 'low'
+): OpenAITextVerbosity | undefined {
+  if (model === 'gpt-4.1-mini') {
+    return 'medium';
+  }
+
+  if (model === 'gpt-5.4') {
+    return preferred;
+  }
+
+  return undefined;
 }
 
 // Agent types

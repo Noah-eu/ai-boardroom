@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { z } from 'zod';
-import { resolveOpenAiModel, resolveReasoningConfig } from '@/types';
+import { resolveOpenAiModel, resolveReasoningConfig, resolveTextVerbosity } from '@/types';
 
 const OPENAI_PRIMARY_TIMEOUT_MS = 18_000;
 const OPENAI_RETRY_TIMEOUT_MS = 8_000;
@@ -12,12 +12,13 @@ function resolveOpenAiResponseProfile(agentRole: string, model: string, retry = 
   const isExecution = ['architect', 'builder', 'reviewer', 'tester', 'integrator'].includes(role);
 
   const maxOutputTokens = retry ? 700 : isExecution ? 1_000 : isPlanner ? 850 : 650;
-  const verbosity = retry ? 'low' : isExecution ? 'medium' : 'low';
+  const preferredVerbosity = retry ? 'low' : isExecution ? 'medium' : 'low';
+  const verbosity = resolveTextVerbosity(model, preferredVerbosity);
   const reasoning = resolveReasoningConfig(model);
 
   return {
     max_output_tokens: maxOutputTokens,
-    text: { verbosity } as const,
+    ...(verbosity ? { text: { verbosity } as const } : {}),
     ...(reasoning ? { reasoning } : {}),
   };
 }
@@ -144,6 +145,7 @@ async function createOpenAiResponse(
         resolvedModel: model,
         reasoningIncluded: Boolean(primaryProfile.reasoning),
         reasoningEffort: primaryProfile.reasoning?.effort ?? null,
+        textVerbosity: primaryProfile.text?.verbosity ?? null,
         retry: false,
       })
     );
@@ -172,6 +174,7 @@ async function createOpenAiResponse(
         resolvedModel: model,
         reasoningIncluded: Boolean(retryProfile.reasoning),
         reasoningEffort: retryProfile.reasoning?.effort ?? null,
+        textVerbosity: retryProfile.text?.verbosity ?? null,
         retry: true,
       })
     );
@@ -195,6 +198,7 @@ export async function POST(request: Request) {
   let debugSelectedModel: string | null = null;
   let debugResolvedModel = envModel;
   let debugReasoningIncluded = false;
+  let debugTextVerbosity: string | null = null;
 
   if (!process.env.OPENAI_MODEL) {
     console.warn('[ai/respond] OPENAI_MODEL not set; using default gpt-4.1-mini');
@@ -224,10 +228,12 @@ export async function POST(request: Request) {
     const { language, projectId, agentRole, inputText, context, attachmentContext } = parsed.data;
     const selectedModel = parsed.data.model ?? null;
     const model = resolveOpenAiModel(parsed.data.model, envModel);
-    const reasoningIncluded = Boolean(resolveOpenAiResponseProfile(agentRole, model).reasoning);
+    const responseProfile = resolveOpenAiResponseProfile(agentRole, model);
+    const reasoningIncluded = Boolean(responseProfile.reasoning);
     debugSelectedModel = selectedModel;
     debugResolvedModel = model;
     debugReasoningIncluded = reasoningIncluded;
+    debugTextVerbosity = responseProfile.text?.verbosity ?? null;
     const languageInstruction =
       language === 'cz'
         ? 'Respond in Czech language.'
@@ -242,7 +248,8 @@ export async function POST(request: Request) {
         resolvedModel: model,
         envModel,
         reasoningIncluded,
-        reasoningEffort: resolveOpenAiResponseProfile(agentRole, model).reasoning?.effort ?? null,
+        reasoningEffort: responseProfile.reasoning?.effort ?? null,
+        textVerbosity: responseProfile.text?.verbosity ?? null,
       })
     );
 
@@ -311,7 +318,8 @@ export async function POST(request: Request) {
         requestedModel: selectedModel,
         resolvedModel: model,
         reasoningIncluded,
-        reasoningEffort: resolveOpenAiResponseProfile(agentRole, model).reasoning?.effort ?? null,
+        reasoningEffort: responseProfile.reasoning?.effort ?? null,
+        textVerbosity: responseProfile.text?.verbosity ?? null,
         model: response.model,
         usage: extractUsage(response),
         imageContext: {
@@ -330,7 +338,8 @@ export async function POST(request: Request) {
         selectedModel: debugSelectedModel,
         resolvedModel: debugResolvedModel,
         reasoningIncluded: debugReasoningIncluded,
-        reasoningEffort: resolveOpenAiResponseProfile('unknown', debugResolvedModel).reasoning?.effort ?? null,
+        reasoningEffort: resolveReasoningConfig(debugResolvedModel)?.effort ?? null,
+        textVerbosity: debugTextVerbosity,
         error: message,
       })
     );

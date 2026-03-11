@@ -135,6 +135,7 @@ type AiRespondMeta = {
   resolvedModel: string;
   reasoningIncluded: boolean;
   reasoningEffort?: string | null;
+  textVerbosity?: string | null;
   model: string;
   usage: AiUsageMeta;
   imageContext?: {
@@ -1756,6 +1757,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             actualModel: data.meta?.model ?? null,
             reasoningIncluded: data.meta?.reasoningIncluded ?? null,
             reasoningEffort: data.meta?.reasoningEffort ?? null,
+            textVerbosity: data.meta?.textVerbosity ?? null,
           })
         );
 
@@ -1793,7 +1795,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               message:
                 `OpenAI meta: selected=${data.meta.requestedModel ?? 'none'}, ` +
                 `resolved=${data.meta.resolvedModel}, actual=${data.meta.model}, ` +
-                `reasoning=${data.meta.reasoningIncluded ? (data.meta.reasoningEffort ?? 'included') : 'omitted'}`,
+                `reasoning=${data.meta.reasoningIncluded ? (data.meta.reasoningEffort ?? 'included') : 'omitted'}, ` +
+                `verbosity=${data.meta.textVerbosity ?? 'omitted'}`,
             });
           }
         }
