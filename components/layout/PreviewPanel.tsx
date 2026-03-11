@@ -1133,7 +1133,22 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                             )}
                           </div>
 
-                          <div className={`grid gap-3 ${isMobile ? 'grid-cols-1' : 'grid-cols-[220px_minmax(0,1fr)]'}`}>
+                          <div className="grid grid-cols-1 gap-3">
+                            {selectedArtifactPreviewHtml && (
+                              <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-[10px] uppercase tracking-wider text-gray-400">Live preview</p>
+                                  <span className="text-[10px] text-gray-500">srcDoc</span>
+                                </div>
+                                <iframe
+                                  title="Generated app preview"
+                                  sandbox="allow-scripts"
+                                  srcDoc={selectedArtifactPreviewHtml}
+                                  className="mt-2 h-72 w-full rounded border border-gray-800 bg-white"
+                                />
+                              </div>
+                            )}
+
                             <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
                               <div className="flex items-center justify-between gap-2">
                                 <p className="text-[10px] uppercase tracking-wider text-gray-400">Generated files</p>
@@ -1170,21 +1185,6 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                             </div>
 
                             <div className="space-y-3">
-                              {selectedArtifactPreviewHtml && (
-                                <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-[10px] uppercase tracking-wider text-gray-400">Live preview</p>
-                                    <span className="text-[10px] text-gray-500">srcDoc</span>
-                                  </div>
-                                  <iframe
-                                    title="Generated app preview"
-                                    sandbox="allow-scripts"
-                                    srcDoc={selectedArtifactPreviewHtml}
-                                    className="mt-2 h-72 w-full rounded border border-gray-800 bg-white"
-                                  />
-                                </div>
-                              )}
-
                               {selectedGeneratedFile && (
                                 <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
                                   <div className="flex items-center justify-between gap-2">
