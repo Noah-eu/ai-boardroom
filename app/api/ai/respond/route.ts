@@ -16,18 +16,19 @@ function resolveOpenAiResponseProfile(
   const isPlanner = role === 'planner';
   const isExecution = ['architect', 'builder', 'reviewer', 'tester', 'integrator'].includes(role);
   const isStructuredBundle = responseMode === 'structured_execution_bundle';
+  const isLargeModel = model === 'gpt-5.4';
 
   const maxOutputTokens = isStructuredBundle
     ? retry
-      ? 6_000
-      : 10_000
+      ? (isLargeModel ? 10_000 : 6_000)
+      : (isLargeModel ? 16_000 : 10_000)
     : retry
-    ? 700
+    ? (isLargeModel ? 1_200 : 700)
     : isExecution
-    ? 1_000
+    ? (isLargeModel ? 2_000 : 1_000)
     : isPlanner
-    ? 850
-    : 650;
+    ? (isLargeModel ? 1_200 : 850)
+    : (isLargeModel ? 1_000 : 650);
   const preferredVerbosity = retry || isStructuredBundle ? 'low' : isExecution ? 'medium' : 'low';
   const verbosity = resolveTextVerbosity(model, preferredVerbosity);
   const reasoning = resolveReasoningConfig(model);
