@@ -62,10 +62,12 @@ export function getTasksByStatus(tasks: Task[], status: TaskStatus): Task[] {
 export function getStatusColor(status: TaskStatus): string {
   const colors: Record<TaskStatus, string> = {
     blocked: 'text-amber-300',
+    blocked_due_to_failed_dependency: 'text-amber-300',
     queued: 'text-gray-400',
     running: 'text-blue-400',
     done: 'text-green-400',
     failed: 'text-red-400',
+    canceled_due_to_failed_dependency: 'text-red-400',
     completed_with_fallback: 'text-cyan-300',
   };
   return colors[status];
@@ -74,10 +76,12 @@ export function getStatusColor(status: TaskStatus): string {
 export function getStatusBadgeClass(status: TaskStatus): string {
   const classes: Record<TaskStatus, string> = {
     blocked: 'bg-amber-900 text-amber-200',
+    blocked_due_to_failed_dependency: 'bg-amber-900 text-amber-200',
     queued: 'bg-gray-700 text-gray-300',
     running: 'bg-blue-900 text-blue-300',
     done: 'bg-green-900 text-green-300',
     failed: 'bg-red-900 text-red-300',
+    canceled_due_to_failed_dependency: 'bg-red-900 text-red-300',
     completed_with_fallback: 'bg-cyan-900 text-cyan-200',
   };
   return classes[status];

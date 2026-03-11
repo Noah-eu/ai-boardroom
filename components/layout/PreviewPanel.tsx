@@ -61,7 +61,9 @@ function extractMarkdownSection(markdown: string, headingAliases: string[]): str
 }
 
 function buildExecutionCompletionStatus(tasks: Task[]): 'completed' | 'completed_with_fallback' | 'failed' | 'in_progress' {
-  if (tasks.some((task) => task.status === 'failed')) return 'failed';
+  if (tasks.some((task) => task.status === 'failed' || task.status === 'canceled_due_to_failed_dependency')) {
+    return 'failed';
+  }
   const hasActive = tasks.some((task) => ['queued', 'blocked', 'running'].includes(task.status));
   if (hasActive) return 'in_progress';
   if (tasks.some((task) => task.status === 'completed_with_fallback')) return 'completed_with_fallback';
@@ -372,10 +374,12 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskStatus, Task[]> = {
       blocked: [],
+      blocked_due_to_failed_dependency: [],
       queued: [],
       running: [],
       done: [],
       failed: [],
+      canceled_due_to_failed_dependency: [],
       completed_with_fallback: [],
     };
     tasks.forEach((task) => {
@@ -997,7 +1001,16 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
           </div>
         ) : (
           <div className="space-y-2">
-            {(['blocked', 'queued', 'running', 'done', 'completed_with_fallback', 'failed'] as TaskStatus[]).map((status) => {
+            {([
+              'blocked',
+              'blocked_due_to_failed_dependency',
+              'queued',
+              'running',
+              'done',
+              'completed_with_fallback',
+              'failed',
+              'canceled_due_to_failed_dependency',
+            ] as TaskStatus[]).map((status) => {
               const items = groupedTasks[status];
               if (items.length === 0) return null;
               return (
@@ -1020,7 +1033,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                             dependency &&
                               dependency.status !== 'done' &&
                               dependency.status !== 'failed' &&
-                              dependency.status !== 'completed_with_fallback'
+                              dependency.status !== 'completed_with_fallback' &&
+                              dependency.status !== 'canceled_due_to_failed_dependency' &&
+                              dependency.status !== 'blocked_due_to_failed_dependency'
                           )
                         )
                         .map((dependency) => dependency.title);
@@ -1044,7 +1059,11 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                             ? 'bg-cyan-900/50 text-cyan-200'
                             : task.status === 'failed'
                             ? 'bg-red-900/50 text-red-300'
+                            : task.status === 'canceled_due_to_failed_dependency'
+                            ? 'bg-red-900/50 text-red-300'
                             : task.status === 'blocked'
+                            ? 'bg-amber-900/50 text-amber-200'
+                            : task.status === 'blocked_due_to_failed_dependency'
                             ? 'bg-amber-900/50 text-amber-200'
                             : 'bg-gray-800 text-gray-300'
                         }`}>
@@ -1066,7 +1085,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       <p className="mt-1 text-[10px] text-gray-400">
                         {t('preview.dependsOn')}: {dependencyTitles.length ? dependencyTitles.join(', ') : t('preview.none')}
                       </p>
-                      {task.status === 'blocked' && unresolvedDependencies.length > 0 && (
+                      {(task.status === 'blocked' || task.status === 'blocked_due_to_failed_dependency') && unresolvedDependencies.length > 0 && (
                         <p className="mt-1 text-[10px] text-amber-300">
                           {tf('preview.blockedReason', { deps: unresolvedDependencies.join(', ') })}
                         </p>

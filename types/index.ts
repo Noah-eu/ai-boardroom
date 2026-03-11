@@ -125,6 +125,8 @@ export type TaskStatus =
   | 'done'
   | 'failed'
   | 'blocked'
+  | 'blocked_due_to_failed_dependency'
+  | 'canceled_due_to_failed_dependency'
   | 'completed_with_fallback';
 
 export interface Task {

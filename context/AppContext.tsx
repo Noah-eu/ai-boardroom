@@ -162,6 +162,100 @@ type AiRespondOptions = {
   timeoutMs?: number;
 };
 
+type AiRequestFailureKind = 'infrastructure' | 'request' | 'content';
+
+class AiRequestError extends Error {
+  kind: AiRequestFailureKind;
+  statusCode: number | null;
+  responseContentType: string | null;
+  rawBodySnippet: string | null;
+  retryable: boolean;
+
+  constructor(params: {
+    message: string;
+    kind: AiRequestFailureKind;
+    statusCode?: number | null;
+    responseContentType?: string | null;
+    rawBodySnippet?: string | null;
+    retryable?: boolean;
+  }) {
+    super(params.message);
+    this.name = 'AiRequestError';
+    this.kind = params.kind;
+    this.statusCode = params.statusCode ?? null;
+    this.responseContentType = params.responseContentType ?? null;
+    this.rawBodySnippet = params.rawBodySnippet ?? null;
+    this.retryable = params.retryable ?? false;
+  }
+}
+
+function shortBodySnippet(value: string, maxChars = 600): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, maxChars);
+}
+
+function classifyAiRequestFailure(params: {
+  statusCode?: number | null;
+  contentType?: string | null;
+  rawBody?: string | null;
+  parseFailed?: boolean;
+  timeout?: boolean;
+  missingText?: boolean;
+}): AiRequestError {
+  const statusCode = params.statusCode ?? null;
+  const contentType = params.contentType ?? null;
+  const rawBody = params.rawBody ?? '';
+  const snippet = rawBody ? shortBodySnippet(rawBody) : null;
+  const bodyLooksHtml = /<html|<!doctype html|<body/i.test(rawBody);
+  const nonJson = Boolean(contentType && !contentType.includes('application/json'));
+  const is5xx = statusCode !== null && statusCode >= 500;
+  const retryableStatus = statusCode !== null && [502, 503, 504].includes(statusCode);
+
+  if (params.timeout) {
+    return new AiRequestError({
+      message: 'AI endpoint timeout',
+      kind: 'infrastructure',
+      statusCode,
+      responseContentType: contentType,
+      rawBodySnippet: snippet,
+      retryable: true,
+    });
+  }
+
+  if (is5xx || nonJson || bodyLooksHtml || params.parseFailed) {
+    return new AiRequestError({
+      message:
+        `AI endpoint infrastructure failure` +
+        (statusCode ? ` (HTTP ${statusCode})` : '') +
+        (nonJson || bodyLooksHtml ? ': non-JSON/HTML response' : ''),
+      kind: 'infrastructure',
+      statusCode,
+      responseContentType: contentType,
+      rawBodySnippet: snippet,
+      retryable: retryableStatus || bodyLooksHtml || nonJson,
+    });
+  }
+
+  if (params.missingText) {
+    return new AiRequestError({
+      message: `AI request content failure${statusCode ? ` (HTTP ${statusCode})` : ''}: empty or invalid body`,
+      kind: 'content',
+      statusCode,
+      responseContentType: contentType,
+      rawBodySnippet: snippet,
+      retryable: false,
+    });
+  }
+
+  return new AiRequestError({
+    message: `AI request failed${statusCode ? ` (HTTP ${statusCode})` : ''}`,
+    kind: 'request',
+    statusCode,
+    responseContentType: contentType,
+    rawBodySnippet: snippet,
+    retryable: false,
+  });
+}
+
 type AttachmentIngestApiResponse = {
   ingest?: AttachmentIngestion & { crawlEvents?: string[] };
   error?: string;
@@ -351,7 +445,9 @@ function findIntegratorFinalSummary(tasks: Task[]): string | null {
 }
 
 function deriveRevisionExecutionStatus(tasks: Task[]): RevisionExecutionStatus {
-  if (tasks.some((task) => task.status === 'failed')) return 'failed';
+  if (tasks.some((task) => task.status === 'failed' || task.status === 'canceled_due_to_failed_dependency')) {
+    return 'failed';
+  }
   if (tasks.some((task) => task.status === 'queued' || task.status === 'blocked' || task.status === 'running')) {
     return 'running';
   }
@@ -925,14 +1021,166 @@ function syncProjectById(
 function dependencySatisfied(tasks: Task[], dependencyId: string): boolean {
   const dependencyTask = tasks.find((task) => task.id === dependencyId);
   return dependencyTask
-    ? dependencyTask.status === 'done' ||
-        dependencyTask.status === 'failed' ||
-        dependencyTask.status === 'completed_with_fallback'
+  ? dependencyTask.status === 'done' || dependencyTask.status === 'completed_with_fallback'
     : false;
 }
 
 function dependenciesSatisfied(tasks: Task[], task: Task): boolean {
   return task.dependsOn.every((dependencyId) => dependencySatisfied(tasks, dependencyId));
+}
+
+type TaskPrerequisiteValidationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'dependency-failed' | 'dependency-pending' | 'artifact-missing' | 'artifact-invalid' | 'artifact-stale';
+      dependencyTask?: Task;
+      artifactPath?: string;
+      details: string;
+    };
+
+function getRequiredUpstreamArtifacts(task: Task): Array<{ agent: AgentName; path: string; requiresExecutionOutput?: boolean }> {
+  if (task.agent === 'Reviewer') {
+    return [
+      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
+      { agent: 'Builder', path: 'patch-plan.md' },
+    ];
+  }
+  if (task.agent === 'Tester') {
+    return [
+      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
+      { agent: 'Reviewer', path: 'review-notes.md' },
+    ];
+  }
+  if (task.agent === 'Integrator') {
+    return [
+      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
+      { agent: 'Reviewer', path: 'review-notes.md' },
+      { agent: 'Tester', path: 'test-checklist.md' },
+    ];
+  }
+  return [];
+}
+
+function validateTaskPrerequisites(project: Project, task: Task): TaskPrerequisiteValidationResult {
+  const executionSnapshot = project.executionSnapshot;
+  const snapshotCreatedAt = executionSnapshot ? new Date(executionSnapshot.createdAt).getTime() : 0;
+
+  for (const dependencyId of task.dependsOn) {
+    const dependencyTask = project.tasks.find((candidate) => candidate.id === dependencyId);
+    if (!dependencyTask) {
+      return {
+        ok: false,
+        reason: 'artifact-missing',
+        details: `Dependency task not found (${dependencyId}).`,
+      };
+    }
+
+    if (
+      dependencyTask.status === 'failed' ||
+      dependencyTask.status === 'canceled_due_to_failed_dependency' ||
+      dependencyTask.status === 'blocked_due_to_failed_dependency'
+    ) {
+      return {
+        ok: false,
+        reason: 'dependency-failed',
+        dependencyTask,
+        details: `Dependency ${dependencyTask.title} is ${dependencyTask.status}.`,
+      };
+    }
+
+    if (dependencyTask.status !== 'done' && dependencyTask.status !== 'completed_with_fallback') {
+      return {
+        ok: false,
+        reason: 'dependency-pending',
+        dependencyTask,
+        details: `Dependency ${dependencyTask.title} is ${dependencyTask.status}.`,
+      };
+    }
+  }
+
+  const requiredArtifacts = getRequiredUpstreamArtifacts(task);
+  for (const requirement of requiredArtifacts) {
+    const sourceTask = project.tasks.find((candidate) => candidate.agent === requirement.agent);
+    if (!sourceTask) {
+      return {
+        ok: false,
+        reason: 'artifact-missing',
+        artifactPath: requirement.path,
+        details: `Required upstream task (${requirement.agent}) is missing.`,
+      };
+    }
+
+    if (
+      sourceTask.status === 'failed' ||
+      sourceTask.status === 'canceled_due_to_failed_dependency' ||
+      sourceTask.status === 'blocked_due_to_failed_dependency'
+    ) {
+      return {
+        ok: false,
+        reason: 'dependency-failed',
+        dependencyTask: sourceTask,
+        artifactPath: requirement.path,
+        details: `Required upstream task ${sourceTask.title} failed before ${requirement.path}.`,
+      };
+    }
+
+    const artifact = sourceTask.producesArtifacts.find((entry) => entry.path === requirement.path);
+    if (!artifact) {
+      return {
+        ok: false,
+        reason: 'artifact-missing',
+        dependencyTask: sourceTask,
+        artifactPath: requirement.path,
+        details: `Required artifact ${requirement.path} not found on ${sourceTask.title}.`,
+      };
+    }
+
+    if (requirement.requiresExecutionOutput && !artifact.executionOutput) {
+      return {
+        ok: false,
+        reason: 'artifact-invalid',
+        dependencyTask: sourceTask,
+        artifactPath: requirement.path,
+        details: `Required artifact ${requirement.path} has no valid executionOutput.`,
+      };
+    }
+
+    if (!requirement.requiresExecutionOutput && !artifact.content?.trim()) {
+      return {
+        ok: false,
+        reason: 'artifact-invalid',
+        dependencyTask: sourceTask,
+        artifactPath: requirement.path,
+        details: `Required artifact ${requirement.path} is empty.`,
+      };
+    }
+
+    if (executionSnapshot) {
+      if (!artifact.generatedAt) {
+        return {
+          ok: false,
+          reason: 'artifact-invalid',
+          dependencyTask: sourceTask,
+          artifactPath: requirement.path,
+          details: `Required artifact ${requirement.path} has no generatedAt timestamp for current cycle.`,
+        };
+      }
+
+      const generatedAt = new Date(artifact.generatedAt).getTime();
+      if (generatedAt < snapshotCreatedAt) {
+        return {
+          ok: false,
+          reason: 'artifact-stale',
+          dependencyTask: sourceTask,
+          artifactPath: requirement.path,
+          details: `Required artifact ${requirement.path} is stale for cycle ${executionSnapshot.cycleNumber}.`,
+        };
+      }
+    }
+  }
+
+  return { ok: true };
 }
 
 function getLatestOrchestratorSummary(project: Project): string | null {
@@ -2102,45 +2350,105 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const endpoint = resolveAiRespondEndpoint();
-        const controller = new AbortController();
+        const maxAttempts = 2;
         const timeoutMs = options?.timeoutMs;
-        const timeoutHandle =
-          typeof timeoutMs === 'number' && timeoutMs > 0
-            ? setTimeout(() => controller.abort(), timeoutMs)
-            : null;
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify(requestPayload),
-        }).finally(() => {
-          if (timeoutHandle) {
-            clearTimeout(timeoutHandle);
-          }
-        });
+        let responsePayload: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
 
-        const contentType = response.headers.get('content-type') ?? '';
-        const rawBody = await response.text();
-        let data: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          const controller = new AbortController();
+          const timeoutHandle =
+            typeof timeoutMs === 'number' && timeoutMs > 0
+              ? setTimeout(() => controller.abort(), timeoutMs)
+              : null;
 
-        if (contentType.includes('application/json')) {
           try {
-            data = JSON.parse(rawBody) as { text?: string; error?: string; meta?: AiRespondMeta };
-          } catch {
-            data = null;
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify(requestPayload),
+            });
+
+            const contentType = response.headers.get('content-type') ?? '';
+            const rawBody = await response.text();
+            let data: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
+
+            if (contentType.includes('application/json')) {
+              try {
+                data = JSON.parse(rawBody) as { text?: string; error?: string; meta?: AiRespondMeta };
+              } catch {
+                data = null;
+              }
+            }
+
+            if (!data) {
+              throw classifyAiRequestFailure({
+                statusCode: response.status,
+                contentType,
+                rawBody,
+                parseFailed: true,
+              });
+            }
+
+            if (!response.ok) {
+              throw classifyAiRequestFailure({
+                statusCode: response.status,
+                contentType,
+                rawBody: data.error ?? rawBody,
+              });
+            }
+
+            if (!data.text) {
+              throw classifyAiRequestFailure({
+                statusCode: response.status,
+                contentType,
+                rawBody,
+                missingText: true,
+              });
+            }
+
+            responsePayload = data;
+            break;
+          } catch (error) {
+            const classifiedError =
+              error instanceof AiRequestError
+                ? error
+                : error instanceof DOMException && error.name === 'AbortError'
+                ? classifyAiRequestFailure({ timeout: true })
+                : new AiRequestError({
+                    message: error instanceof Error ? error.message : 'Unknown AI request failure',
+                    kind: 'request',
+                  });
+
+            const canRetry = classifiedError.retryable && attempt < maxAttempts;
+            if (canRetry) {
+              const backoffMs = 350 * attempt;
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'warning',
+                agent: logContext?.agent,
+                message:
+                  `AI retry ${attempt}/${maxAttempts - 1} after ${classifiedError.message}` +
+                  `${classifiedError.statusCode ? ` [HTTP ${classifiedError.statusCode}]` : ''}`,
+              });
+              await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+              continue;
+            }
+
+            throw classifiedError;
+          } finally {
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+            }
           }
         }
 
-        if (!data) {
-          const snippet = rawBody.slice(0, 200).replace(/\s+/g, ' ').trim();
-          const detail = `status=${response.status} body="${snippet || '<empty>'}"`;
-          console.warn(`[ai/respond] Non-JSON response from ${endpoint}: ${detail}`);
-          throw new Error(`AI endpoint returned non-JSON response (${detail}).`);
-        }
-
-        if (!response.ok || !data.text) {
-          const detail = data.error ? ` ${data.error}` : '';
-          throw new Error(`AI request failed.${detail}`);
+        const data = responsePayload;
+        if (!data?.text) {
+          throw new AiRequestError({
+            message: 'AI request failed: empty response payload after retry',
+            kind: 'request',
+          });
         }
 
         console.info(
@@ -2241,7 +2549,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       } catch (error) {
         const timeoutError =
           error instanceof DOMException && error.name === 'AbortError'
-            ? new Error(`OpenAI request timeout after ${options?.timeoutMs ?? 0} ms.`)
+            ? classifyAiRequestFailure({ timeout: true })
             : error;
         console.warn(
           '[ai/respond][client] request failed',
@@ -2251,6 +2559,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             selectedModel: requestedModel ?? null,
             projectModel: project?.model ?? null,
             error: timeoutError instanceof Error ? timeoutError.message : 'Unknown OpenAI error',
+            statusCode: timeoutError instanceof AiRequestError ? timeoutError.statusCode : null,
+            failureKind: timeoutError instanceof AiRequestError ? timeoutError.kind : 'unknown',
           })
         );
         if (logContext) {
@@ -2264,6 +2574,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               error: shortError,
             }),
           });
+          if (timeoutError instanceof AiRequestError) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'error',
+              agent: logContext.agent,
+              message:
+                `AI infrastructure failure: kind=${timeoutError.kind}` +
+                `${timeoutError.statusCode ? ` status=${timeoutError.statusCode}` : ''}` +
+                `${timeoutError.rawBodySnippet ? ` body="${timeoutError.rawBodySnippet}"` : ''}`,
+            });
+          }
         }
         throw timeoutError;
       }
@@ -2421,7 +2742,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         (task) =>
           task.status === 'done' ||
           task.status === 'failed' ||
-          task.status === 'completed_with_fallback'
+          task.status === 'completed_with_fallback' ||
+          task.status === 'canceled_due_to_failed_dependency' ||
+          task.status === 'blocked_due_to_failed_dependency'
       )
     ) {
       return 'complete';
@@ -2451,6 +2774,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           task.status === 'done' ||
           task.status === 'failed' ||
           task.status === 'completed_with_fallback' ||
+          task.status === 'canceled_due_to_failed_dependency' ||
+          task.status === 'blocked_due_to_failed_dependency' ||
           task.status === 'running'
         ) {
           return;
@@ -3064,7 +3389,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return { liveProject, liveTask };
       };
 
-      const failLiveTask = (agent: AgentName, message: string) => {
+      const failLiveTask = (
+        agent: AgentName,
+        message: string,
+        options?: { artifactPath?: string; rawBodySnippet?: string | null }
+      ) => {
+        if (options?.artifactPath) {
+          const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+          const liveTask = liveProject?.tasks.find((candidate) => candidate.id === taskId);
+          const artifacts = liveTask?.producesArtifacts ?? [];
+          const updatedArtifacts = artifacts.map((artifact) =>
+            artifact.path === options.artifactPath
+              ? {
+                  ...artifact,
+                  rawContent: options.rawBodySnippet ?? artifact.rawContent,
+                  generatedAt: new Date(),
+                }
+              : artifact
+          );
+          if (updatedArtifacts.length > 0) {
+            dispatch({
+              type: 'UPDATE_TASK',
+              projectId,
+              taskId,
+              patch: { producesArtifacts: updatedArtifacts },
+            });
+          }
+        }
+
         dispatch({
           type: 'ADD_LOG',
           level: 'error',
@@ -3095,17 +3447,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectId,
                 taskId: candidate.id,
                 patch: {
-                  status: 'failed',
-                  errorMessage: 'Planner failed; downstream execution canceled.',
+                  status: 'canceled_due_to_failed_dependency',
+                  errorMessage: 'Planner failed; downstream execution canceled due to failed dependency.',
                 },
               });
             });
           dispatch({
             type: 'ADD_LOG',
-            level: 'error',
-            message: 'Planner failed; downstream queued/blocked tasks were canceled.',
+            level: 'warning',
+            message: 'Planner failed; downstream queued/blocked tasks were canceled due to failed dependency.',
           });
         }
+      };
+
+      const formatAiExecutionError = (error: unknown): { message: string; rawBodySnippet: string | null } => {
+        if (error instanceof AiRequestError) {
+          const classified =
+            `${error.kind === 'infrastructure' ? 'Infrastructure' : 'Request'} failure` +
+            `${error.statusCode ? ` HTTP ${error.statusCode}` : ''}: ${error.message}`;
+          return {
+            message: classified,
+            rawBodySnippet: error.rawBodySnippet ?? null,
+          };
+        }
+        return {
+          message: error instanceof Error ? error.message : 'Unknown OpenAI execution error',
+          rawBodySnippet: null,
+        };
       };
 
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
@@ -3270,8 +3638,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             );
             stageAText = stageAResponse.text;
           } catch (error) {
-            const detail = error instanceof Error ? error.message : 'Unknown planner stage A error';
-            failLiveTask('Planner', `planner OpenAI call failed: ${detail}`);
+            const detail = formatAiExecutionError(error);
+            failLiveTask('Planner', `planner OpenAI call failed: ${detail.message}`, {
+              artifactPath: 'execution-plan.md',
+              rawBodySnippet: detail.rawBodySnippet,
+            });
             return;
           }
 
@@ -3545,8 +3916,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               { timeoutMs: executionTaskTimeoutMs }
             );
           } catch (error) {
-            const detail = error instanceof Error ? error.message : 'Unknown OpenAI execution error';
-            failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail}`);
+            const detail = formatAiExecutionError(error);
+            const infra = error instanceof AiRequestError ? error : null;
+            failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail.message}`, {
+              artifactPath: artifact.path,
+              rawBodySnippet: infra?.rawBodySnippet ?? null,
+            });
+            if (infra?.kind === 'infrastructure') {
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'error',
+                agent: task.agent,
+                message:
+                  `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
+                  `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
+              });
+            }
             return;
           }
 
@@ -3828,23 +4213,55 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const runningTasks = refreshedProject.tasks.filter((task) => task.status === 'running');
-      const readyTasks = refreshedProject.tasks.filter(
-        (task) => task.status === 'queued' && dependenciesSatisfied(refreshedProject.tasks, task)
-      );
-      const blockedTasks = refreshedProject.tasks.filter((task) => task.status === 'blocked');
+      for (const task of refreshedProject.tasks) {
+        if (task.status !== 'queued' && task.status !== 'blocked') {
+          continue;
+        }
 
-      if (!schedulerPausedRef.current[projectId] && runningTasks.length === 0 && readyTasks.length === 0 && blockedTasks.length > 0) {
-        const blockedDetails: DeadlockTaskDetail[] = blockedTasks.map((task) => {
+        const prerequisite = validateTaskPrerequisites(refreshedProject, task);
+        if (!prerequisite.ok && prerequisite.reason === 'dependency-failed') {
+          const upstreamTask = prerequisite.dependencyTask?.title ?? 'unknown dependency';
+          const upstreamArtifact = prerequisite.artifactPath ? ` (${prerequisite.artifactPath})` : '';
+          dispatch({
+            type: 'UPDATE_TASK',
+            projectId,
+            taskId: task.id,
+            patch: {
+              status: 'canceled_due_to_failed_dependency',
+              errorMessage: `Canceled: failed dependency ${upstreamTask}${upstreamArtifact}`,
+            },
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: task.agent,
+            message: `${task.agent} blocked because required upstream artifact failed: ${upstreamTask}${upstreamArtifact}`,
+          });
+        }
+      }
+
+      const postValidationProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+      if (!postValidationProject?.taskGraph) return;
+
+      const validatedRunningTasks = postValidationProject.tasks.filter((task) => task.status === 'running');
+      const validatedReadyTasks = postValidationProject.tasks.filter(
+        (task) => task.status === 'queued' && dependenciesSatisfied(postValidationProject.tasks, task)
+      );
+      const validatedBlockedTasks = postValidationProject.tasks.filter((task) => task.status === 'blocked');
+
+      if (!schedulerPausedRef.current[projectId] && validatedRunningTasks.length === 0 && validatedReadyTasks.length === 0 && validatedBlockedTasks.length > 0) {
+        const blockedDetails: DeadlockTaskDetail[] = validatedBlockedTasks.map((task) => {
           const unmetDependencies = task.dependsOn
-            .map((dependencyId) => refreshedProject.tasks.find((candidate) => candidate.id === dependencyId))
+            .map((dependencyId) => postValidationProject.tasks.find((candidate) => candidate.id === dependencyId))
             .filter(
               (dependency): dependency is Task =>
                 Boolean(
                   dependency &&
                     dependency.status !== 'done' &&
                     dependency.status !== 'failed' &&
-                    dependency.status !== 'completed_with_fallback'
+                    dependency.status !== 'completed_with_fallback' &&
+                    dependency.status !== 'canceled_due_to_failed_dependency' &&
+                    dependency.status !== 'blocked_due_to_failed_dependency'
                 )
             )
             .map((dependency) => `${dependency.title} [${dependency.status}]`);
@@ -3884,10 +4301,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         delete deadlockSignatureRef.current[projectId];
       }
 
-      const slots = Math.max(0, refreshedProject.taskGraph.concurrencyLimit - runningTasks.length);
+      const slots = Math.max(0, postValidationProject.taskGraph.concurrencyLimit - validatedRunningTasks.length);
       let startedCount = 0;
-      for (const task of readyTasks.slice(0, slots)) {
-        startTask(refreshedProject, task);
+      for (const task of validatedReadyTasks.slice(0, slots)) {
+        const prerequisite = validateTaskPrerequisites(postValidationProject, task);
+        if (!prerequisite.ok) {
+          if (prerequisite.reason === 'dependency-pending') {
+            continue;
+          }
+
+          const upstreamTask = prerequisite.dependencyTask?.title ?? 'unknown dependency';
+          const upstreamArtifact = prerequisite.artifactPath ? ` (${prerequisite.artifactPath})` : '';
+          const status: Task['status'] =
+            prerequisite.reason === 'dependency-failed'
+              ? 'canceled_due_to_failed_dependency'
+              : 'blocked_due_to_failed_dependency';
+
+          dispatch({
+            type: 'UPDATE_TASK',
+            projectId,
+            taskId: task.id,
+            patch: {
+              status,
+              errorMessage: `${prerequisite.details}`,
+            },
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: task.agent,
+            message: `${task.agent} blocked because required artifact is missing/invalid: ${upstreamTask}${upstreamArtifact}`,
+          });
+          continue;
+        }
+
+        startTask(postValidationProject, task);
         startedCount += 1;
       }
 
@@ -3901,6 +4349,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       startTask,
       syncAgentStatusesFromTasks,
       syncTaskAvailability,
+      validateTaskPrerequisites,
       translateProject,
       translateProjectWithVars,
     ]
@@ -5421,8 +5870,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         (task) => task.status === 'done' || task.status === 'completed_with_fallback'
       ).length ?? 0;
     const queued = project?.tasks.filter((task) => task.status === 'queued').length ?? 0;
-    const blocked = project?.tasks.filter((task) => task.status === 'blocked').length ?? 0;
-    const failed = project?.tasks.filter((task) => task.status === 'failed').length ?? 0;
+    const blocked =
+      project?.tasks.filter(
+        (task) => task.status === 'blocked' || task.status === 'blocked_due_to_failed_dependency'
+      ).length ?? 0;
+    const failed =
+      project?.tasks.filter(
+        (task) => task.status === 'failed' || task.status === 'canceled_due_to_failed_dependency'
+      ).length ?? 0;
     const total = project?.tasks.length ?? 0;
     const isComplete = total > 0 && done + failed === total;
     return {
