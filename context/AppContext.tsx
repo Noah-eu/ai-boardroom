@@ -236,6 +236,7 @@ type DraftAttachmentInput =
   | { kind: 'url'; url: string; source?: 'project' | 'message' };
 
 const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number }> = {
+  'gpt-5.4': { input: 2.5, output: 15.0 },
   'gpt-4.1': { input: 2.0, output: 8.0 },
   'gpt-4.1-mini': { input: 0.4, output: 1.6 },
   'gpt-4.1-nano': { input: 0.1, output: 0.4 },
@@ -245,9 +246,9 @@ const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number 
 
 function resolveModelRates(modelName: string | null): { input: number; output: number } {
   if (!modelName) {
-    return MODEL_PRICING_PER_MILLION['gpt-4.1-mini'];
+    return MODEL_PRICING_PER_MILLION['gpt-5.4'];
   }
-  return MODEL_PRICING_PER_MILLION[modelName] ?? MODEL_PRICING_PER_MILLION['gpt-4.1-mini'];
+  return MODEL_PRICING_PER_MILLION[modelName] ?? MODEL_PRICING_PER_MILLION['gpt-5.4'];
 }
 
 function estimateCostUsd(totals: UsageTotals, modelName: string | null): number {

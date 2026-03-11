@@ -1,5 +1,13 @@
 # ai-boardroom
 
+AI Boardroom is an MVP boardroom for AI-led discussion and planning. The current product uses a single OpenAI model today and is intentionally scoped to stay simple while keeping the codebase ready for future multi-provider expansion.
+
+## Product direction
+
+- Current MVP: a single-model, OpenAI-based boardroom.
+- Future direction: a multi-provider boardroom that can expand to providers such as OpenAI, Anthropic, and Google, plus external execution tools.
+- Discussion and planning work now; true execution workflows will be expanded next.
+
 ## OpenAI Setup
 
 ### Local development
@@ -9,7 +17,7 @@
 
 ```bash
 OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL=gpt-5.4
 ```
 
 3. Run the app:
@@ -20,12 +28,14 @@ npm run dev
 
 `OPENAI_API_KEY` is read only on the server in `app/api/ai/respond/route.ts`. It is never exposed to browser code.
 
+The MVP currently uses one OpenAI model for boardroom responses. Future versions may add multiple providers, but multi-provider orchestration is not implemented yet.
+
 ### Netlify
 
 1. Open Site configuration -> Environment variables.
 2. Add:
 	- `OPENAI_API_KEY` = your production key
-	- `OPENAI_MODEL` = `gpt-4.1-mini` (or another supported model)
+	- `OPENAI_MODEL` = `gpt-5.4`
 3. Redeploy the site so the new variables are applied.
 
 ## Simulation Mode

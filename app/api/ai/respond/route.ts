@@ -98,10 +98,10 @@ function normalizeRemoteImageUrl(url: string): string | null {
 
 export async function POST(request: Request) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
+  const model = process.env.OPENAI_MODEL || 'gpt-5.4';
 
   if (!process.env.OPENAI_MODEL) {
-    console.warn('[ai/respond] OPENAI_MODEL not set; using default gpt-4.1-mini');
+    console.warn('[ai/respond] OPENAI_MODEL not set; using default gpt-5.4');
   }
 
   if (!apiKey) {
