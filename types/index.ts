@@ -83,6 +83,29 @@ export interface ExecutionOutputBundle {
   summary: string;
   files: ExecutionOutputFile[];
   notes: string[];
+  removePaths?: string[];
+}
+
+export type RevisionExecutionStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'completed_with_fallback'
+  | 'failed';
+
+export interface ProjectRevisionCycle {
+  cycleNumber: number;
+  userPrompt: string;
+  requestedAt: Date;
+  debateSummary?: string;
+  approved: boolean;
+  approvedAt?: Date;
+  executionSnapshotId?: string;
+  executionStatus: RevisionExecutionStatus;
+  baselineUpdated: boolean;
+  completedAt?: Date;
+  finalSummary?: string;
+  generatedFilesCount?: number;
 }
 
 export interface TaskArtifact {
@@ -260,6 +283,8 @@ export interface Project {
   maxWordsPerAgent: number;
   latestRevisionFeedback: string | null;
   revisionRound: number;
+  currentCycleNumber: number;
+  revisionHistory: ProjectRevisionCycle[];
   outputType: OutputType;
   status: ProjectStatus;
   createdAt: Date;
@@ -269,14 +294,21 @@ export interface Project {
   messages: Message[];
   attachments: ProjectAttachment[];
   executionSnapshot?: ExecutionSnapshot | null;
+  latestStableBundle: ExecutionOutputBundle | null;
+  latestStableFiles: ExecutionOutputFile[];
+  latestStableUpdatedAt: Date | null;
   usage: ProjectUsage;
 }
 
 export interface ExecutionSnapshot {
   id: string;
   createdAt: Date;
+  cycleNumber: number;
+  revisionPrompt: string | null;
   projectPrompt: string;
   approvedDebateSummary: string;
+  latestStableSummary: string | null;
+  latestStableFiles: ExecutionOutputFile[];
   projectAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
   messageAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
   imageInputs: Array<{

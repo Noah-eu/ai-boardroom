@@ -242,6 +242,8 @@ export function createProject(
     maxWordsPerAgent,
     latestRevisionFeedback: null,
     revisionRound: 0,
+    currentCycleNumber: 0,
+    revisionHistory: [],
     outputType,
     status: 'idle',
     createdAt: now,
@@ -251,6 +253,9 @@ export function createProject(
     messages: [],
     attachments: [],
     executionSnapshot: null,
+    latestStableBundle: null,
+    latestStableFiles: [],
+    latestStableUpdatedAt: null,
     usage: initialUsage,
   };
 }

@@ -28,7 +28,9 @@ import {
   LogEntry,
   ProjectAttachment,
   ProjectAttachmentKind,
+  ProjectRevisionCycle,
   ProjectUsage,
+  RevisionExecutionStatus,
   OrchestratorState,
   OutputType,
   Project,
@@ -296,10 +298,65 @@ const executionOutputSchema = z.object({
   summary: z.string().min(1),
   files: z.array(executionOutputFileSchema),
   notes: z.array(z.string()).optional().default([]),
+  removePaths: z.array(z.string().min(1)).optional().default([]),
 });
 
 function normalizeExecutionFilePath(filePath: string): string {
   return filePath.replace(/^\.\//, '').replace(/^\/+/, '').trim();
+}
+
+function createRevisionCycle(cycleNumber: number, userPrompt: string): ProjectRevisionCycle {
+  return {
+    cycleNumber,
+    userPrompt,
+    requestedAt: new Date(),
+    approved: false,
+    executionStatus: 'pending',
+    baselineUpdated: false,
+  };
+}
+
+function mergeExecutionBaselineFiles(
+  previousFiles: ExecutionOutputFile[],
+  bundle: ExecutionOutputBundle
+): ExecutionOutputFile[] {
+  const merged = new Map<string, string>();
+  previousFiles.forEach((file) => {
+    merged.set(normalizeExecutionFilePath(file.path), file.content);
+  });
+
+  bundle.files.forEach((file) => {
+    merged.set(normalizeExecutionFilePath(file.path), file.content);
+  });
+
+  (bundle.removePaths ?? []).forEach((filePath) => {
+    merged.delete(normalizeExecutionFilePath(filePath));
+  });
+
+  return Array.from(merged.entries()).map(([path, content]) => ({ path, content }));
+}
+
+function findBuilderExecutionBundle(tasks: Task[]): ExecutionOutputBundle | null {
+  const builderTask = [...tasks].reverse().find((task) => task.agent === 'Builder');
+  if (!builderTask) return null;
+  const generated = builderTask.producesArtifacts.find((artifact) => artifact.path === 'generated-files.json');
+  return generated?.executionOutput ?? null;
+}
+
+function findIntegratorFinalSummary(tasks: Task[]): string | null {
+  const integratorTask = [...tasks].reverse().find((task) => task.agent === 'Integrator');
+  if (!integratorTask) return null;
+  const finalArtifact = integratorTask.producesArtifacts.find((artifact) => artifact.path === 'final-summary.md');
+  return finalArtifact?.content ?? null;
+}
+
+function deriveRevisionExecutionStatus(tasks: Task[]): RevisionExecutionStatus {
+  if (tasks.some((task) => task.status === 'failed')) return 'failed';
+  if (tasks.some((task) => task.status === 'queued' || task.status === 'blocked' || task.status === 'running')) {
+    return 'running';
+  }
+  if (tasks.some((task) => task.status === 'completed_with_fallback')) return 'completed_with_fallback';
+  return 'completed';
 }
 
 function isSupportedExecutionFilePath(filePath: string): boolean {
@@ -382,6 +439,9 @@ function parseExecutionOutputBundle(
     summary: result.data.summary,
     files: normalizedFiles,
     notes: result.data.notes ?? [],
+    removePaths: (result.data.removePaths ?? [])
+      .map((filePath) => normalizeExecutionFilePath(filePath))
+      .filter((filePath) => isSupportedExecutionFilePath(filePath)),
   };
 
   if (bundle.status !== 'success') {
@@ -794,6 +854,28 @@ type Action =
       projectId: string;
       snapshot: ExecutionSnapshot;
     }
+  | {
+      type: 'MARK_REVISION_APPROVED';
+      projectId: string;
+      cycleNumber: number;
+      debateSummary: string;
+      snapshotId: string;
+    }
+  | {
+      type: 'COMPLETE_REVISION_CYCLE';
+      projectId: string;
+      cycleNumber: number;
+      status: RevisionExecutionStatus;
+      baselineUpdated: boolean;
+      finalSummary?: string;
+      generatedFilesCount?: number;
+    }
+  | {
+      type: 'SET_STABLE_BASELINE';
+      projectId: string;
+      bundle: ExecutionOutputBundle;
+      files: ExecutionOutputFile[];
+    }
   | { type: 'RESET' };
 
 interface AppState extends OrchestratorState {
@@ -1006,8 +1088,14 @@ function appReducer(state: AppState, action: Action): AppState {
         ...agent,
         status: (phaseAgents.includes(agent.name) ? 'thinking' : 'idle') as AgentStatus,
       }));
+      const cycleNumber = targetProject.revisionRound + 1;
+      const hasCycle = targetProject.revisionHistory.some((cycle) => cycle.cycleNumber === cycleNumber);
       const updatedProject: Project = {
         ...targetProject,
+        currentCycleNumber: cycleNumber,
+        revisionHistory: hasCycle
+          ? targetProject.revisionHistory
+          : [...targetProject.revisionHistory, createRevisionCycle(cycleNumber, action.task)],
         status: 'debating',
         messages: [...targetProject.messages, createMessage('user', action.task), welcomeMsg],
         updatedAt: new Date(),
@@ -1115,8 +1203,10 @@ function appReducer(state: AppState, action: Action): AppState {
       const updatedProject: Project = {
         ...state.activeProject,
         status: 'debating',
+        currentCycleNumber: nextRound,
         latestRevisionFeedback: action.feedback,
         revisionRound: nextRound,
+        revisionHistory: [...state.activeProject.revisionHistory, createRevisionCycle(nextRound, action.feedback)],
         messages: [...state.activeProject.messages, msg],
         updatedAt: new Date(),
       };
@@ -1142,10 +1232,10 @@ function appReducer(state: AppState, action: Action): AppState {
       const updatedProject: Project = {
         ...state.activeProject,
         status: 'debating',
+        currentCycleNumber: nextRound,
         latestRevisionFeedback: action.feedback,
         revisionRound: nextRound,
-        taskGraph: null,
-        tasks: [],
+        revisionHistory: [...state.activeProject.revisionHistory, createRevisionCycle(nextRound, action.feedback)],
         messages: [...state.activeProject.messages, msg],
         updatedAt: new Date(),
       };
@@ -1369,6 +1459,54 @@ function appReducer(state: AppState, action: Action): AppState {
       }));
     }
 
+    case 'MARK_REVISION_APPROVED': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        revisionHistory: project.revisionHistory.map((cycle) =>
+          cycle.cycleNumber === action.cycleNumber
+            ? {
+                ...cycle,
+                approved: true,
+                approvedAt: new Date(),
+                debateSummary: action.debateSummary,
+                executionSnapshotId: action.snapshotId,
+                executionStatus: 'running',
+              }
+            : cycle
+        ),
+        updatedAt: new Date(),
+      }));
+    }
+
+    case 'COMPLETE_REVISION_CYCLE': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        revisionHistory: project.revisionHistory.map((cycle) =>
+          cycle.cycleNumber === action.cycleNumber
+            ? {
+                ...cycle,
+                executionStatus: action.status,
+                baselineUpdated: action.baselineUpdated,
+                finalSummary: action.finalSummary ?? cycle.finalSummary,
+                generatedFilesCount: action.generatedFilesCount ?? cycle.generatedFilesCount,
+                completedAt: new Date(),
+              }
+            : cycle
+        ),
+        updatedAt: new Date(),
+      }));
+    }
+
+    case 'SET_STABLE_BASELINE': {
+      return syncProjectById(state, action.projectId, (project) => ({
+        ...project,
+        latestStableBundle: action.bundle,
+        latestStableFiles: action.files,
+        latestStableUpdatedAt: new Date(),
+        updatedAt: new Date(),
+      }));
+    }
+
     case 'RESET': {
       return createInitialAppState();
     }
@@ -1463,6 +1601,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const taskTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const checkpointHitRef = useRef<Record<string, { approval: boolean }>>({});
   const deadlockSignatureRef = useRef<Record<string, string>>({});
+  const completedSnapshotRef = useRef<Record<string, string>>({});
   const debateRunsRef = useRef<Record<string, boolean>>({});
   const debateRoundStateRef = useRef<Record<string, { isRunning: boolean; currentRound: number }>>({});
   const projectPhaseRef = useRef<Record<string, WorkflowPhase>>({});
@@ -1693,6 +1832,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const createExecutionSnapshot = useCallback((project: Project): ExecutionSnapshot => {
     const approvedDebateSummary = getLatestOrchestratorSummary(project) ?? '';
+    const cycleNumber = project.revisionRound + 1;
     const attachmentContext = buildAttachmentContext(project);
     const imageInputs: ExecutionSnapshot['imageInputs'] = [];
     const pdfTexts: ExecutionSnapshot['pdfTexts'] = [];
@@ -1778,8 +1918,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const snapshot: ExecutionSnapshot = {
       id: `snapshot-${generateId()}`,
       createdAt: new Date(),
+      cycleNumber,
+      revisionPrompt: project.latestRevisionFeedback,
       projectPrompt: project.description,
       approvedDebateSummary,
+      latestStableSummary: project.latestStableBundle?.summary ?? null,
+      latestStableFiles: project.latestStableFiles,
       projectAttachments: attachmentContext.projectAttachments,
       messageAttachments: attachmentContext.messageAttachments,
       imageInputs,
@@ -2416,19 +2560,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         return [
           project.language === 'cz' ? 'Write summary and notes in Czech.' : 'Write summary and notes in English.',
-          'You are Builder. Create real project files, not a markdown plan.',
+          'You are Builder. Revise the current project baseline; do not restart from scratch unless requested.',
           'Return JSON only. Do not wrap the response in markdown fences.',
           'Prefer a minimal working static website bundle using index.html and optional style.css and script.js.',
           'Never finish with only patch notes or prose when the user asked to build something.',
           'JSON contract:',
-          '{"status":"success","summary":"short summary","files":[{"path":"index.html","content":"<!doctype html>..."}],"notes":["optional note"]}',
+          '{"status":"success","summary":"short summary","files":[{"path":"index.html","content":"<!doctype html>..."}],"notes":["optional note"],"removePaths":["obsolete.js"]}',
           'Allowed file extensions only: .html, .css, .js, .json, .md',
-          'files must be an array of objects with path and content.',
+          'files must be an array of objects with path and content. Return changed/new files only.',
+          'removePaths is optional. Use it only for files that should be removed from baseline.',
           'Execution is successful only if at least one file is present.',
           websiteRequirement,
           'Use only local generated files. Do not reference remote scripts, packages, build tools, or deployment steps.',
           `Project prompt:\n${snapshot.projectPrompt}`,
+          snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
           `Approved debate summary:\n${snapshot.approvedDebateSummary}`,
+          snapshot.latestStableFiles.length > 0
+            ? `Current baseline files (${snapshot.latestStableFiles.length}):\n${snapshot.latestStableFiles
+                .slice(0, 20)
+                .map((file) => `${file.path}\n${shorten(file.content, 800)}`)
+                .join('\n\n')}`
+            : 'Current baseline files: none (first execution cycle).',
           `ZIP snapshots count: ${snapshot.zipSnapshots.length}`,
           `Site snapshots count: ${snapshot.siteSnapshots.length}`,
           `PDF snapshots count: ${snapshot.pdfTexts.length}`,
@@ -2500,8 +2652,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     (task: Task, snapshot: ExecutionSnapshot) => {
       return {
         snapshotId: snapshot.id,
+        cycleNumber: snapshot.cycleNumber,
+        revisionPrompt: snapshot.revisionPrompt,
         projectPrompt: shorten(snapshot.projectPrompt, 1_800),
         approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 3_000),
+        latestStableSummary: shorten(snapshot.latestStableSummary ?? '', 1_800),
+        latestStableFiles: snapshot.latestStableFiles.slice(0, 25).map((file) => ({
+          path: file.path,
+          excerpt: shorten(file.content, 800),
+        })),
         attachmentOverview: {
           project: snapshot.projectAttachments.map((item) => ({
             title: item.title,
@@ -3601,6 +3760,56 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       syncAgentStatusesFromTasks(refreshedProject);
 
       if (phase === 'complete') {
+        const completionSnapshotId =
+          refreshedProject.executionSnapshot?.id ??
+          `cycle-${refreshedProject.revisionRound + 1}-${refreshedProject.tasks.length}`;
+        if (completedSnapshotRef.current[projectId] !== completionSnapshotId) {
+          completedSnapshotRef.current[projectId] = completionSnapshotId;
+
+          const cycleNumber = refreshedProject.revisionRound + 1;
+          const status = deriveRevisionExecutionStatus(refreshedProject.tasks);
+          const finalSummary = findIntegratorFinalSummary(refreshedProject.tasks) ?? undefined;
+
+          let baselineUpdated = false;
+          let generatedFilesCount: number | undefined;
+
+          if (status === 'completed' || status === 'completed_with_fallback') {
+            const builderBundle = findBuilderExecutionBundle(refreshedProject.tasks);
+            if (builderBundle) {
+              const mergedFiles = mergeExecutionBaselineFiles(
+                refreshedProject.latestStableFiles,
+                builderBundle
+              );
+              dispatch({
+                type: 'SET_STABLE_BASELINE',
+                projectId,
+                bundle: {
+                  ...builderBundle,
+                  files: mergedFiles,
+                },
+                files: mergedFiles,
+              });
+              baselineUpdated = true;
+              generatedFilesCount = mergedFiles.length;
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                message: `Stable baseline updated for cycle ${cycleNumber} (${mergedFiles.length} files).`,
+              });
+            }
+          }
+
+          dispatch({
+            type: 'COMPLETE_REVISION_CYCLE',
+            projectId,
+            cycleNumber,
+            status,
+            baselineUpdated,
+            finalSummary,
+            generatedFilesCount,
+          });
+        }
+
         const scheduler = schedulerIntervalsRef.current[projectId];
         if (scheduler) {
           clearInterval(scheduler);
@@ -3808,6 +4017,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ...taskGraph,
         concurrencyLimit: Math.max(2, taskGraph.concurrencyLimit),
       };
+      delete completedSnapshotRef.current[project.id];
       dispatch({ type: 'SET_TASK_GRAPH', projectId: project.id, taskGraph: normalizedTaskGraph });
       checkpointHitRef.current[project.id] = { approval: false };
       dispatch({ type: 'SET_PHASE', phase: 'execution' });
@@ -3821,6 +4031,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         type: 'ADD_LOG',
         level: 'info',
         message: 'Execution phase started; remaining tasks will auto-continue through Integrator.',
+      });
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message:
+          `Revision cycle ${project.revisionRound + 1} started with baseline files: ` +
+          `${project.latestStableFiles.length}`,
       });
       dispatch({
         type: 'ADD_LOG',
@@ -3846,11 +4063,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!state.activeProject) return;
     const project = state.activeProject;
     const snapshot = createExecutionSnapshot(project);
+    const cycleNumber = project.revisionRound + 1;
+    const debateSummary = getLatestOrchestratorSummary(project) ?? '';
 
     dispatch({
       type: 'SET_EXECUTION_SNAPSHOT',
       projectId: project.id,
       snapshot,
+    });
+    dispatch({
+      type: 'MARK_REVISION_APPROVED',
+      projectId: project.id,
+      cycleNumber,
+      debateSummary,
+      snapshotId: snapshot.id,
     });
     dispatch({
       type: 'ADD_LOG',
@@ -4611,11 +4837,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           const rounds = clampDebateRounds(initialProject.debateRounds);
           const language = initialProject.language;
-          const task = initialProject.description;
+          const revisionPrompt = initialProject.latestRevisionFeedback?.trim() || null;
+          const task = revisionPrompt || initialProject.description;
           const taskType = detectDebateTaskType(task);
           const isOneRoundDescriptive = rounds === 1 && taskType === 'observational';
           const previousSummary = getLatestOrchestratorSummary(initialProject);
           const revisionFeedback = initialProject.latestRevisionFeedback;
+          const baselineFilesForDebate = initialProject.latestStableFiles;
           const debateRunRound = initialProject.revisionRound + 1;
           const roundMessages: Array<{ round: number; agent: AgentName; content: string }> = [];
           const debateAgents: AgentName[] = ['Strategist', 'Skeptic', 'Pragmatist'];
@@ -4655,6 +4883,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               type: 'ADD_LOG',
               level: 'info',
               message: `Round ${round} snapshot urls=${roundAttachmentCounts.urls}`,
+            });
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: `Cycle ${debateRunRound} baseline files available: ${baselineFilesForDebate.length}`,
             });
 
             roundAttachmentSnapshot.includedAttachmentIds.forEach((attachmentId) => {
@@ -4780,6 +5013,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       ? `Zpetna vazba uzivatele: ${revisionFeedback}`
                       : `User feedback: ${revisionFeedback}`
                     : '',
+                  baselineFilesForDebate.length > 0
+                    ? language === 'cz'
+                      ? `Aktualni baseline soubory (${baselineFilesForDebate.length}):\n${baselineFilesForDebate
+                          .slice(0, 20)
+                          .map((file) => file.path)
+                          .join('\n')}`
+                      : `Current baseline files (${baselineFilesForDebate.length}):\n${baselineFilesForDebate
+                          .slice(0, 20)
+                          .map((file) => file.path)
+                          .join('\n')}`
+                    : '',
                   previousRoundMessages.length > 0
                     ? language === 'cz'
                       ? `Vybrane body z predchoziho kola:\n${formatRoundExcerpts(previousRoundMessages)}`
@@ -4811,6 +5055,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                         debateRunRound,
                         round,
                         rounds,
+                        revisionPrompt,
+                        baselineFileCount: baselineFilesForDebate.length,
                         previousRoundExcerpts: formatRoundExcerpts(previousRoundMessages),
                         roundOneExcerpts: formatRoundExcerpts(roundOneMessages),
                         snapshotAttachmentCounts: roundAttachmentCounts,
@@ -5089,6 +5335,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     schedulerPausedRef.current = {};
     setPausedSchedulers({});
     checkpointHitRef.current = {};
+    completedSnapshotRef.current = {};
     deadlockSignatureRef.current = {};
     setDeadlocks({});
     dispatch({ type: 'RESET' });

@@ -55,6 +55,12 @@ export function TopStatusBar() {
         <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1">
           {t('statusBar.tokens')}: {formatTokens(displayTokens.input)} / {formatTokens(displayTokens.output)} / {formatTokens(displayTokens.total)}
         </span>
+        <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1">
+          {t('statusBar.cycle')}: {project.revisionRound + 1}
+        </span>
+        <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1">
+          {t('statusBar.baseline')}: {project.latestStableFiles.length}
+        </span>
         <span className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-emerald-200">
           {t('statusBar.projectCost')}: {formatUsd(displayTokens.projectCost)}
         </span>
@@ -104,6 +110,8 @@ export function TopStatusBar() {
             <p>
               {t('statusBar.tokens')}: {formatTokens(displayTokens.input)} / {formatTokens(displayTokens.output)} / {formatTokens(displayTokens.total)}
             </p>
+            <p>{t('statusBar.cycle')}: {project.revisionRound + 1}</p>
+            <p>{t('statusBar.baseline')}: {project.latestStableFiles.length}</p>
             <p>{t('statusBar.projectCost')}: {formatUsd(displayTokens.projectCost)}</p>
             <p>{t('statusBar.sessionCost')}: {formatUsd(displayTokens.sessionCost)}</p>
             {project.taskGraph && (

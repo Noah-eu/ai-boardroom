@@ -440,6 +440,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     () => (selectedExecutionBundle ? resolveBundlePreviewHtml(selectedExecutionBundle) : null),
     [selectedExecutionBundle]
   );
+  const stableBaselineBundle = project?.latestStableBundle ?? null;
 
   const resultModalTitle = selectedExecutionBundle
     ? selectedGeneratedFile?.path ?? selectedArtifactMeta?.path ?? 'Generated result'
@@ -479,25 +480,30 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     }
   }, [selectedExecutionBundle, selectedGeneratedFilePath]);
 
-  const downloadExecutionBundle = useCallback(async (artifact: TaskArtifact) => {
-    if (!artifact.executionOutput) return;
+  const downloadBundleAsZip = useCallback(async (bundle: ExecutionOutputBundle, bundleName: string) => {
+    if (!bundle) return;
 
     const zip = new JSZip();
-    artifact.executionOutput.files.forEach((file) => {
+    bundle.files.forEach((file) => {
       zip.file(normalizeBundleFilePath(file.path), file.content);
     });
 
     const blob = await zip.generateAsync({ type: 'blob' });
-    const bundleName = normalizeBundleFilePath(artifact.path).replace(/\.[^.]+$/, '') || 'execution-output';
+    const safeBundleName = normalizeBundleFilePath(bundleName).replace(/\.[^.]+$/, '') || 'execution-output';
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${bundleName}.zip`;
+    anchor.download = `${safeBundleName}.zip`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
   }, []);
+
+  const downloadExecutionBundle = useCallback(async (artifact: TaskArtifact) => {
+    if (!artifact.executionOutput) return;
+    await downloadBundleAsZip(artifact.executionOutput, artifact.path);
+  }, [downloadBundleAsZip]);
 
   if (!project) {
     return (
@@ -575,6 +581,9 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
             >
               {executionCompletionStatus}
             </span>
+          </p>
+          <p className="mt-1 text-[11px] text-gray-400">
+            {t('preview.cycleHistory')}: {project.revisionHistory.length} · {t('preview.stableBaseline')}: {project.latestStableFiles.length}
           </p>
         </div>
       )}
@@ -893,6 +902,30 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                   <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('preview.projectOutput')}</p>
                   <p className="mt-1 text-xs text-gray-100">{project.name}</p>
                   <p className="mt-1 text-[11px] text-gray-300 leading-relaxed">{project.description}</p>
+                </div>
+
+                <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('preview.stableBaseline')}</p>
+                  <p className="mt-1 text-[11px] text-gray-200">
+                    {project.latestStableFiles.length} files
+                    {project.latestStableUpdatedAt
+                      ? ` · updated ${new Date(project.latestStableUpdatedAt).toLocaleString()}`
+                      : ''}
+                  </p>
+                  {stableBaselineBundle && (
+                    <button
+                      type="button"
+                      onClick={() => void downloadBundleAsZip(stableBaselineBundle, 'stable-baseline')}
+                      className="mt-2 rounded border border-blue-700/60 bg-blue-950/30 px-2 py-1 text-[10px] text-blue-100 transition-colors hover:border-blue-500"
+                    >
+                      Download stable baseline ZIP
+                    </button>
+                  )}
+                  {executionCompletionStatus === 'failed' && project.latestStableFiles.length > 0 && (
+                    <p className="mt-1 text-[11px] text-amber-300">
+                      Latest revision failed. Stable baseline from the previous successful cycle is preserved.
+                    </p>
+                  )}
                 </div>
 
                 <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
