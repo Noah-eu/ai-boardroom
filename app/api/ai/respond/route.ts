@@ -6,12 +6,28 @@ import { resolveOpenAiModel, resolveReasoningConfig, resolveTextVerbosity } from
 const OPENAI_PRIMARY_TIMEOUT_MS = 18_000;
 const OPENAI_RETRY_TIMEOUT_MS = 8_000;
 
-function resolveOpenAiResponseProfile(agentRole: string, model: string, retry = false) {
+function resolveOpenAiResponseProfile(
+  agentRole: string,
+  model: string,
+  retry = false,
+  responseMode: 'default' | 'structured_execution_bundle' = 'default'
+) {
   const role = agentRole.trim().toLowerCase();
   const isPlanner = role === 'planner';
   const isExecution = ['architect', 'builder', 'reviewer', 'tester', 'integrator'].includes(role);
+  const isStructuredBundle = responseMode === 'structured_execution_bundle';
 
-  const maxOutputTokens = retry ? 700 : isExecution ? 1_000 : isPlanner ? 850 : 650;
+  const maxOutputTokens = isStructuredBundle
+    ? retry
+      ? 2_200
+      : 3_200
+    : retry
+    ? 700
+    : isExecution
+    ? 1_000
+    : isPlanner
+    ? 850
+    : 650;
   const preferredVerbosity = retry ? 'low' : isExecution ? 'medium' : 'low';
   const verbosity = resolveTextVerbosity(model, preferredVerbosity);
   const reasoning = resolveReasoningConfig(model);
@@ -40,6 +56,7 @@ const requestSchema = z.object({
   language: z.enum(['cz', 'en']),
   agentRole: z.string().min(1),
   model: z.string().optional(),
+  responseMode: z.enum(['default', 'structured_execution_bundle']).optional(),
   inputText: z.string().min(1),
   context: z.unknown().optional(),
   attachmentContext: z
@@ -134,15 +151,17 @@ async function createOpenAiResponse(
   client: OpenAI,
   model: string,
   agentRole: string,
+  responseMode: 'default' | 'structured_execution_bundle',
   input: OpenAI.Responses.ResponseCreateParams['input']
 ): Promise<OpenAI.Responses.Response> {
-  const primaryProfile = resolveOpenAiResponseProfile(agentRole, model);
+  const primaryProfile = resolveOpenAiResponseProfile(agentRole, model, false, responseMode);
   try {
     console.info(
       '[ai/respond] OpenAI request',
       JSON.stringify({
         agentRole,
         resolvedModel: model,
+        responseMode,
         reasoningIncluded: Boolean(primaryProfile.reasoning),
         reasoningEffort: primaryProfile.reasoning?.effort ?? null,
         textVerbosity: primaryProfile.text?.verbosity ?? null,
@@ -166,12 +185,13 @@ async function createOpenAiResponse(
     }
 
     console.warn(`[ai/respond] Primary OpenAI request failed for ${agentRole}; retrying with tighter limits.`);
-    const retryProfile = resolveOpenAiResponseProfile(agentRole, model, true);
+    const retryProfile = resolveOpenAiResponseProfile(agentRole, model, true, responseMode);
     console.info(
       '[ai/respond] OpenAI request',
       JSON.stringify({
         agentRole,
         resolvedModel: model,
+        responseMode,
         reasoningIncluded: Boolean(retryProfile.reasoning),
         reasoningEffort: retryProfile.reasoning?.effort ?? null,
         textVerbosity: retryProfile.text?.verbosity ?? null,
@@ -199,6 +219,7 @@ export async function POST(request: Request) {
   let debugResolvedModel = envModel;
   let debugReasoningIncluded = false;
   let debugTextVerbosity: string | null = null;
+  let debugResponseMode: 'default' | 'structured_execution_bundle' = 'default';
 
   if (!process.env.OPENAI_MODEL) {
     console.warn('[ai/respond] OPENAI_MODEL not set; using default gpt-4.1-mini');
@@ -228,12 +249,14 @@ export async function POST(request: Request) {
     const { language, projectId, agentRole, inputText, context, attachmentContext } = parsed.data;
     const selectedModel = parsed.data.model ?? null;
     const model = resolveOpenAiModel(parsed.data.model, envModel);
-    const responseProfile = resolveOpenAiResponseProfile(agentRole, model);
+    const responseMode = parsed.data.responseMode ?? 'default';
+    const responseProfile = resolveOpenAiResponseProfile(agentRole, model, false, responseMode);
     const reasoningIncluded = Boolean(responseProfile.reasoning);
     debugSelectedModel = selectedModel;
     debugResolvedModel = model;
     debugReasoningIncluded = reasoningIncluded;
     debugTextVerbosity = responseProfile.text?.verbosity ?? null;
+    debugResponseMode = responseMode;
     const languageInstruction =
       language === 'cz'
         ? 'Respond in Czech language.'
@@ -246,6 +269,7 @@ export async function POST(request: Request) {
         agentRole,
         selectedModel,
         resolvedModel: model,
+        responseMode,
         envModel,
         reasoningIncluded,
         reasoningEffort: responseProfile.reasoning?.effort ?? null,
@@ -302,7 +326,7 @@ export async function POST(request: Request) {
         },
       ] as unknown as OpenAI.Responses.ResponseCreateParams['input'];
 
-    const response = await createOpenAiResponse(client, model, agentRole, requestInput);
+    const response = await createOpenAiResponse(client, model, agentRole, responseMode, requestInput);
 
     const text = extractResponseText(response);
     if (!text) {
@@ -337,6 +361,7 @@ export async function POST(request: Request) {
       JSON.stringify({
         selectedModel: debugSelectedModel,
         resolvedModel: debugResolvedModel,
+        responseMode: debugResponseMode,
         reasoningIncluded: debugReasoningIncluded,
         reasoningEffort: resolveReasoningConfig(debugResolvedModel)?.effort ?? null,
         textVerbosity: debugTextVerbosity,

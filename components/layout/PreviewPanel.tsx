@@ -83,8 +83,8 @@ function buildArtifactFallbackPreview(
     `- Zdroj: ${source}`,
     '',
     '## Co udelat dal',
-    '- Pokud chcete realny obsah artefaktu, spustte projekt v Live rezimu (OpenAI).',
-    '- V simulacnim rezimu mohou byt artefakty bez textoveho obsahu.',
+    '- Zkontrolujte, zda se artefakt uspesne vygeneroval a ulozil.',
+    '- Pokud task selhal, podivejte se na raw output nebo execution log pro detail chyby.',
   ].join('\n');
 }
 

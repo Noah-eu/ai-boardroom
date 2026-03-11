@@ -117,6 +117,7 @@ type AiRespondPayload = {
   language: AppLanguage;
   agentRole: string;
   model?: OpenAIModel;
+  responseMode?: 'default' | 'structured_execution_bundle';
   inputText: string;
   context?: unknown;
   attachmentContext?: {
@@ -327,11 +328,72 @@ function parseExecutionOutputBundle(
   task: Task,
   project: Project
 ): { bundle: ExecutionOutputBundle; error: null } | { bundle: null; error: string } {
+  const normalizedRaw = raw.trim();
+  const stripCodeFence = (value: string) =>
+    value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const extractFirstJsonObject = (value: string): string | null => {
+    const start = value.indexOf('{');
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaping = false;
+
+    for (let index = start; index < value.length; index += 1) {
+      const char = value[index];
+
+      if (inString) {
+        if (escaping) {
+          escaping = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaping = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === '{') {
+        depth += 1;
+      } else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          return value.slice(start, index + 1);
+        }
+      }
+    }
+
+    return null;
+  };
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(normalizedRaw);
   } catch {
-    return { bundle: null, error: 'Execution output is not valid JSON.' };
+    const fencedCandidate = stripCodeFence(normalizedRaw);
+    try {
+      parsed = JSON.parse(fencedCandidate);
+    } catch {
+      const extracted = extractFirstJsonObject(fencedCandidate);
+      if (!extracted) {
+        return { bundle: null, error: 'Execution output is not valid JSON.' };
+      }
+
+      try {
+        parsed = JSON.parse(extracted);
+      } catch {
+        return { bundle: null, error: 'Execution output is not valid JSON.' };
+      }
+    }
   }
 
   const result = executionOutputSchema.safeParse(parsed);
@@ -3093,6 +3155,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 language: project.language,
                 agentRole: task.agent,
                 model: task.model,
+                responseMode: artifactRequiresStructuredExecutionOutput(task, artifact)
+                  ? 'structured_execution_bundle'
+                  : 'default',
                 inputText: prompt,
                 context: {
                   artifactPath: artifact.path,
