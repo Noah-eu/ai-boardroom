@@ -444,6 +444,72 @@ function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['p
   return task.agent === 'Builder' && artifact.path === 'generated-files.json';
 }
 
+function parseJsonObjectFromModelText(raw: string): unknown {
+  const normalizedRaw = raw.trim();
+  const stripCodeFence = (value: string) =>
+    value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const extractFirstJsonObject = (value: string): string | null => {
+    const start = value.indexOf('{');
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaping = false;
+
+    for (let index = start; index < value.length; index += 1) {
+      const char = value[index];
+
+      if (inString) {
+        if (escaping) {
+          escaping = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaping = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === '{') {
+        depth += 1;
+      } else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          return value.slice(start, index + 1);
+        }
+      }
+    }
+
+    return null;
+  };
+
+  try {
+    return JSON.parse(normalizedRaw);
+  } catch (initialError) {
+    const fencedCandidate = stripCodeFence(normalizedRaw);
+
+    try {
+      return JSON.parse(fencedCandidate);
+    } catch {
+      const extracted = extractFirstJsonObject(fencedCandidate);
+      if (!extracted) {
+        throw initialError;
+      }
+
+      return JSON.parse(extracted);
+    }
+  }
+}
+
 function createEmptyUsage(): ProjectUsage {
   return {
     totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
@@ -2382,7 +2448,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     (raw: string): PlannerStructuredPlan => {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(raw);
+        parsed = parseJsonObjectFromModelText(raw);
       } catch (error) {
         throw new Error(`Planner conversion JSON parse failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -2947,6 +3013,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const plannerStageBPrompt = [
             project.language === 'cz' ? 'Write in English for JSON keys and values.' : 'Write in English.',
             'Convert the planner text into minimal JSON only.',
+            'Do not include markdown fences, commentary, prefaces, or trailing text.',
             'JSON contract:',
             '{"title":"...","summary":"...","tasks":[{"id":"...","title":"...","description":"...","priority":"high|medium|low","dependsOn":["id"]}]}',
             'Rules: task count must be 3 to 7, dependsOn optional array, no additional nesting.',

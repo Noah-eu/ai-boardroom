@@ -2,8 +2,8 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import { resolveOpenAiModel, resolveReasoningConfig, resolveTextVerbosity } from '../../types';
 
-const OPENAI_PRIMARY_TIMEOUT_MS = 18_000;
-const OPENAI_RETRY_TIMEOUT_MS = 8_000;
+const OPENAI_PRIMARY_TIMEOUT_MS = 45_000;
+const OPENAI_RETRY_TIMEOUT_MS = 20_000;
 
 function resolveOpenAiResponseProfile(
   agentRole: string,
@@ -18,7 +18,7 @@ function resolveOpenAiResponseProfile(
 
   const maxOutputTokens = isStructuredBundle
     ? retry
-      ? 2_200
+      ? 1_800
       : 3_200
     : retry
     ? 700
@@ -27,7 +27,7 @@ function resolveOpenAiResponseProfile(
     : isPlanner
     ? 850
     : 650;
-  const preferredVerbosity = retry ? 'low' : isExecution ? 'medium' : 'low';
+  const preferredVerbosity = retry || isStructuredBundle ? 'low' : isExecution ? 'medium' : 'low';
   const verbosity = resolveTextVerbosity(model, preferredVerbosity);
   const reasoning = resolveReasoningConfig(model);
 
