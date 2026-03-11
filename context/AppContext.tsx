@@ -749,6 +749,7 @@ type Action =
   | { type: 'REQUEST_APPROVAL' }
   | { type: 'APPROVE_PLAN' }
   | { type: 'REJECT_PLAN'; feedback: string; attachmentIds?: string[] }
+  | { type: 'REVISION_FROM_COMPLETE'; feedback: string; attachmentIds?: string[] }
   | { type: 'SET_PHASE'; phase: WorkflowPhase }
   | { type: 'UPDATE_AGENT_STATUS'; agent: AgentName; status: AgentStatus; lastOutput?: string }
   | { type: 'ADD_USER_MESSAGE'; content: string; attachmentIds?: string[] }
@@ -1129,6 +1130,35 @@ function appReducer(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'REVISION_FROM_COMPLETE': {
+      if (!state.activeProject) return state;
+      const lang = state.activeProject.language;
+      const nextRound = state.activeProject.revisionRound + 1;
+      const msg = createMessage('user', action.feedback, 'chat', undefined, action.attachmentIds);
+      const log = createLogEntry(
+        translateWithVars(lang, 'workflow.revision.fromComplete', { round: nextRound }),
+        'warning'
+      );
+      const updatedProject: Project = {
+        ...state.activeProject,
+        status: 'debating',
+        latestRevisionFeedback: action.feedback,
+        revisionRound: nextRound,
+        taskGraph: null,
+        tasks: [],
+        messages: [...state.activeProject.messages, msg],
+        updatedAt: new Date(),
+      };
+      return {
+        ...state,
+        currentPhase: 'debate',
+        agents: state.agents.map((agent) => ({ ...agent, status: 'idle' })),
+        activeProject: updatedProject,
+        projects: state.projects.map((p) => (p.id === updatedProject.id ? updatedProject : p)),
+        executionLog: [...state.executionLog, log],
+      };
+    }
+
     case 'SET_PHASE': {
       if (!state.activeProject) return state;
       const updatedProject: Project = {
@@ -1382,6 +1412,7 @@ interface AppContextValue {
   requestApproval: () => void;
   approvePlan: () => void;
   rejectPlan: (feedback: string, attachmentIds?: string[]) => void;
+  requestRevisionFromComplete: (feedback: string, attachmentIds?: string[]) => void;
   updateAgentStatus: (agent: AgentName, status: AgentStatus, lastOutput?: string) => void;
   addUserMessage: (content: string, attachmentIds?: string[]) => void;
   attachToProject: (projectId: string, attachment: DraftAttachmentInput) => Promise<ProjectAttachment>;
@@ -1430,7 +1461,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const schedulerIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const schedulerPausedRef = useRef<Record<string, boolean>>({});
   const taskTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const checkpointHitRef = useRef<Record<string, { approval: boolean; integrator: boolean }>>({});
+  const checkpointHitRef = useRef<Record<string, { approval: boolean }>>({});
   const deadlockSignatureRef = useRef<Record<string, string>>({});
   const debateRunsRef = useRef<Record<string, boolean>>({});
   const debateRoundStateRef = useRef<Record<string, { isRunning: boolean; currentRound: number }>>({});
@@ -3647,23 +3678,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const slots = Math.max(0, refreshedProject.taskGraph.concurrencyLimit - runningTasks.length);
       let startedCount = 0;
       for (const task of readyTasks.slice(0, slots)) {
-        const checkpointState = checkpointHitRef.current[projectId] ?? {
-          approval: false,
-          integrator: false,
-        };
-        if (autoPauseCheckpoints && task.agent === 'Integrator' && !checkpointState.integrator) {
-          checkpointHitRef.current[projectId] = {
-            ...checkpointState,
-            integrator: true,
-          };
-          setSchedulerPaused(projectId, true, false);
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'warning',
-            message: translateProject(refreshedProject.language, 'workflow.scheduler.checkpoint.integrator'),
-          });
-          break;
-        }
         startTask(refreshedProject, task);
         startedCount += 1;
       }
@@ -3795,13 +3809,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         concurrencyLimit: Math.max(2, taskGraph.concurrencyLimit),
       };
       dispatch({ type: 'SET_TASK_GRAPH', projectId: project.id, taskGraph: normalizedTaskGraph });
-      checkpointHitRef.current[project.id] = { approval: false, integrator: false };
+      checkpointHitRef.current[project.id] = { approval: false };
       dispatch({ type: 'SET_PHASE', phase: 'execution' });
       setSchedulerPaused(project.id, false, false);
       dispatch({
         type: 'ADD_LOG',
         level: 'info',
         message: translateProject(project.language, 'workflow.graph.generated'),
+      });
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: 'Execution phase started; remaining tasks will auto-continue through Integrator.',
       });
       dispatch({
         type: 'ADD_LOG',
@@ -5044,6 +5063,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [runAutoDebate, translateProjectWithVars]
   );
 
+  const requestRevisionFromComplete = useCallback(
+    (feedback: string, attachmentIds?: string[]) => {
+      const project = stateRef.current.activeProject;
+      if (!project) return;
+
+      if (project.revisionRound >= MAX_REVISION_ROUNDS) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'warning',
+          message: translateProjectWithVars(project.language, 'workflow.revision.limitReached', {
+            max: MAX_REVISION_ROUNDS,
+          }),
+        });
+        return;
+      }
+
+      dispatch({ type: 'REVISION_FROM_COMPLETE', feedback, attachmentIds });
+      setTimeout(() => runAutoDebate(project.id), 0);
+    },
+    [runAutoDebate, translateProjectWithVars]
+  );
+
   const reset = useCallback(() => {
     schedulerPausedRef.current = {};
     setPausedSchedulers({});
@@ -5103,7 +5144,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!project) return;
     const checkpointState = checkpointHitRef.current[project.id] ?? {
       approval: false,
-      integrator: false,
     };
     if (state.currentPhase === 'awaiting-approval' && !checkpointState.approval) {
       checkpointHitRef.current[project.id] = {
@@ -5177,6 +5217,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     requestApproval,
     approvePlan,
     rejectPlan,
+    requestRevisionFromComplete,
     updateAgentStatus: updateAgentStatusFn,
     addUserMessage,
     attachToProject,

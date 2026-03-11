@@ -256,6 +256,7 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
     state,
     approvePlan,
     rejectPlan,
+    requestRevisionFromComplete,
     addUserMessage,
     addLog,
     attachToProject,
@@ -289,6 +290,7 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
     {}
   );
   const isAwaitingApproval = state.currentPhase === 'awaiting-approval';
+  const isComplete = state.currentPhase === 'complete';
   const approvalRound = (activeProject?.revisionRound ?? 0) + 1;
 
   const lastApprovalRequestIndex = messages
@@ -455,7 +457,39 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
     }
   };
 
+  const handleCompleteRevisionSend = async () => {
+    if (!isComplete) return;
+    if (!inputValue.trim()) return;
+    if (!activeProject) return;
+
+    setIsSending(true);
+    const feedback = inputValue.trim();
+
+    try {
+      const attachmentIds = await uploadDraftAttachments();
+      setInputValue('');
+      setLinkValue('');
+      setDraftAttachments([]);
+      setComposerNotice(null);
+      requestRevisionFromComplete(feedback, attachmentIds);
+      addLog(
+        `Project/message attachment link success: source=message(complete-revision) count=${attachmentIds.length}`,
+        'success'
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'complete revision feedback link failed';
+      addLog(`Project/message attachment link failed: source=message(complete-revision) ${detail}`, 'error');
+      throw error;
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   const handleSend = async () => {
+    if (isComplete && inputValue.trim()) {
+      await handleCompleteRevisionSend();
+      return;
+    }
     if (isAwaitingApproval) {
       await handleApprovalFeedbackSend();
       return;
@@ -538,12 +572,16 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
         className={`flex-shrink-0 border-t border-gray-800 ${isMobile ? 'bg-gray-950/95 px-5 pt-5 backdrop-blur' : 'px-4 py-3'}`}
         style={isMobile ? { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' } : undefined}
       >
-        <div className="mb-4 flex items-center justify-between rounded-[1.25rem] border border-gray-700 bg-gray-900 px-4 py-3 text-base text-gray-300">
+        <div className={`mb-4 flex items-center justify-between rounded-[1.25rem] border ${
+          isComplete ? 'border-green-700/40 bg-green-950/30' : 'border-gray-700 bg-gray-900'
+        } px-4 py-3 text-base text-gray-300`}>
           <span className="font-medium">
             {t('chat.modeNormal')}
           </span>
           {isAwaitingApproval ? (
             <span className="text-yellow-300">{t('chat.revisionModeActiveHint')}</span>
+          ) : isComplete ? (
+            <span className="text-green-300">{t('chat.completeRevisionBanner')}</span>
           ) : null}
         </div>
 
@@ -629,7 +667,9 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                isAwaitingApproval
+                isComplete
+                  ? t('chat.completeRevisionPlaceholder')
+                  : isAwaitingApproval
                   ? t('chat.revisionFeedbackPlaceholder')
                   : state.currentPhase === 'idle'
                   ? t('chat.placeholderStart')
@@ -637,7 +677,9 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
               }
               rows={isMobile ? 3 : 2}
               className={`flex-1 resize-none rounded-[1.25rem] px-5 py-4 text-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
-                isAwaitingApproval
+                isComplete
+                  ? 'bg-green-950/30 border border-green-600/50 focus:border-green-500 focus:ring-green-500/30'
+                  : isAwaitingApproval
                   ? 'bg-orange-950/30 border border-orange-600/50 focus:border-orange-500 focus:ring-orange-500/30'
                   : 'bg-gray-900 border border-gray-600 focus:border-blue-500 focus:ring-blue-500/30'
               } ${isMobile ? 'min-h-[168px]' : ''}`}
@@ -645,10 +687,18 @@ export function ChatPanel({ mode = 'desktop' }: ChatPanelProps) {
           </div>
           <button
             onClick={() => void handleSend()}
-            disabled={(isAwaitingApproval ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
-            className={`${isMobile ? 'min-h-16 w-full rounded-[1.25rem]' : 'self-end px-4 rounded-lg'} bg-blue-600 px-5 py-4 text-lg font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90`}
+            disabled={((isAwaitingApproval || isComplete) ? !inputValue.trim() : (!inputValue.trim() && draftAttachments.length === 0)) || isSending}
+            className={`${isMobile ? 'min-h-16 w-full rounded-[1.25rem]' : 'self-end px-4 rounded-lg'} ${
+              isComplete
+                ? 'bg-green-700 hover:bg-green-600'
+                : 'bg-blue-600 hover:bg-blue-500'
+            } px-5 py-4 text-lg font-medium text-white transition-colors disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-300 disabled:opacity-90`}
           >
-            {isSending ? t('attachments.sending') : t('chat.send')}
+            {isSending
+              ? t('attachments.sending')
+              : isComplete
+              ? t('chat.sendRevisionFromComplete')
+              : t('chat.send')}
           </button>
         </div>
 
