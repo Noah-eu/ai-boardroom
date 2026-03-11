@@ -383,6 +383,68 @@ function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['p
   return task.agent === 'Builder' && artifact.path === 'generated-files.json';
 }
 
+function artifactCanBeGeneratedLocally(task: Task, artifact: Task['producesArtifacts'][number]): boolean {
+  return task.agent === 'Builder' && artifact.path === 'patch-plan.md';
+}
+
+function buildPatchPlanFromExecutionBundle(
+  bundle: ExecutionOutputBundle,
+  project: Project
+): string {
+  const heading = project.language === 'cz' ? '# Patch Plan' : '# Patch Plan';
+  const summaryHeading = project.language === 'cz' ? '## Summary' : '## Summary';
+  const stepsHeading = project.language === 'cz' ? '## Ordered patch steps' : '## Ordered patch steps';
+  const filesHeading = project.language === 'cz' ? '## Target files and reasons' : '## Target files and reasons';
+  const notesHeading = project.language === 'cz' ? '## Dependencies and rollout notes' : '## Dependencies and rollout notes';
+  const emptyNotes = project.language === 'cz' ? '- No additional rollout notes.' : '- No additional rollout notes.';
+
+  const orderedSteps = bundle.files.map((file, index) => {
+    const normalizedPath = normalizeExecutionFilePath(file.path);
+    const reason = normalizedPath.endsWith('.html')
+      ? 'Entry structure and UI markup'
+      : normalizedPath.endsWith('.css')
+      ? 'Styling and layout rules'
+      : normalizedPath.endsWith('.js')
+      ? 'Interactive behavior and state handling'
+      : normalizedPath.endsWith('.json')
+      ? 'Supporting data/config payload'
+      : 'Supporting documentation or notes';
+    return `${index + 1}. Update ${normalizedPath} to deliver ${reason.toLowerCase()}.`;
+  });
+
+  const fileReasons = bundle.files.map((file) => {
+    const normalizedPath = normalizeExecutionFilePath(file.path);
+    const reason = normalizedPath.endsWith('.html')
+      ? 'Primary application shell and visible interface.'
+      : normalizedPath.endsWith('.css')
+      ? 'Visual styling, spacing, color, and responsive behavior.'
+      : normalizedPath.endsWith('.js')
+      ? 'Client-side interactions, events, and persistence logic.'
+      : normalizedPath.endsWith('.json')
+      ? 'Machine-readable support data for the generated output.'
+      : 'Supporting documentation for the generated output.';
+    return `- ${normalizedPath}: ${reason}`;
+  });
+
+  const rolloutNotes = bundle.notes.length > 0 ? bundle.notes.map((note) => `- ${note}`) : [emptyNotes];
+
+  return [
+    heading,
+    '',
+    summaryHeading,
+    bundle.summary,
+    '',
+    stepsHeading,
+    ...orderedSteps,
+    '',
+    filesHeading,
+    ...fileReasons,
+    '',
+    notesHeading,
+    ...rolloutNotes,
+  ].join('\n');
+}
+
 function stripJsonCodeFence(value: string): string {
   return value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
 }
@@ -3208,6 +3270,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
 
           const artifact = updatedArtifacts[index];
+
+          if (artifactCanBeGeneratedLocally(task, artifact)) {
+            const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
+            const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
+            if (!executionBundle) {
+              failLiveTask(task.agent, `${task.agent}: patch-plan generation requires parsed generated-files.json output first.`);
+              return;
+            }
+
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: task.agent,
+              message: `${task.agent}: generating ${artifact.path} locally from structured bundle`,
+            });
+
+            updatedArtifacts[index] = {
+              ...artifact,
+              content: buildPatchPlanFromExecutionBundle(executionBundle, project),
+              rawContent: '',
+              producedBy: task.agent,
+              generatedAt: new Date(),
+            };
+            continue;
+          }
+
           dispatch({
             type: 'ADD_LOG',
             level: 'info',
