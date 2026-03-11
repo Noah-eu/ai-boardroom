@@ -6,7 +6,9 @@ AI Boardroom is an MVP boardroom for AI-led discussion and planning. The current
 
 - Current MVP: an OpenAI-based boardroom with a small model selector for supported OpenAI runs.
 - Future direction: a multi-provider boardroom that can expand to providers such as OpenAI, Anthropic, and Google, plus external execution tools.
-- Discussion and planning work now; true execution workflows will be expanded next.
+- Discussion and planning are stable.
+- Execute mode now supports a first narrow real-output path for simple static websites: generated HTML, CSS, JavaScript, JSON, and markdown files.
+- Richer execution workflows, external tooling, and full app build pipelines are still future work.
 
 ## Model selection
 
@@ -53,3 +55,18 @@ Each project has a `Simulation mode` toggle in the sidebar.
 - `OFF`: uses real OpenAI calls for debate agents (`Strategist`, `Skeptic`, `Pragmatist`) and planner task-graph generation.
 
 If an OpenAI call fails, the app writes a readable error to the Execution Log and falls back to simulation for that step.
+
+## Execute Mode Output
+
+When Live execution reaches the Builder in Execute mode, the app now expects a structured file bundle instead of a markdown-only implementation note.
+
+- Allowed generated file types are `.html`, `.css`, `.js`, `.json`, and `.md`.
+- For website-style requests, success requires at least one generated file and an `index.html` entry file.
+- The Preview panel shows a generated file list, a file viewer, an in-app iframe preview using local bundle assets, and a ZIP download.
+- The current scope is intentionally narrow: simple static HTML/CSS/JS sites only. React, Vite, shell execution, external deployment, and third-party build tools are not part of this MVP.
+
+Manual test prompt:
+
+```text
+Create a simple todo web app in HTML, CSS and JavaScript.
+```

@@ -13,6 +13,7 @@ import React, {
 import { onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { z } from 'zod';
 import {
   AIProvider,
   AttachmentIngestion,
@@ -22,6 +23,8 @@ import {
   AgentStatus,
   DebateMode,
   ExecutionSnapshot,
+  ExecutionOutputBundle,
+  ExecutionOutputFile,
   LogEntry,
   ProjectAttachment,
   ProjectAttachmentKind,
@@ -77,6 +80,7 @@ const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
 const MAX_AI_ATTACHMENT_SECTIONS = 6;
 const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
+const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
     process.env.NEXT_PUBLIC_BUILD_MARKER ||
@@ -274,6 +278,103 @@ function estimateUsageCostUsd(usage: AiUsageMeta, modelName: string | null): num
     },
     modelName
   );
+}
+
+const executionOutputFileSchema = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+});
+
+const executionOutputSchema = z.object({
+  status: z.enum(['success', 'failed']),
+  summary: z.string().min(1),
+  files: z.array(executionOutputFileSchema),
+  notes: z.array(z.string()).optional().default([]),
+});
+
+function normalizeExecutionFilePath(filePath: string): string {
+  return filePath.replace(/^\.\//, '').replace(/^\/+/, '').trim();
+}
+
+function isSupportedExecutionFilePath(filePath: string): boolean {
+  const normalized = normalizeExecutionFilePath(filePath).toLowerCase();
+  if (!normalized || normalized.includes('..')) {
+    return false;
+  }
+  return EXECUTION_OUTPUT_ALLOWED_EXTENSIONS.some((extension) => normalized.endsWith(extension));
+}
+
+function taskRequiresHtmlEntry(task: Task, project: Project): boolean {
+  if (task.agent !== 'Builder') {
+    return false;
+  }
+
+  if (project.outputType === 'app' || project.outputType === 'website') {
+    return true;
+  }
+
+  const combined = [project.description, task.title, task.description].join(' ').toLowerCase();
+  return /\b(html|website|web app|webapp|landing page|homepage|page|site)\b/.test(combined);
+}
+
+function parseExecutionOutputBundle(
+  raw: string,
+  task: Task,
+  project: Project
+): { bundle: ExecutionOutputBundle; error: null } | { bundle: null; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { bundle: null, error: 'Execution output is not valid JSON.' };
+  }
+
+  const result = executionOutputSchema.safeParse(parsed);
+  if (!result.success) {
+    return { bundle: null, error: 'Execution output does not match the required schema.' };
+  }
+
+  const normalizedFiles: ExecutionOutputFile[] = [];
+  const seenPaths = new Set<string>();
+  for (const file of result.data.files) {
+    const normalizedPath = normalizeExecutionFilePath(file.path);
+    if (!isSupportedExecutionFilePath(normalizedPath)) {
+      return { bundle: null, error: `Unsupported generated file path: ${file.path}` };
+    }
+    if (seenPaths.has(normalizedPath)) {
+      return { bundle: null, error: `Duplicate generated file path: ${normalizedPath}` };
+    }
+    seenPaths.add(normalizedPath);
+    normalizedFiles.push({
+      path: normalizedPath,
+      content: file.content,
+    });
+  }
+
+  if (normalizedFiles.length === 0) {
+    return { bundle: null, error: 'Execution output must contain at least one file.' };
+  }
+
+  if (taskRequiresHtmlEntry(task, project) && !normalizedFiles.some((file) => file.path.toLowerCase() === 'index.html')) {
+    return { bundle: null, error: 'Website execution output must include index.html.' };
+  }
+
+  const bundle: ExecutionOutputBundle = {
+    status: result.data.status,
+    summary: result.data.summary,
+    files: normalizedFiles,
+    notes: result.data.notes ?? [],
+  };
+
+  if (bundle.status !== 'success') {
+    return { bundle: null, error: 'Execution output returned failed status.' };
+  }
+
+  return { bundle, error: null };
+}
+
+function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['producesArtifacts'][number]): boolean {
+  return task.agent === 'Builder' && artifact.path === 'generated-files.json';
 }
 
 function createEmptyUsage(): ProjectUsage {
@@ -2001,6 +2102,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const buildExecutionArtifactPrompt = useCallback(
     (task: Task, artifact: Task['producesArtifacts'][number], snapshot: ExecutionSnapshot, project: Project) => {
+      if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
+        const websiteRequirement = taskRequiresHtmlEntry(task, project)
+          ? 'Because this run is building a website/app/page, index.html is required.'
+          : 'If you are building a website/page, include index.html.';
+
+        return [
+          project.language === 'cz' ? 'Write summary and notes in Czech.' : 'Write summary and notes in English.',
+          'You are Builder. Create real project files, not a markdown plan.',
+          'Return JSON only. Do not wrap the response in markdown fences.',
+          'Prefer a minimal working static website bundle using index.html and optional style.css and script.js.',
+          'Never finish with only patch notes or prose when the user asked to build something.',
+          'JSON contract:',
+          '{"status":"success","summary":"short summary","files":[{"path":"index.html","content":"<!doctype html>..."}],"notes":["optional note"]}',
+          'Allowed file extensions only: .html, .css, .js, .json, .md',
+          'files must be an array of objects with path and content.',
+          'Execution is successful only if at least one file is present.',
+          websiteRequirement,
+          'Use only local generated files. Do not reference remote scripts, packages, build tools, or deployment steps.',
+          `Project prompt:\n${snapshot.projectPrompt}`,
+          `Approved debate summary:\n${snapshot.approvedDebateSummary}`,
+          `ZIP snapshots count: ${snapshot.zipSnapshots.length}`,
+          `Site snapshots count: ${snapshot.siteSnapshots.length}`,
+          `PDF snapshots count: ${snapshot.pdfTexts.length}`,
+          `Image inputs count: ${snapshot.imageInputs.length}`,
+        ].join('\n\n');
+      }
+
       const requiredSectionsByArtifact: Record<string, string[]> = {
         'execution-plan.md': [
           'Prioritized task list',
@@ -2012,11 +2140,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           'Affected modules/components/files',
           'Proposed structural changes',
           'Technical constraints and assumptions',
-        ],
-        'implementation-proposal.md': [
-          'Concrete proposed file changes',
-          'New files/components suggestions',
-          'Code-level recommendations grounded in ZIP/site inputs',
         ],
         'patch-plan.md': [
           'Ordered patch steps',
@@ -2943,9 +3066,56 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             return;
           }
 
+          if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
+            const parsedExecutionOutput = parseExecutionOutputBundle(response.text, task, project);
+            if (parsedExecutionOutput.error) {
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: response.text,
+                rawContent: response.text,
+                executionOutput: null,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'UPDATE_TASK',
+                projectId,
+                taskId,
+                patch: { producesArtifacts: updatedArtifacts },
+              });
+
+              failLiveTask(
+                task.agent,
+                `${task.agent}: structured execution output invalid for ${artifact.path}: ${parsedExecutionOutput.error}`
+              );
+              return;
+            }
+
+            const executionBundle = parsedExecutionOutput.bundle;
+            if (!executionBundle) {
+              failLiveTask(
+                task.agent,
+                `${task.agent}: structured execution output missing for ${artifact.path}`
+              );
+              return;
+            }
+
+            updatedArtifacts[index] = {
+              ...artifact,
+              content: executionBundle.summary,
+              rawContent: response.text,
+              executionOutput: executionBundle,
+              producedBy: task.agent,
+              generatedAt: new Date(),
+            };
+            continue;
+          }
+
           updatedArtifacts[index] = {
             ...artifact,
             content: response.text,
+            rawContent: response.text,
             producedBy: task.agent,
             generatedAt: new Date(),
           };
@@ -3248,7 +3418,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dependsOn: [architect.id],
         status: statusFor([architect.id]),
         producesArtifacts: [
-          { path: 'implementation-proposal.md', label: 'Implementation Proposal', kind: 'doc' },
+          { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
           { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
         ],
       });

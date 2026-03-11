@@ -47,11 +47,25 @@ export interface Agent {
 // Task types
 export type ArtifactKind = 'doc' | 'json' | 'report' | 'zip' | 'image';
 
+export interface ExecutionOutputFile {
+  path: string;
+  content: string;
+}
+
+export interface ExecutionOutputBundle {
+  status: 'success' | 'failed';
+  summary: string;
+  files: ExecutionOutputFile[];
+  notes: string[];
+}
+
 export interface TaskArtifact {
   path: string;
   label: string;
   kind: ArtifactKind;
   content?: string;
+  rawContent?: string;
+  executionOutput?: ExecutionOutputBundle | null;
   producedBy?: AgentName;
   generatedAt?: Date;
 }

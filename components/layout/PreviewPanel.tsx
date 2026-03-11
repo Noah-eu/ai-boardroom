@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import JSZip from 'jszip';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useApp } from '@/context/AppContext';
 import { translate, translateWithVars } from '@/i18n';
-import { ProjectAttachment, Task, TaskStatus } from '@/types';
+import { ExecutionOutputBundle, ExecutionOutputFile, ProjectAttachment, Task, TaskArtifact, TaskStatus } from '@/types';
 
 const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
 
@@ -89,6 +90,76 @@ function buildArtifactFallbackPreview(
 
 function formatTaskModelLabel(task: Task): string {
   return `${task.provider}/${task.model}`;
+}
+
+function normalizeBundleFilePath(filePath: string): string {
+  return filePath.replace(/^\.\//, '').replace(/^\/+/, '').trim();
+}
+
+function findBundleFile(bundle: ExecutionOutputBundle, targetPath: string): ExecutionOutputFile | null {
+  const normalizedTarget = normalizeBundleFilePath(targetPath);
+  return bundle.files.find((file) => normalizeBundleFilePath(file.path) === normalizedTarget) ?? null;
+}
+
+function getPreferredBundleFile(bundle: ExecutionOutputBundle): string | null {
+  const preferred = ['index.html', 'style.css', 'script.js'];
+  for (const path of preferred) {
+    if (findBundleFile(bundle, path)) {
+      return path;
+    }
+  }
+  return bundle.files[0]?.path ?? null;
+}
+
+function resolveBundlePreviewHtml(bundle: ExecutionOutputBundle): string | null {
+  const indexFile = findBundleFile(bundle, 'index.html');
+  if (!indexFile) return null;
+
+  const inlineLinkedStyles = indexFile.content.replace(
+    /<link\b([^>]*?)href=["']([^"']+)["']([^>]*)>/gi,
+    (match, _before, href) => {
+      const linkedFile = findBundleFile(bundle, href);
+      if (!linkedFile || !linkedFile.path.toLowerCase().endsWith('.css')) {
+        return /^(https?:)?\/\//i.test(href) ? '' : match;
+      }
+      return `<style data-source="${linkedFile.path}">\n${linkedFile.content}\n</style>`;
+    }
+  );
+
+  const inlineLinkedScripts = inlineLinkedStyles.replace(
+    /<script\b([^>]*?)src=["']([^"']+)["']([^>]*)><\/script>/gi,
+    (match, _before, src) => {
+      const linkedFile = findBundleFile(bundle, src);
+      if (!linkedFile || !linkedFile.path.toLowerCase().endsWith('.js')) {
+        return /^(https?:)?\/\//i.test(src) ? '' : match;
+      }
+      return `<script data-source="${linkedFile.path}">\n${linkedFile.content}\n<\/script>`;
+    }
+  );
+
+  let html = inlineLinkedScripts;
+  const hasInlineStyle = /<style\b/i.test(html);
+  const hasInlineScript = /<script\b/i.test(html);
+  const defaultStyle = findBundleFile(bundle, 'style.css');
+  const defaultScript = findBundleFile(bundle, 'script.js');
+
+  if (!hasInlineStyle && defaultStyle) {
+    html = html.includes('</head>')
+      ? html.replace('</head>', `<style data-source="${defaultStyle.path}">\n${defaultStyle.content}\n</style>\n</head>`)
+      : `<style data-source="${defaultStyle.path}">\n${defaultStyle.content}\n</style>\n${html}`;
+  }
+
+  if (!hasInlineScript && defaultScript) {
+    html = html.includes('</body>')
+      ? html.replace('</body>', `<script data-source="${defaultScript.path}">\n${defaultScript.content}\n<\/script>\n</body>`)
+      : `${html}\n<script data-source="${defaultScript.path}">\n${defaultScript.content}\n<\/script>`;
+  }
+
+  return html;
+}
+
+function isBundleMarkdownFile(filePath: string): boolean {
+  return filePath.toLowerCase().endsWith('.md');
 }
 
 function MarkdownArtifactView({ content, isMobile = false }: { content: string; isMobile?: boolean }) {
@@ -182,6 +253,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
   );
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedGeneratedFilePath, setSelectedGeneratedFilePath] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const executionTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
   const isMobile = mode === 'mobile';
@@ -301,12 +373,21 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     (artifact) => artifact.path === selectedArtifact
   );
   const selectedArtifactOwner = selectedArtifactMeta?.producedBy ?? selectedTask?.agent ?? null;
+  const selectedExecutionBundle = selectedArtifactMeta?.executionOutput ?? null;
   const selectedArtifactContent = useMemo(() => {
     if (!selectedArtifactMeta) return '';
     return selectedArtifactMeta.content?.trim()
       ? selectedArtifactMeta.content
       : buildArtifactFallbackPreview(selectedArtifactMeta, selectedTask);
   }, [selectedArtifactMeta, selectedTask]);
+  const selectedGeneratedFile = useMemo(() => {
+    if (!selectedExecutionBundle || !selectedGeneratedFilePath) return null;
+    return findBundleFile(selectedExecutionBundle, selectedGeneratedFilePath);
+  }, [selectedExecutionBundle, selectedGeneratedFilePath]);
+  const selectedArtifactPreviewHtml = useMemo(
+    () => (selectedExecutionBundle ? resolveBundlePreviewHtml(selectedExecutionBundle) : null),
+    [selectedExecutionBundle]
+  );
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -318,6 +399,41 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
       setSelectedArtifact(selectedTask.producesArtifacts[0].path);
     }
   }, [selectedArtifact, selectedTask]);
+
+  useEffect(() => {
+    if (!selectedExecutionBundle) {
+      setSelectedGeneratedFilePath(null);
+      return;
+    }
+    if (
+      !selectedGeneratedFilePath ||
+      !selectedExecutionBundle.files.some(
+        (file) => normalizeBundleFilePath(file.path) === normalizeBundleFilePath(selectedGeneratedFilePath)
+      )
+    ) {
+      setSelectedGeneratedFilePath(getPreferredBundleFile(selectedExecutionBundle));
+    }
+  }, [selectedExecutionBundle, selectedGeneratedFilePath]);
+
+  const downloadExecutionBundle = useCallback(async (artifact: TaskArtifact) => {
+    if (!artifact.executionOutput) return;
+
+    const zip = new JSZip();
+    artifact.executionOutput.files.forEach((file) => {
+      zip.file(normalizeBundleFilePath(file.path), file.content);
+    });
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const bundleName = normalizeBundleFilePath(artifact.path).replace(/\.[^.]+$/, '') || 'execution-output';
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${bundleName}.zip`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, []);
 
   if (!project) {
     return (
@@ -904,10 +1020,117 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       <span className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-200">
                         type: {selectedArtifactMeta.kind}
                       </span>
+                      {selectedExecutionBundle && (
+                        <button
+                          type="button"
+                          onClick={() => void downloadExecutionBundle(selectedArtifactMeta)}
+                          className="ml-auto rounded border border-blue-700/60 bg-blue-950/30 px-2 py-1 text-[10px] text-blue-100 transition-colors hover:border-blue-500"
+                        >
+                          Download ZIP
+                        </button>
+                      )}
                     </div>
 
                     <div className="mt-2 rounded border border-gray-800 bg-black/30 px-2 py-2">
-                      {isMarkdownArtifact(selectedArtifactMeta.path) ? (
+                      {selectedExecutionBundle ? (
+                        <div className="space-y-3">
+                          <div className="rounded border border-emerald-800/50 bg-emerald-950/20 px-2 py-2">
+                            <p className="text-[10px] uppercase tracking-wider text-emerald-300">Bundle status</p>
+                            <p className="mt-1 text-[11px] text-emerald-100">{selectedExecutionBundle.status}</p>
+                            <p className="mt-1 text-[11px] leading-relaxed text-gray-200">{selectedExecutionBundle.summary}</p>
+                            {selectedExecutionBundle.notes.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                {selectedExecutionBundle.notes.map((note) => (
+                                  <p key={note} className="text-[10px] text-gray-300">
+                                    - {note}
+                                  </p>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className={`grid gap-3 ${isMobile ? 'grid-cols-1' : 'grid-cols-[220px_minmax(0,1fr)]'}`}>
+                            <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-[10px] uppercase tracking-wider text-gray-400">Generated files</p>
+                                <span className="text-[10px] text-gray-500">{selectedExecutionBundle.files.length}</span>
+                              </div>
+                              <div className="mt-2 space-y-1">
+                                {selectedExecutionBundle.files.map((file) => {
+                                  const normalizedPath = normalizeBundleFilePath(file.path);
+                                  const isIndexFile = normalizedPath === 'index.html';
+                                  return (
+                                    <button
+                                      key={file.path}
+                                      type="button"
+                                      onClick={() => setSelectedGeneratedFilePath(file.path)}
+                                      className={`w-full rounded border px-2 py-1 text-left transition-colors ${
+                                        selectedGeneratedFilePath &&
+                                        normalizeBundleFilePath(selectedGeneratedFilePath) === normalizedPath
+                                          ? 'border-blue-700/60 bg-blue-950/30 text-blue-100'
+                                          : 'border-gray-800 bg-gray-900 text-gray-300 hover:border-blue-700/50'
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-2">
+                                        <span className="truncate text-[10px] font-medium">{file.path}</span>
+                                        {isIndexFile && (
+                                          <span className="rounded bg-emerald-950/40 px-1 py-0.5 text-[9px] text-emerald-200">
+                                            entry
+                                          </span>
+                                        )}
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            <div className="space-y-3">
+                              {selectedArtifactPreviewHtml && (
+                                <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-[10px] uppercase tracking-wider text-gray-400">Live preview</p>
+                                    <span className="text-[10px] text-gray-500">srcDoc</span>
+                                  </div>
+                                  <iframe
+                                    title="Generated app preview"
+                                    sandbox="allow-scripts"
+                                    srcDoc={selectedArtifactPreviewHtml}
+                                    className="mt-2 h-72 w-full rounded border border-gray-800 bg-white"
+                                  />
+                                </div>
+                              )}
+
+                              {selectedGeneratedFile && (
+                                <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-[10px] uppercase tracking-wider text-gray-400">File viewer</p>
+                                    <span className="text-[10px] text-gray-500">{selectedGeneratedFile.path}</span>
+                                  </div>
+                                  <div className="mt-2 rounded border border-gray-800 bg-black/40 px-2 py-2">
+                                    {isBundleMarkdownFile(selectedGeneratedFile.path) ? (
+                                      <MarkdownArtifactView content={selectedGeneratedFile.content} isMobile={isMobile} />
+                                    ) : (
+                                      <pre className="overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-relaxed text-gray-200 [overflow-wrap:anywhere]">
+                                        {selectedGeneratedFile.content}
+                                      </pre>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {selectedArtifactMeta.rawContent?.trim() && (
+                                <div className="rounded border border-gray-800 bg-gray-950/80 p-2">
+                                  <p className="text-[10px] uppercase tracking-wider text-gray-400">Raw model output</p>
+                                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded border border-gray-800 bg-black/40 px-2 py-2 text-[10px] leading-relaxed text-gray-300 [overflow-wrap:anywhere]">
+                                    {selectedArtifactMeta.rawContent}
+                                  </pre>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : isMarkdownArtifact(selectedArtifactMeta.path) ? (
                         <MarkdownArtifactView content={selectedArtifactContent} isMobile={isMobile} />
                       ) : (
                         <div className="space-y-2">
@@ -915,6 +1138,11 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                           <pre className="overflow-x-hidden whitespace-pre-wrap break-words text-[10px] leading-relaxed text-gray-200 [overflow-wrap:anywhere]">
                             {selectedArtifactContent}
                           </pre>
+                          {selectedArtifactMeta.rawContent?.trim() && (
+                            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded border border-gray-800 bg-black/40 px-2 py-2 text-[10px] leading-relaxed text-gray-300 [overflow-wrap:anywhere]">
+                              {selectedArtifactMeta.rawContent}
+                            </pre>
+                          )}
                         </div>
                       )}
                     </div>
