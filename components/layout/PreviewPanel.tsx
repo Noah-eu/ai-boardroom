@@ -539,6 +539,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
             onClick={() => {
               setSelectedTaskId(preferredResultSelection.taskId);
               setSelectedArtifact(preferredResultSelection.artifactPath);
+              setIsResultExpanded(true);
             }}
             className={`${isMobile ? 'text-sm px-3 py-2 rounded-xl' : 'text-[10px] px-2 py-1 rounded'} border border-emerald-700/60 bg-emerald-950/30 text-emerald-100 hover:border-emerald-500`}
           >
