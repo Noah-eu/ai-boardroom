@@ -178,6 +178,16 @@ function isBundleMarkdownFile(filePath: string): boolean {
 
 const INVOICE_EXPORT_COLUMNS: Array<{ key: keyof InvoiceSummaryRow; header: string }> = [
   { key: 'sourceFileName', header: 'sourceFileName' },
+  { key: 'invoiceNumber', header: 'invoiceNumber' },
+  { key: 'accommodationId', header: 'accommodationId' },
+  { key: 'currency', header: 'currency' },
+  { key: 'amountInInvoiceCurrency', header: 'amountInInvoiceCurrency' },
+  { key: 'amountCzk', header: 'amountCzk' },
+  { key: 'commission', header: 'commission' },
+  { key: 'paymentServiceFee', header: 'paymentServiceFee' },
+  { key: 'roomSales', header: 'roomSales' },
+  { key: 'supplierVatId', header: 'supplierVatId' },
+  { key: 'customerVatId', header: 'customerVatId' },
   { key: 'variableSymbol', header: 'variableSymbol' },
   { key: 'amount', header: 'amount' },
   { key: 'amountType', header: 'amountType' },
@@ -255,6 +265,7 @@ function normalizeAmountContext(row: Record<string, unknown>): {
   normalizedSign: -1 | 0 | 1 | null;
 } {
   const amountRaw =
+    row.amountInInvoiceCurrency ??
     row.amount ??
     row.total ??
     row.balance ??
@@ -321,6 +332,26 @@ function extractInvoiceRows(root: Record<string, unknown>): InvoiceSummaryRow[] 
       return {
         sourceFileName:
           toStringOrNull(row.sourceFileName) ?? toStringOrNull(row.sourceTitle) ?? toStringOrNull(row.fileName),
+        invoiceNumber:
+          toStringOrNull(row.invoiceNumber) ?? toStringOrNull(row.documentNumber) ?? toStringOrNull(row.number),
+        accommodationId:
+          toStringOrNull(row.accommodationId) ??
+          toStringOrNull(row.propertyId) ??
+          toStringOrNull(row.identificationNumber),
+        currency: toStringOrNull(row.currency),
+        amountInInvoiceCurrency:
+          toNumberOrNull(row.amountInInvoiceCurrency) ??
+          toNumberOrNull(row.totalPayableAmountInInvoiceCurrency) ??
+          toNumberOrNull(row.totalPayable),
+        amountCzk: toNumberOrNull(row.amountCzk) ?? toNumberOrNull(row.totalPayableAmountCzk),
+        commission: toNumberOrNull(row.commission),
+        paymentServiceFee:
+          toNumberOrNull(row.paymentServiceFee) ?? toNumberOrNull(row.paymentFee),
+        roomSales: toNumberOrNull(row.roomSales),
+        supplierVatId:
+          toStringOrNull(row.supplierVatId) ?? toStringOrNull(row.supplierVat) ?? toStringOrNull(row.vendorVatId),
+        customerVatId:
+          toStringOrNull(row.customerVatId) ?? toStringOrNull(row.buyerVatId) ?? toStringOrNull(row.vatId),
         variableSymbol:
           toStringOrNull(row.variableSymbol) ??
           toStringOrNull(row.varSymbol) ??
@@ -379,7 +410,6 @@ function parseInvoiceSummaryResult(raw: string): InvoiceSummaryResult | null {
   if (!root) return null;
 
   const rows = extractInvoiceRows(root);
-  if (rows.length === 0) return null;
 
   const variableSymbols = rows
     .map((row) => row.variableSymbol)
@@ -410,10 +440,58 @@ function parseInvoiceSummaryResult(raw: string): InvoiceSummaryResult | null {
 
   const summaryRoot = toRecord(root.summary) ?? root;
   const rootWarnings = extractStringArray(summaryRoot.warnings ?? root.warnings);
+  const hasInvoiceSignal =
+    rows.length > 0 ||
+    rootWarnings.length > 0 ||
+    [
+      'invoiceCount',
+      'totalOverpayment',
+      'totalUnderpayment',
+      'netTotal',
+      'duplicateVariableSymbols',
+      'filesProcessed',
+      'filesFailed',
+      'vatNote',
+    ].some((key) => key in summaryRoot || key in root);
+  if (!hasInvoiceSignal) return null;
+
   const rowWarnings = rows
     .map((row) => row.extractionWarning)
     .filter((warning): warning is string => Boolean(warning));
-  const warnings = Array.from(new Set([...rootWarnings, ...rowWarnings]));
+  const completenessWarnings: string[] = [];
+  if (rows.length === 0) {
+    completenessWarnings.push('Extraction failed: no structured invoice rows were produced.');
+  }
+
+  const requiredKeys: Array<keyof InvoiceSummaryRow> = [
+    'invoiceNumber',
+    'issueDate',
+    'billingPeriod',
+    'dueDate',
+    'accommodationId',
+    'currency',
+    'amountInInvoiceCurrency',
+    'amountCzk',
+    'commission',
+    'paymentServiceFee',
+    'roomSales',
+  ];
+  const nearEmptyRows = rows.filter((row) => {
+    const populated = requiredKeys.filter((key) => {
+      const value = row[key];
+      if (typeof value === 'number') return Number.isFinite(value);
+      if (typeof value === 'string') return value.trim().length > 0;
+      return false;
+    }).length;
+    return populated <= 2;
+  }).length;
+  if (rows.length > 0 && nearEmptyRows === rows.length) {
+    completenessWarnings.push(
+      'Extraction failed: rows are nearly empty and required invoice/accounting fields are missing.'
+    );
+  }
+
+  const warnings = Array.from(new Set([...rootWarnings, ...rowWarnings, ...completenessWarnings]));
 
   const filesProcessed = Array.from(
     new Set([
@@ -457,7 +535,15 @@ function buildInvoiceRowsCsv(result: InvoiceSummaryResult): string {
   const lines = result.rows.map((row) =>
     INVOICE_EXPORT_COLUMNS.map((column) => {
       const value = row[column.key];
-      if (column.key === 'amount' || column.key === 'confidence') {
+      if (
+        column.key === 'amount' ||
+        column.key === 'amountInInvoiceCurrency' ||
+        column.key === 'amountCzk' ||
+        column.key === 'commission' ||
+        column.key === 'paymentServiceFee' ||
+        column.key === 'roomSales' ||
+        column.key === 'confidence'
+      ) {
         return toCsvCell(typeof value === 'number' ? value : null);
       }
       if (column.key === 'normalizedSign') {
@@ -583,6 +669,14 @@ function InvoiceSummaryView({
           <thead className="bg-gray-900/80 text-[10px] uppercase tracking-wider text-gray-400">
             <tr>
               <th className="px-2 py-1.5">Source</th>
+              <th className="px-2 py-1.5">Invoice no.</th>
+              <th className="px-2 py-1.5">Accommodation ID</th>
+              <th className="px-2 py-1.5">Currency</th>
+              <th className="px-2 py-1.5">Payable (inv ccy)</th>
+              <th className="px-2 py-1.5">Payable (CZK)</th>
+              <th className="px-2 py-1.5">Commission</th>
+              <th className="px-2 py-1.5">Payment fee</th>
+              <th className="px-2 py-1.5">Room sales</th>
               <th className="px-2 py-1.5">Variable symbol</th>
               <th className="px-2 py-1.5">Amount</th>
               <th className="px-2 py-1.5">Type</th>
@@ -590,6 +684,8 @@ function InvoiceSummaryView({
               <th className="px-2 py-1.5">Issue date</th>
               <th className="px-2 py-1.5">Due date</th>
               <th className="px-2 py-1.5">Supplier</th>
+              <th className="px-2 py-1.5">Supplier VAT</th>
+              <th className="px-2 py-1.5">Customer VAT</th>
               <th className="px-2 py-1.5">Supply point</th>
               <th className="px-2 py-1.5">Warnings / note</th>
             </tr>
@@ -605,6 +701,20 @@ function InvoiceSummaryView({
               return (
                 <tr key={`${row.sourceFileName ?? 'row'}-${row.variableSymbol ?? 'na'}-${index}`}>
                   <td className="px-2 py-1.5 align-top">{row.sourceFileName ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.invoiceNumber ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.accommodationId ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.currency ?? '-'}</td>
+                  <td className={`px-2 py-1.5 align-top ${amountClass}`}>
+                    {typeof row.amountInInvoiceCurrency === 'number' ? row.amountInInvoiceCurrency : '-'}
+                  </td>
+                  <td className="px-2 py-1.5 align-top">
+                    {typeof row.amountCzk === 'number' ? formatCzk(row.amountCzk) : '-'}
+                  </td>
+                  <td className="px-2 py-1.5 align-top">{typeof row.commission === 'number' ? row.commission : '-'}</td>
+                  <td className="px-2 py-1.5 align-top">
+                    {typeof row.paymentServiceFee === 'number' ? row.paymentServiceFee : '-'}
+                  </td>
+                  <td className="px-2 py-1.5 align-top">{typeof row.roomSales === 'number' ? row.roomSales : '-'}</td>
                   <td className="px-2 py-1.5 align-top">{row.variableSymbol ?? '-'}</td>
                   <td className={`px-2 py-1.5 align-top ${amountClass}`}>
                     {typeof row.amount === 'number' ? formatCzk(row.amount) : '-'}
@@ -614,6 +724,8 @@ function InvoiceSummaryView({
                   <td className="px-2 py-1.5 align-top">{row.issueDate ?? '-'}</td>
                   <td className="px-2 py-1.5 align-top">{row.dueDate ?? '-'}</td>
                   <td className="px-2 py-1.5 align-top">{row.supplierName ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.supplierVatId ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.customerVatId ?? '-'}</td>
                   <td className="px-2 py-1.5 align-top">{row.supplyPoint ?? '-'}</td>
                   <td className="px-2 py-1.5 align-top">
                     {row.extractionWarning && (

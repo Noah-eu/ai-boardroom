@@ -518,9 +518,17 @@ function buildSnapshotAttachmentContext(
     title: entry.title,
     kind: 'zip' as const,
     source: entry.source,
-    text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
-      .map((file) => `${file.path}\n${file.content}`)
-      .join('\n\n')}`,
+    text: [
+      `File tree:\n${entry.fileTree.join('\n')}`,
+      `Key files:\n${entry.keyFiles.map((file) => `${file.path}\n${file.content}`).join('\n\n')}`,
+      entry.pdfFiles?.length
+        ? `PDF extraction:\n${entry.pdfFiles
+            .map((file) => `- ${file.path}: ${file.status}${file.error ? ` (${file.error})` : ''}`)
+            .join('\n')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
   }));
 
   const siteSections = snapshot.siteSnapshots.map((entry) => ({
@@ -615,6 +623,268 @@ function toStringValue(value: unknown): string | null {
   return null;
 }
 
+const REQUIRED_INVOICE_FIELDS_FOR_QUALITY: Array<{ key: string; label: string }> = [
+  { key: 'sourceFileName', label: 'sourceFileName' },
+  { key: 'invoiceNumber', label: 'invoiceNumber' },
+  { key: 'issueDate', label: 'issueDate' },
+  { key: 'billingPeriod', label: 'billingPeriod' },
+  { key: 'dueDate', label: 'dueDate' },
+  { key: 'accommodationId', label: 'accommodationId' },
+  { key: 'currency', label: 'currency' },
+  { key: 'amountInInvoiceCurrency', label: 'amountInInvoiceCurrency' },
+  { key: 'amountCzk', label: 'amountCzk' },
+  { key: 'commission', label: 'commission' },
+  { key: 'paymentServiceFee', label: 'paymentServiceFee' },
+  { key: 'roomSales', label: 'roomSales' },
+];
+
+function normalizeBookingDate(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
+  if (!match) return trimmed;
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const yearRaw = Number(match[3]);
+  if (!Number.isFinite(day) || !Number.isFinite(month) || !Number.isFinite(yearRaw)) return trimmed;
+  const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+  if (day <= 0 || day > 31 || month <= 0 || month > 12) return trimmed;
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function firstRegexCapture(text: string, patterns: RegExp[]): string | null {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const value = match?.[1]?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function inferCurrencyFromText(value: string | null): string | null {
+  if (!value) return null;
+  const match = value.match(/\b(CZK|EUR|USD|GBP|PLN|HUF)\b/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function extractBookingInvoiceRowFromPdf(entry: PdfSnapshotInput): BuilderExtractionRow | null {
+  const text = entry.text ?? '';
+  if (!text.trim()) return null;
+
+  const normalizedText = text.replace(/\r/g, '');
+  const likelyBooking = /booking\.com|booking\s*\.\s*com/i.test(normalizedText);
+  const likelyInvoice = /[Cc]islo\s+faktury|[Čč]íslo\s+faktury|invoice\s+number|[Oo]bdob[ií]|[Pp]rovize/.test(normalizedText);
+  if (!likelyBooking && !likelyInvoice) return null;
+
+  const sourceFileName = entry.title;
+  const invoiceNumber = firstRegexCapture(normalizedText, [
+    /(?:[Čč]íslo|[Cc]islo)\s*faktury\s*[:\-]?\s*([^\n]+)/i,
+    /invoice\s*number\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const issueDateRaw = firstRegexCapture(normalizedText, [
+    /\b[Dd]atum\b\s*[:\-]?\s*([^\n]+)/i,
+    /issue\s*date\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const billingPeriodRaw = firstRegexCapture(normalizedText, [
+    /[Oo]bdob[ií]\s*[:\-]?\s*([^\n]+)/i,
+    /billing\s*period\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const dueDateRaw = firstRegexCapture(normalizedText, [
+    /[Pp]latba\s+splatn[áa]\s*[:\-]?\s*([^\n]+)/i,
+    /datum\s+splatnosti\s*[:\-]?\s*([^\n]+)/i,
+    /due\s*date\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const accommodationId = firstRegexCapture(normalizedText, [
+    /identifika[cč]n[ií]\s+[cč][ií]slo\s+ubytov[áa]n[ií]\s*[:\-]?\s*([^\n]+)/i,
+    /accommodation\s*(?:\/|or\s+)?property\s*id\s*[:\-]?\s*([^\n]+)/i,
+    /property\s*id\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+
+  const totalPayableRaw = firstRegexCapture(normalizedText, [
+    /celkov[áa]\s+[cč][áa]stka\s+k\s+zaplacen[ií]\s*[:\-]?\s*([^\n]+)/i,
+    /total\s+payable\s+amount\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const amountCzkRaw = firstRegexCapture(normalizedText, [
+    /celkov[áa]\s+[cč][áa]stka\s+k\s+zaplacen[ií]\s+v\s+czk\s*[:\-]?\s*([^\n]+)/i,
+    /total\s+payable\s+amount\s+in\s+czk\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const commissionRaw = firstRegexCapture(normalizedText, [
+    /\b[Pp]rovize\b\s*[:\-]?\s*([^\n]+)/i,
+    /\b[Cc]ommission\b\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const paymentServiceFeeRaw = firstRegexCapture(normalizedText, [
+    /poplatek\s+za\s+platebn[ií]\s+slu[zž]by\s*[:\-]?\s*([^\n]+)/i,
+    /payment\s+service\s+fee\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const roomSalesRaw = firstRegexCapture(normalizedText, [
+    /prodej\s+pokoj[uů]\s*[:\-]?\s*([^\n]+)/i,
+    /room\s+sales\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const supplierName = firstRegexCapture(normalizedText, [
+    /dodavatel\s*[:\-]?\s*([^\n]+)/i,
+    /supplier\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const supplierVatId = firstRegexCapture(normalizedText, [
+    /(?:DI[CČ]|VAT\s*ID)\s+dodavatele\s*[:\-]?\s*([^\n]+)/i,
+    /supplier\s+vat\s*id\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const customerVatId = firstRegexCapture(normalizedText, [
+    /(?:DI[CČ]|VAT\s*ID)\s+odb[eě]ratele\s*[:\-]?\s*([^\n]+)/i,
+    /customer\s+vat\s*id\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+  const variableSymbol = firstRegexCapture(normalizedText, [
+    /variabiln[ií]\s+symbol\s*[:\-]?\s*([^\n]+)/i,
+    /variable\s+symbol\s*[:\-]?\s*([^\n]+)/i,
+  ]);
+
+  const currency =
+    inferCurrencyFromText(totalPayableRaw) ??
+    firstRegexCapture(normalizedText, [
+      /\b[Mm][eě]na\b\s*[:\-]?\s*([^\n]+)/i,
+      /\bcurrency\b\s*[:\-]?\s*([^\n]+)/i,
+    ]) ??
+    null;
+
+  const amountInInvoiceCurrency = toNumber(totalPayableRaw);
+  const amountCzk = toNumber(amountCzkRaw);
+  const commission = toNumber(commissionRaw);
+  const paymentServiceFee = toNumber(paymentServiceFeeRaw);
+  const roomSales = toNumber(roomSalesRaw);
+
+  const billingPeriod = billingPeriodRaw
+    ? billingPeriodRaw.replace(/\s{2,}/g, ' ').trim()
+    : null;
+  const issueDate = normalizeBookingDate(issueDateRaw);
+  const dueDate = normalizeBookingDate(dueDateRaw);
+
+  const keyFactCount = [
+    invoiceNumber,
+    issueDate,
+    billingPeriod,
+    dueDate,
+    accommodationId,
+    currency,
+    amountInInvoiceCurrency,
+    amountCzk,
+    commission,
+    paymentServiceFee,
+    roomSales,
+  ].filter((value) => value !== null && value !== '').length;
+
+  const rowValues: Record<string, unknown> = {
+    sourceFileName,
+    invoiceNumber,
+    issueDate,
+    billingPeriod,
+    dueDate,
+    accommodationId,
+    currency: currency ? currency.toUpperCase() : null,
+    amountInInvoiceCurrency,
+    amountCzk,
+    commission,
+    paymentServiceFee,
+    roomSales,
+    supplierName,
+    supplierVatId,
+    customerVatId,
+    variableSymbol,
+  };
+
+  if (keyFactCount === 0) {
+    rowValues.extractionWarning =
+      'Extraction failed: Booking invoice labels were detected but required fields could not be parsed from PDF text.';
+    rowValues.extractionStatus = 'extraction_failed';
+  }
+
+  return {
+    sourceAttachmentId: entry.attachmentId,
+    sourceTitle: entry.title,
+    values: rowValues,
+  };
+}
+
+function annotateInvoiceRowQuality(row: BuilderExtractionRow): BuilderExtractionRow {
+  const missingFields = REQUIRED_INVOICE_FIELDS_FOR_QUALITY.filter(({ key }) => {
+    const value = row.values[key];
+    if (typeof value === 'number') return !Number.isFinite(value);
+    if (typeof value === 'string') return value.trim().length === 0;
+    return value === null || value === undefined;
+  }).map(({ label }) => label);
+
+  const existingWarning = toStringValue(row.values.extractionWarning) ?? null;
+  let qualityWarning: string | null = null;
+  let extractionStatus = 'ok';
+
+  if (missingFields.length === REQUIRED_INVOICE_FIELDS_FOR_QUALITY.length) {
+    extractionStatus = 'extraction_failed';
+    qualityWarning =
+      'Extraction failed: no required invoice/accounting fields were extracted for this source file.';
+  } else if (missingFields.length > 0) {
+    extractionStatus = 'fields_missing';
+    qualityWarning = `Missing required fields: ${missingFields.join(', ')}`;
+  }
+
+  const combinedWarning = [existingWarning, qualityWarning].filter(Boolean).join(' | ');
+  return {
+    ...row,
+    values: {
+      ...row.values,
+      extractionStatus,
+      extractionWarning: combinedWarning || null,
+    },
+  };
+}
+
+function mergeBookingFallbackRows(
+  existingRows: BuilderExtractionRow[],
+  pdfChunk: PdfSnapshotInput[]
+): BuilderExtractionRow[] {
+  const mergedRows: BuilderExtractionRow[] = existingRows.map((row): BuilderExtractionRow => ({
+    ...row,
+    values: {
+      ...row.values,
+      sourceFileName: row.values.sourceFileName ?? row.sourceTitle,
+    },
+  }));
+
+  pdfChunk.forEach((entry) => {
+    const fallbackRow = extractBookingInvoiceRowFromPdf(entry);
+    if (!fallbackRow) return;
+
+    const existingIndex = mergedRows.findIndex((row) => row.sourceAttachmentId === entry.attachmentId);
+    if (existingIndex === -1) {
+      mergedRows.push(fallbackRow);
+      return;
+    }
+
+    const current = mergedRows[existingIndex];
+    const mergedValues: Record<string, unknown> = { ...current.values };
+    Object.entries(fallbackRow.values).forEach(([key, value]) => {
+      const currentValue = mergedValues[key];
+      const isCurrentMissing =
+        currentValue === null ||
+        currentValue === undefined ||
+        (typeof currentValue === 'string' && currentValue.trim() === '');
+      const isIncomingPresent =
+        value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '');
+      if (isCurrentMissing && isIncomingPresent) {
+        mergedValues[key] = value;
+      }
+    });
+
+    mergedRows[existingIndex] = {
+      ...current,
+      values: mergedValues,
+    };
+  });
+
+  return mergedRows.map((row) => annotateInvoiceRowQuality(row));
+}
+
 function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
   invoiceCount: number;
   uniqueVariableSymbolCount: number;
@@ -644,6 +914,7 @@ function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
 
   const normalized = rows.map((row) => {
     const amount =
+      toNumber(row.values.amountInInvoiceCurrency) ??
       toNumber(row.values.amount) ??
       toNumber(row.values.total) ??
       toNumber(row.values.balance) ??
@@ -693,6 +964,13 @@ function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
     )
     .filter((value): value is string => Boolean(value));
 
+  const failedRows = rows.filter((row) => toStringValue(row.values.extractionStatus) === 'extraction_failed').length;
+  if (rows.length === 0) {
+    warnings.push('Extraction failed: no structured rows were extracted from the provided PDF files.');
+  } else if (failedRows === rows.length) {
+    warnings.push('Extraction failed: all extracted rows are missing required invoice/accounting fields.');
+  }
+
   const vatNote =
     rows
       .map((row) =>
@@ -702,6 +980,10 @@ function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
       .find((value) => Boolean(value && /\b(vat|dph)\b/i.test(value))) ?? null;
 
   const filesProcessed = Array.from(new Set(rows.map((row) => row.sourceTitle).filter(Boolean)));
+  const filesFailed = rows
+    .filter((row) => toStringValue(row.values.extractionStatus) === 'extraction_failed')
+    .map((row) => row.sourceTitle)
+    .filter((value): value is string => Boolean(value));
 
   return {
     invoiceCount: rows.length,
@@ -714,7 +996,7 @@ function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
     warnings: Array.from(new Set(warnings)),
     duplicateVariableSymbols,
     filesProcessed,
-    filesFailed: [],
+    filesFailed: Array.from(new Set(filesFailed)),
   };
 }
 
@@ -798,7 +1080,7 @@ function buildBuilderChunkPass1Prompt(
     `Pass 1/2: Extract required invoice fields only from PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
     'Return JSON only. No markdown fences or prose.',
     'Contract:',
-    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"...","billingPeriod":"...","dueDate":"...","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"variableSymbol":"..."}]}]}',
+    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"...","billingPeriod":"...","dueDate":"...","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"supplierName":"...","supplierVatId":"...","customerVatId":"...","variableSymbol":"..."}]}]}',
     'Rules:',
     '- Use only sourceAttachmentId/sourceTitle listed below.',
     '- Keep source mapping exact per row.',
@@ -806,6 +1088,19 @@ function buildBuilderChunkPass1Prompt(
     '- Do not include data from files outside this chunk.',
     '- Pass 1 required fields only; no summaries, no analysis, no prose.',
     '- Keep missing fields null/empty; never fabricate values.',
+    '- Booking.com invoices: prefer direct label mapping instead of generic guessing.',
+    '- Booking.com label map to target fields:',
+    '  Číslo faktury -> invoiceNumber',
+    '  Datum -> issueDate',
+    '  Období -> billingPeriod',
+    '  Platba splatná -> dueDate',
+    '  Identifikační číslo ubytování -> accommodationId',
+    '  Celková částka k zaplacení -> amountInInvoiceCurrency / currency',
+    '  Celková částka k zaplacení v CZK -> amountCzk',
+    '  Prodej pokojů -> roomSales',
+    '  Provize -> commission',
+    '  Poplatek za platební služby -> paymentServiceFee',
+    '- If extraction failed for a document, keep null values and set extractionWarning briefly.',
     `Project prompt:\n${shorten(snapshot.projectPrompt, 600)}`,
     `Chunk files:\n${pdfChunk.map((entry) => `- ${entry.attachmentId} | ${entry.title}`).join('\n')}`,
   ].join('\n\n');
@@ -825,11 +1120,11 @@ function buildBuilderChunkPass2Prompt(
     `Pass 2/2: Optional enrichment only for PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
     'Return JSON only. No markdown fences or prose.',
     'Contract:',
-    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"invoiceNumber":"...","issueDate":"...","variableSymbol":"...","currency":"...","amountInInvoiceCurrency":0,"supplierName":"...","supplyPoint":"...","note":"...","extractionWarning":"...","confidence":0.0}]}]}',
+    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"invoiceNumber":"...","issueDate":"...","variableSymbol":"...","currency":"...","amountInInvoiceCurrency":0,"supplierName":"...","supplierVatId":"...","customerVatId":"...","supplyPoint":"...","note":"...","extractionWarning":"...","confidence":0.0}]}]}',
     'Rules:',
     '- Use only sourceAttachmentId/sourceTitle listed below.',
     '- Keep source mapping exact per row.',
-    '- Enrich only optional fields (supplierName, supplyPoint/address, note, extractionWarning, confidence).',
+    '- Enrich only optional fields (supplierName, supplierVatId, customerVatId, supplyPoint/address, note, extractionWarning, confidence).',
     '- Keep pass-1 identifier fields in each row so rows can be merged.',
     '- If optional fields are not found, keep them null/empty.',
     '- Do not add summaries or analytics.',
@@ -2749,6 +3044,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 .map((file) => `${file.path}\n${file.content}`)
                 .join('\n\n')}`
             : '',
+          ingestion.zipPdfFiles?.length
+            ? `PDF extraction:\n${ingestion.zipPdfFiles
+                .map((file) => `- ${file.path}: ${file.status}${file.error ? ` (${file.error})` : ''}`)
+                .join('\n')}`
+            : '',
         ]
           .filter(Boolean)
           .join('\n\n');
@@ -2796,6 +3096,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const siteSnapshots: ExecutionSnapshot['siteSnapshots'] = [];
     const missingInputNotes: string[] = [];
 
+    const buildZipInnerPdfAttachmentId = (zipAttachmentId: string, innerPath: string): string => {
+      return `${zipAttachmentId}::${innerPath.toLowerCase()}`;
+    };
+
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
@@ -2830,6 +3134,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       if (attachment.kind === 'zip') {
         if (ingestion?.zipFileTree?.length) {
+          const zipPdfFiles = (ingestion.zipPdfFiles ?? []).map((file) => ({
+            path: file.path,
+            status: file.status,
+            pageCount: file.pageCount,
+            extractedText: file.extractedText ? shorten(file.extractedText, 24_000) : undefined,
+            error: file.error,
+          }));
+
+          zipPdfFiles.forEach((innerPdf) => {
+            if (innerPdf.status === 'ingested' && innerPdf.extractedText?.trim()) {
+              pdfTexts.push({
+                attachmentId: buildZipInnerPdfAttachmentId(attachment.id, innerPdf.path),
+                title: `${attachment.title} :: ${innerPdf.path}`,
+                source,
+                text: innerPdf.extractedText,
+              });
+            } else {
+              missingInputNotes.push(
+                `ZIP PDF text unavailable: ${attachment.title} -> ${innerPdf.path}` +
+                  (innerPdf.error ? ` (${innerPdf.error})` : '')
+              );
+            }
+          });
+
           zipSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -2839,6 +3167,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               path: file.path,
               content: shorten(file.content, 3_500),
             })),
+            pdfFiles: zipPdfFiles,
           });
         } else {
           missingInputNotes.push(`ZIP tree missing or unreadable: ${attachment.title}`);
@@ -3661,8 +3990,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           'Extract required invoice fields only. No summaries, no analysis.',
           'Return JSON only. No markdown fences or prose.',
           'Contract:',
-          '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"...","billingPeriod":"...","dueDate":"...","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"variableSymbol":"..."}]}]}',
+          '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"...","billingPeriod":"...","dueDate":"...","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"supplierName":"...","supplierVatId":"...","customerVatId":"...","variableSymbol":"...","extractionWarning":"..."}]}]}',
           'Rules: keep source mapping exact; keep missing values null/empty; no fabricated values.',
+          'Booking.com invoices: map values from explicit labels whenever present (Číslo faktury, Datum, Období, Platba splatná, Identifikační číslo ubytování, Celková částka k zaplacení, Prodej pokojů, Provize, Poplatek za platební služby).',
+          'If required fields cannot be extracted, keep nulls and include extractionWarning with missing fields.',
           `Project prompt:\n${shorten(snapshot.projectPrompt, 900)}`,
         ].join('\n\n');
       }
@@ -3798,6 +4129,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           keyFiles: entry.keyFiles.slice(0, 8).map((file) => ({
             path: file.path,
             excerpt: shorten(file.content, 800),
+          })),
+          pdfFiles: (entry.pdfFiles ?? []).slice(0, 20).map((file) => ({
+            path: file.path,
+            status: file.status,
+            error: file.error,
+            excerpt: shorten(file.extractedText, 800),
           })),
         })),
         siteSummary: snapshot.siteSnapshots.map((entry) => ({
@@ -4798,6 +5135,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               let pass1RowsForChunk: BuilderExtractionRow[] = [];
               try {
                 pass1RowsForChunk = parseBuilderChunkRows(pass1ChunkResponse.text, pdfChunk);
+                pass1RowsForChunk = mergeBookingFallbackRows(pass1RowsForChunk, pdfChunk);
                 completedChunkSummaries.push({
                   pass: 'pass1',
                   chunk: chunkIndex + 1,
@@ -4887,7 +5225,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     files: chunkFiles,
                     rows: pass2RowsForChunk.length,
                   });
-                  mergedChunkRows = mergeChunkPassRows(pass1RowsForChunk, pass2RowsForChunk);
+                  mergedChunkRows = mergeBookingFallbackRows(
+                    mergeChunkPassRows(pass1RowsForChunk, pass2RowsForChunk),
+                    pdfChunk
+                  );
                 } catch (error) {
                   const parseDetail = error instanceof Error ? error.message : 'Unknown chunk parse failure';
                   persistPartialChunkDebug('pass2', chunkIndex + 1, chunkFiles, parseDetail);

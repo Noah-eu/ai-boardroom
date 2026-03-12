@@ -90,6 +90,16 @@ export type InvoiceAmountType = 'overpayment' | 'underpayment' | 'unknown';
 
 export interface InvoiceSummaryRow {
   sourceFileName: string | null;
+  invoiceNumber: string | null;
+  accommodationId: string | null;
+  currency: string | null;
+  amountInInvoiceCurrency: number | null;
+  amountCzk: number | null;
+  commission: number | null;
+  paymentServiceFee: number | null;
+  roomSales: number | null;
+  supplierVatId: string | null;
+  customerVatId: string | null;
   variableSymbol: string | null;
   amount: number | null;
   amountType: InvoiceAmountType;
@@ -236,6 +246,14 @@ export interface AttachmentIngestion {
   }>;
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
+  zipPdfFiles?: Array<{
+    path: string;
+    status: 'ingested' | 'failed' | 'text_unavailable';
+    pageCount?: number;
+    extractedText?: string;
+    excerpt?: string;
+    error?: string;
+  }>;
   error?: string;
   includedInContext?: boolean;
   linkedToAi?: boolean;
@@ -369,6 +387,13 @@ export interface ExecutionSnapshot {
     source: 'project' | 'message';
     fileTree: string[];
     keyFiles: Array<{ path: string; content: string }>;
+    pdfFiles: Array<{
+      path: string;
+      status: 'ingested' | 'failed' | 'text_unavailable';
+      pageCount?: number;
+      extractedText?: string;
+      error?: string;
+    }>;
   }>;
   siteSnapshots: Array<{
     attachmentId: string;
