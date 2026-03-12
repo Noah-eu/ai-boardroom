@@ -175,7 +175,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
   return (
     <form
       onSubmit={handleSubmit}
-      className={`${isMobile ? 'mx-5 mb-5 max-h-[calc(100vh-140px)] rounded-[1.75rem] p-5' : 'mx-3 mb-3 max-h-[calc(100vh-220px)] rounded-lg p-3'} overflow-y-auto overflow-x-hidden border border-gray-700 bg-gray-900`}
+      className={`${isMobile ? 'mx-5 mb-6 rounded-[1.75rem] p-5 pb-8' : 'mx-3 mb-3 max-h-[calc(100vh-220px)] rounded-lg p-3'} ${isMobile ? '' : 'overflow-y-auto'} overflow-x-hidden border border-gray-700 bg-gray-900`}
     >
       <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
       <input
@@ -349,7 +349,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
         <input ref={zipInputRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" className="hidden" onChange={(event) => onFilePicked(event, 'zip')} />
       </div>
 
-      <div className={`flex ${isMobile ? 'gap-4' : 'gap-2'}`}>
+      <div className={`flex ${isMobile ? 'gap-4' : 'gap-2'}`} style={isMobile ? { paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' } : undefined}>
         <button
           type="submit"
           disabled={!name.trim() || !description.trim()}
@@ -563,87 +563,93 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
         </button>
       </div>
 
-      {/* New project form */}
-      {showForm && (
-        <NewProjectForm
-          onSubmit={handleCreate}
-          onCancel={() => setShowForm(false)}
-          t={t}
-          defaultLanguage={language}
-          defaultModel={buildInfo?.openaiModelDefault ?? 'gpt-4.1-mini'}
-          isMobile={isMobile}
-        />
-      )}
-
-      {/* Project list */}
-      <div className="flex-1 overflow-y-auto">
-        {state.projects.length === 0 ? (
-          <div className="px-6 py-10 text-center">
-            <p className="mb-5 text-base text-gray-400">{t('sidebar.noProjects')}</p>
-            <button
-              onClick={() => setShowForm(true)}
-              className="rounded-[1.25rem] bg-blue-700 px-5 py-4 text-lg text-white transition-colors hover:bg-blue-600"
-            >
-              {t('sidebar.createFirst')}
-            </button>
-          </div>
-        ) : (
-          <div className="py-3">
-            {state.projects.map((project) => {
-              const isSelected = project.id === state.selectedProjectId;
-              const sCfg = statusConfig[project.status];
-              const statusLabel = t(`status.project.${project.status}` as const);
-              return (
+      {showForm ? (
+        <div
+          className={`min-h-0 flex-1 ${isMobile ? 'overflow-y-auto overscroll-contain' : ''}`}
+          style={isMobile ? { paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' } : undefined}
+        >
+          <NewProjectForm
+            onSubmit={handleCreate}
+            onCancel={() => setShowForm(false)}
+            t={t}
+            defaultLanguage={language}
+            defaultModel={buildInfo?.openaiModelDefault ?? 'gpt-4.1-mini'}
+            isMobile={isMobile}
+          />
+        </div>
+      ) : (
+        <>
+          {/* Project list */}
+          <div className="flex-1 overflow-y-auto">
+            {state.projects.length === 0 ? (
+              <div className="px-6 py-10 text-center">
+                <p className="mb-5 text-base text-gray-400">{t('sidebar.noProjects')}</p>
                 <button
-                  key={project.id}
-                  onClick={() => {
-                    selectProject(project.id);
-                    onProjectActivated?.();
-                  }}
-                  className={`w-full text-left transition-colors ${isMobile ? 'px-6 py-5' : 'px-3 py-2.5'} ${
-                    isSelected
-                      ? 'bg-blue-600/20 border-r-2 border-blue-500'
-                      : 'hover:bg-gray-800/60'
-                  }`}
+                  onClick={() => setShowForm(true)}
+                  className="rounded-[1.25rem] bg-blue-700 px-5 py-4 text-lg text-white transition-colors hover:bg-blue-600"
                 >
-                  <div className="flex items-start gap-4">
-                    <span className={`mt-2.5 h-2.5 w-2.5 rounded-full flex-shrink-0 ${sCfg.dot}`} />
-                    <div className="flex-1 min-w-0">
-                      <p
-                        className={`${isMobile ? 'text-base' : 'text-xs'} font-medium truncate ${
-                          isSelected ? 'text-blue-300' : 'text-gray-300'
-                        }`}
-                      >
-                        {project.name}
-                      </p>
-                      <p className={`mt-2 ${isMobile ? 'text-sm' : 'text-[10px]'} ${sCfg.color}`}>{statusLabel}</p>
-                      <div className="mt-3 flex items-center gap-2">
-                        <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
-                          {project.language.toUpperCase()}
-                        </span>
-                        <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-cyan-900/60 bg-cyan-950/30 text-cyan-200`}>
-                          {project.model}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
+                  {t('sidebar.createFirst')}
                 </button>
-              );
-            })}
+              </div>
+            ) : (
+              <div className="py-3">
+                {state.projects.map((project) => {
+                  const isSelected = project.id === state.selectedProjectId;
+                  const sCfg = statusConfig[project.status];
+                  const statusLabel = t(`status.project.${project.status}` as const);
+                  return (
+                    <button
+                      key={project.id}
+                      onClick={() => {
+                        selectProject(project.id);
+                        onProjectActivated?.();
+                      }}
+                      className={`w-full text-left transition-colors ${isMobile ? 'px-6 py-5' : 'px-3 py-2.5'} ${
+                        isSelected
+                          ? 'bg-blue-600/20 border-r-2 border-blue-500'
+                          : 'hover:bg-gray-800/60'
+                      }`}
+                    >
+                      <div className="flex items-start gap-4">
+                        <span className={`mt-2.5 h-2.5 w-2.5 rounded-full flex-shrink-0 ${sCfg.dot}`} />
+                        <div className="flex-1 min-w-0">
+                          <p
+                            className={`${isMobile ? 'text-base' : 'text-xs'} font-medium truncate ${
+                              isSelected ? 'text-blue-300' : 'text-gray-300'
+                            }`}
+                          >
+                            {project.name}
+                          </p>
+                          <p className={`mt-2 ${isMobile ? 'text-sm' : 'text-[10px]'} ${sCfg.color}`}>{statusLabel}</p>
+                          <div className="mt-3 flex items-center gap-2">
+                            <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-gray-700 bg-gray-900 text-gray-300`}>
+                              {project.language.toUpperCase()}
+                            </span>
+                            <span className={`${isMobile ? 'text-sm px-3 py-1.5 rounded-xl' : 'text-[9px] px-1.5 py-0.5 rounded'} border border-cyan-900/60 bg-cyan-950/30 text-cyan-200`}>
+                              {project.model}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      <div
-        className={`flex-shrink-0 border-t border-gray-800 p-3 ${isMobile ? 'px-6 pt-5 pb-7' : ''}`}
-        style={isMobile ? { paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))' } : undefined}
-      >
-        {buildInfo && (
-          <p className="mt-2 text-center text-xs text-gray-500">
-            {buildInfo.branch} {buildInfo.commit}
-          </p>
-        )}
-      </div>
+          <div
+            className={`flex-shrink-0 border-t border-gray-800 p-3 ${isMobile ? 'px-6 pt-5 pb-7' : ''}`}
+            style={isMobile ? { paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))' } : undefined}
+          >
+            {buildInfo && (
+              <p className="mt-2 text-center text-xs text-gray-500">
+                {buildInfo.branch} {buildInfo.commit}
+              </p>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
