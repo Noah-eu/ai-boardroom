@@ -3,11 +3,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import JSZip from 'jszip';
+import * as XLSX from 'xlsx';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useApp } from '@/context/AppContext';
 import { translate, translateWithVars } from '@/i18n';
-import { ExecutionOutputBundle, ExecutionOutputFile, ProjectAttachment, Task, TaskArtifact, TaskStatus } from '@/types';
+import {
+  ExecutionOutputBundle,
+  ExecutionOutputFile,
+  InvoiceAmountType,
+  InvoiceSummaryResult,
+  InvoiceSummaryRow,
+  ProjectAttachment,
+  Task,
+  TaskArtifact,
+  TaskStatus,
+} from '@/types';
 
 const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
 
@@ -165,6 +176,308 @@ function isBundleMarkdownFile(filePath: string): boolean {
   return filePath.toLowerCase().endsWith('.md');
 }
 
+const INVOICE_EXPORT_COLUMNS: Array<{ key: keyof InvoiceSummaryRow; header: string }> = [
+  { key: 'sourceFileName', header: 'sourceFileName' },
+  { key: 'variableSymbol', header: 'variableSymbol' },
+  { key: 'amount', header: 'amount' },
+  { key: 'amountType', header: 'amountType' },
+  { key: 'normalizedSign', header: 'normalizedSign' },
+  { key: 'billingPeriod', header: 'billingPeriod' },
+  { key: 'issueDate', header: 'issueDate' },
+  { key: 'dueDate', header: 'dueDate' },
+  { key: 'supplierName', header: 'supplierName' },
+  { key: 'supplyPoint', header: 'supplyPoint' },
+  { key: 'note', header: 'note' },
+  { key: 'extractionWarning', header: 'extractionWarning' },
+  { key: 'confidence', header: 'confidence' },
+];
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function toStringOrNull(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/,/g, '.')
+    .replace(/[^0-9+\-.]/g, '');
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeAmountType(value: unknown): InvoiceAmountType {
+  const raw = toStringOrNull(value)?.toLowerCase() ?? '';
+  if (!raw) return 'unknown';
+  if (raw.includes('overpayment') || raw.includes('preplatek') || raw.includes('přeplatek')) return 'overpayment';
+  if (raw.includes('underpayment') || raw.includes('nedoplatek')) return 'underpayment';
+  return 'unknown';
+}
+
+function normalizeSign(value: unknown): -1 | 0 | 1 | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value > 0) return 1;
+    if (value < 0) return -1;
+    return 0;
+  }
+
+  const normalized = toStringOrNull(value)?.toLowerCase() ?? null;
+  if (!normalized) return null;
+  if (['1', '+1', 'plus', 'positive', 'credit'].includes(normalized)) return 1;
+  if (['-1', 'minus', 'negative', 'debit'].includes(normalized)) return -1;
+  if (['0', 'zero', 'neutral'].includes(normalized)) return 0;
+  return null;
+}
+
+function normalizeAmountContext(row: Record<string, unknown>): {
+  amount: number | null;
+  amountType: InvoiceAmountType;
+  normalizedSign: -1 | 0 | 1 | null;
+} {
+  const amountRaw =
+    row.amount ??
+    row.total ??
+    row.balance ??
+    row.paymentAmount ??
+    row.value ??
+    row.valueCzk ??
+    null;
+
+  const amount = toNumberOrNull(amountRaw);
+  const explicitType = normalizeAmountType(row.amountType ?? row.type);
+  const explicitSign = normalizeSign(row.normalizedSign ?? row.sign);
+
+  let inferredType: InvoiceAmountType = explicitType;
+  let inferredSign: -1 | 0 | 1 | null = explicitSign;
+
+  if (!inferredSign && amount !== null) {
+    if (amount > 0) inferredSign = 1;
+    if (amount < 0) inferredSign = -1;
+    if (amount === 0) inferredSign = 0;
+  }
+
+  if (inferredType === 'unknown' && inferredSign !== null) {
+    if (inferredSign > 0) inferredType = 'overpayment';
+    if (inferredSign < 0) inferredType = 'underpayment';
+  }
+
+  return {
+    amount,
+    amountType: inferredType,
+    normalizedSign: inferredSign,
+  };
+}
+
+function parseJsonCandidate(raw: string): unknown | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const candidates = [
+    trimmed,
+    trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim(),
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function extractInvoiceRows(root: Record<string, unknown>): InvoiceSummaryRow[] {
+  const rowCandidate = [root.rows, root.invoices, root.records, root.items].find((value) => Array.isArray(value));
+  if (!Array.isArray(rowCandidate)) return [];
+
+  return rowCandidate
+    .map((entry) => toRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map((row) => {
+      const amountContext = normalizeAmountContext(row);
+      return {
+        sourceFileName:
+          toStringOrNull(row.sourceFileName) ?? toStringOrNull(row.sourceTitle) ?? toStringOrNull(row.fileName),
+        variableSymbol:
+          toStringOrNull(row.variableSymbol) ??
+          toStringOrNull(row.varSymbol) ??
+          toStringOrNull(row.vs) ??
+          toStringOrNull(row.variable),
+        amount: amountContext.amount,
+        amountType: amountContext.amountType,
+        normalizedSign: amountContext.normalizedSign,
+        billingPeriod: toStringOrNull(row.billingPeriod) ?? toStringOrNull(row.period),
+        issueDate: toStringOrNull(row.issueDate) ?? toStringOrNull(row.dateIssued),
+        dueDate: toStringOrNull(row.dueDate) ?? toStringOrNull(row.maturityDate),
+        supplierName: toStringOrNull(row.supplierName) ?? toStringOrNull(row.supplier) ?? toStringOrNull(row.vendor),
+        supplyPoint: toStringOrNull(row.supplyPoint) ?? toStringOrNull(row.address) ?? toStringOrNull(row.deliveryPoint),
+        note: toStringOrNull(row.note),
+        extractionWarning: toStringOrNull(row.extractionWarning) ?? toStringOrNull(row.warning),
+        confidence: toNumberOrNull(row.confidence ?? row.score),
+      };
+    });
+}
+
+function inferVatNote(root: Record<string, unknown>, rows: InvoiceSummaryRow[]): string | null {
+  const direct = toStringOrNull(root.vatNote) ?? toStringOrNull(toRecord(root.summary)?.vatNote);
+  if (direct) return direct;
+  const vatRow = rows.find((row) => /\b(vat|dph)\b/i.test(`${row.note ?? ''} ${row.extractionWarning ?? ''}`));
+  return vatRow?.note ?? vatRow?.extractionWarning ?? null;
+}
+
+function extractStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => toStringOrNull(entry)).filter((entry): entry is string => Boolean(entry));
+}
+
+function extractFileList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const list: string[] = [];
+  value.forEach((entry) => {
+    if (typeof entry === 'string' && entry.trim()) {
+      list.push(entry.trim());
+      return;
+    }
+    const record = toRecord(entry);
+    if (!record) return;
+    const fileName =
+      toStringOrNull(record.fileName) ??
+      toStringOrNull(record.sourceFileName) ??
+      toStringOrNull(record.sourceTitle) ??
+      toStringOrNull(record.title);
+    if (fileName) list.push(fileName);
+  });
+  return list;
+}
+
+function parseInvoiceSummaryResult(raw: string): InvoiceSummaryResult | null {
+  const parsed = parseJsonCandidate(raw);
+  const root = toRecord(parsed);
+  if (!root) return null;
+
+  const rows = extractInvoiceRows(root);
+  if (rows.length === 0) return null;
+
+  const variableSymbols = rows
+    .map((row) => row.variableSymbol)
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .map((value) => value.trim());
+
+  const symbolFrequency = variableSymbols.reduce<Record<string, number>>((acc, symbol) => {
+    acc[symbol] = (acc[symbol] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  const duplicateVariableSymbols = Object.keys(symbolFrequency).filter((symbol) => symbolFrequency[symbol] > 1);
+  const totalOverpayment = rows.reduce((acc, row) => {
+    if (row.amount === null) return acc;
+    const isOver = row.amountType === 'overpayment' || row.normalizedSign === 1;
+    return isOver ? acc + Math.abs(row.amount) : acc;
+  }, 0);
+  const totalUnderpayment = rows.reduce((acc, row) => {
+    if (row.amount === null) return acc;
+    const isUnder = row.amountType === 'underpayment' || row.normalizedSign === -1;
+    return isUnder ? acc + Math.abs(row.amount) : acc;
+  }, 0);
+  const netTotal = rows.reduce((acc, row) => {
+    if (row.amount === null) return acc;
+    const sign = row.normalizedSign ?? (row.amount > 0 ? 1 : row.amount < 0 ? -1 : 0);
+    return acc + Math.abs(row.amount) * sign;
+  }, 0);
+
+  const summaryRoot = toRecord(root.summary) ?? root;
+  const rootWarnings = extractStringArray(summaryRoot.warnings ?? root.warnings);
+  const rowWarnings = rows
+    .map((row) => row.extractionWarning)
+    .filter((warning): warning is string => Boolean(warning));
+  const warnings = Array.from(new Set([...rootWarnings, ...rowWarnings]));
+
+  const filesProcessed = Array.from(
+    new Set([
+      ...extractFileList(summaryRoot.filesProcessed ?? root.filesProcessed),
+      ...rows
+        .map((row) => row.sourceFileName)
+        .filter((fileName): fileName is string => Boolean(fileName)),
+    ])
+  );
+  const filesFailed = extractFileList(summaryRoot.filesFailed ?? root.filesFailed);
+
+  return {
+    rows,
+    summary: {
+      invoiceCount: rows.length,
+      uniqueVariableSymbolCount: new Set(variableSymbols).size,
+      duplicateVariableSymbolCount: duplicateVariableSymbols.length,
+      totalOverpayment,
+      totalUnderpayment,
+      netTotal,
+      vatNote: inferVatNote(root, rows),
+      warnings,
+      duplicateVariableSymbols,
+      filesProcessed,
+      filesFailed,
+    },
+  };
+}
+
+function toCsvCell(value: string | number | null): string {
+  if (value === null || value === undefined) return '';
+  const raw = String(value);
+  if (/[,"\n]/.test(raw)) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+}
+
+function buildInvoiceRowsCsv(result: InvoiceSummaryResult): string {
+  const headers = INVOICE_EXPORT_COLUMNS.map((column) => column.header).join(',');
+  const lines = result.rows.map((row) =>
+    INVOICE_EXPORT_COLUMNS.map((column) => {
+      const value = row[column.key];
+      if (column.key === 'amount' || column.key === 'confidence') {
+        return toCsvCell(typeof value === 'number' ? value : null);
+      }
+      if (column.key === 'normalizedSign') {
+        return toCsvCell(typeof value === 'number' ? value : null);
+      }
+      return toCsvCell(typeof value === 'string' ? value : null);
+    }).join(',')
+  );
+  return [headers, ...lines].join('\n');
+}
+
+function formatCzk(value: number): string {
+  return new Intl.NumberFormat('cs-CZ', {
+    style: 'currency',
+    currency: 'CZK',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
 function MarkdownArtifactView({ content, isMobile = false }: { content: string; isMobile?: boolean }) {
   return (
     <div className={`prose prose-invert max-w-none break-words prose-pre:border prose-pre:border-gray-700 prose-pre:bg-black prose-code:text-blue-200 [overflow-wrap:anywhere] ${isMobile ? 'text-sm' : 'text-[12px]'}`}>
@@ -200,6 +513,138 @@ function PreformattedArtifactView({ content, isMobile = false }: { content: stri
     >
       {content}
     </pre>
+  );
+}
+
+function InvoiceSummaryView({
+  result,
+  isMobile,
+  onDownloadCsv,
+  onDownloadXlsx,
+}: {
+  result: InvoiceSummaryResult;
+  isMobile?: boolean;
+  onDownloadCsv: () => void;
+  onDownloadXlsx: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded border border-emerald-800/60 bg-emerald-950/20 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[10px] uppercase tracking-wider text-emerald-300">Invoice summary</p>
+          <button
+            type="button"
+            onClick={onDownloadCsv}
+            className="ml-auto rounded border border-cyan-700/60 bg-cyan-950/30 px-2 py-1 text-[10px] text-cyan-100 hover:border-cyan-500"
+          >
+            Download CSV
+          </button>
+          <button
+            type="button"
+            onClick={onDownloadXlsx}
+            className="rounded border border-blue-700/60 bg-blue-950/30 px-2 py-1 text-[10px] text-blue-100 hover:border-blue-500"
+          >
+            Download XLSX
+          </button>
+        </div>
+
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-gray-200 md:grid-cols-3">
+          <p>Invoices: {result.summary.invoiceCount}</p>
+          <p>Unique VS: {result.summary.uniqueVariableSymbolCount}</p>
+          <p>Duplicate VS: {result.summary.duplicateVariableSymbolCount}</p>
+          <p className="text-emerald-200">Overpayment: {formatCzk(result.summary.totalOverpayment)}</p>
+          <p className="text-amber-200">Underpayment: {formatCzk(result.summary.totalUnderpayment)}</p>
+          <p className={`${result.summary.netTotal >= 0 ? 'text-emerald-200' : 'text-red-200'}`}>
+            Net total: {formatCzk(result.summary.netTotal)}
+          </p>
+        </div>
+
+        {result.summary.vatNote && (
+          <p className="mt-2 text-[11px] text-gray-200">VAT note: {result.summary.vatNote}</p>
+        )}
+        {result.summary.duplicateVariableSymbols.length > 0 && (
+          <p className="mt-2 text-[11px] text-amber-200">
+            Duplicates: {result.summary.duplicateVariableSymbols.join(', ')}
+          </p>
+        )}
+        {result.summary.warnings.length > 0 && (
+          <div className="mt-2 rounded border border-amber-800/60 bg-amber-950/30 px-2 py-1.5">
+            {result.summary.warnings.map((warning) => (
+              <p key={warning} className="text-[11px] text-amber-100">
+                - {warning}
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="overflow-x-auto rounded border border-gray-800">
+        <table className="min-w-full divide-y divide-gray-800 text-left text-[11px] text-gray-200">
+          <thead className="bg-gray-900/80 text-[10px] uppercase tracking-wider text-gray-400">
+            <tr>
+              <th className="px-2 py-1.5">Source</th>
+              <th className="px-2 py-1.5">Variable symbol</th>
+              <th className="px-2 py-1.5">Amount</th>
+              <th className="px-2 py-1.5">Type</th>
+              <th className="px-2 py-1.5">Billing period</th>
+              <th className="px-2 py-1.5">Issue date</th>
+              <th className="px-2 py-1.5">Due date</th>
+              <th className="px-2 py-1.5">Supplier</th>
+              <th className="px-2 py-1.5">Supply point</th>
+              <th className="px-2 py-1.5">Warnings / note</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-900/70 bg-black/30">
+            {result.rows.map((row, index) => {
+              const amountClass =
+                row.normalizedSign === 1
+                  ? 'text-emerald-200'
+                  : row.normalizedSign === -1
+                  ? 'text-red-200'
+                  : 'text-gray-200';
+              return (
+                <tr key={`${row.sourceFileName ?? 'row'}-${row.variableSymbol ?? 'na'}-${index}`}>
+                  <td className="px-2 py-1.5 align-top">{row.sourceFileName ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.variableSymbol ?? '-'}</td>
+                  <td className={`px-2 py-1.5 align-top ${amountClass}`}>
+                    {typeof row.amount === 'number' ? formatCzk(row.amount) : '-'}
+                  </td>
+                  <td className="px-2 py-1.5 align-top">{row.amountType}</td>
+                  <td className="px-2 py-1.5 align-top">{row.billingPeriod ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.issueDate ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.dueDate ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.supplierName ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">{row.supplyPoint ?? '-'}</td>
+                  <td className="px-2 py-1.5 align-top">
+                    {row.extractionWarning && (
+                      <p className="text-amber-200">{row.extractionWarning}</p>
+                    )}
+                    <p className={row.extractionWarning ? 'text-gray-300' : ''}>{row.note ?? '-'}</p>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {(result.summary.filesProcessed.length > 0 || result.summary.filesFailed.length > 0) && (
+        <div className={`grid gap-2 ${isMobile ? 'grid-cols-1' : 'grid-cols-2'}`}>
+          <div className="rounded border border-gray-800 bg-gray-950/60 px-2 py-2">
+            <p className="text-[10px] uppercase tracking-wider text-gray-400">Files processed</p>
+            <p className="mt-1 text-[11px] text-gray-200">
+              {result.summary.filesProcessed.length > 0 ? result.summary.filesProcessed.join(', ') : '-'}
+            </p>
+          </div>
+          <div className="rounded border border-gray-800 bg-gray-950/60 px-2 py-2">
+            <p className="text-[10px] uppercase tracking-wider text-gray-400">Files failed</p>
+            <p className="mt-1 text-[11px] text-red-200">
+              {result.summary.filesFailed.length > 0 ? result.summary.filesFailed.join(', ') : '-'}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -444,6 +889,22 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     () => (selectedExecutionBundle ? resolveBundlePreviewHtml(selectedExecutionBundle) : null),
     [selectedExecutionBundle]
   );
+  const selectedInvoiceResult = useMemo(() => {
+    const fromArtifactRaw = selectedArtifactMeta?.rawContent ? parseInvoiceSummaryResult(selectedArtifactMeta.rawContent) : null;
+    if (fromArtifactRaw) return fromArtifactRaw;
+
+    const fromArtifactContent = selectedArtifactMeta?.content ? parseInvoiceSummaryResult(selectedArtifactMeta.content) : null;
+    if (fromArtifactContent) return fromArtifactContent;
+
+    if (!selectedExecutionBundle) return null;
+    for (const file of selectedExecutionBundle.files) {
+      if (!file.path.toLowerCase().endsWith('.json')) continue;
+      const fromBundleFile = parseInvoiceSummaryResult(file.content);
+      if (fromBundleFile) return fromBundleFile;
+    }
+
+    return null;
+  }, [selectedArtifactMeta, selectedExecutionBundle]);
   const stableBaselineBundle = project?.latestStableBundle ?? null;
 
   const resultModalTitle = selectedExecutionBundle
@@ -508,6 +969,52 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     if (!artifact.executionOutput) return;
     await downloadBundleAsZip(artifact.executionOutput, artifact.path);
   }, [downloadBundleAsZip]);
+
+  const downloadInvoiceCsv = useCallback((result: InvoiceSummaryResult) => {
+    const csv = buildInvoiceRowsCsv(result);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'invoice-summary.csv';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const downloadInvoiceXlsx = useCallback((result: InvoiceSummaryResult) => {
+    const rowRecords = result.rows.map((row) => {
+      const output: Record<string, string | number | null> = {};
+      INVOICE_EXPORT_COLUMNS.forEach(({ key, header }) => {
+        output[header] = row[key] as string | number | null;
+      });
+      return output;
+    });
+
+    const summaryRows: Array<{ key: string; value: string | number | null }> = [
+      { key: 'invoiceCount', value: result.summary.invoiceCount },
+      { key: 'uniqueVariableSymbolCount', value: result.summary.uniqueVariableSymbolCount },
+      { key: 'duplicateVariableSymbolCount', value: result.summary.duplicateVariableSymbolCount },
+      { key: 'totalOverpayment', value: result.summary.totalOverpayment },
+      { key: 'totalUnderpayment', value: result.summary.totalUnderpayment },
+      { key: 'netTotal', value: result.summary.netTotal },
+      { key: 'vatNote', value: result.summary.vatNote },
+      { key: 'warnings', value: result.summary.warnings.join('; ') },
+      { key: 'duplicateVariableSymbols', value: result.summary.duplicateVariableSymbols.join('; ') },
+      { key: 'filesProcessed', value: result.summary.filesProcessed.join('; ') },
+      { key: 'filesFailed', value: result.summary.filesFailed.join('; ') },
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    const rowsSheet = XLSX.utils.json_to_sheet(rowRecords);
+    XLSX.utils.book_append_sheet(workbook, rowsSheet, 'invoice_rows');
+
+    const summarySheet = XLSX.utils.json_to_sheet(summaryRows);
+    XLSX.utils.book_append_sheet(workbook, summarySheet, 'summary');
+
+    XLSX.writeFile(workbook, 'invoice-summary.xlsx');
+  }, []);
 
   if (!project) {
     return (
@@ -1170,6 +1677,15 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                     <div className="mt-2 rounded border border-gray-800 bg-black/30 px-2 py-2">
                       {selectedExecutionBundle ? (
                         <div className="space-y-3">
+                          {selectedInvoiceResult && (
+                            <InvoiceSummaryView
+                              result={selectedInvoiceResult}
+                              isMobile={isMobile}
+                              onDownloadCsv={() => downloadInvoiceCsv(selectedInvoiceResult)}
+                              onDownloadXlsx={() => downloadInvoiceXlsx(selectedInvoiceResult)}
+                            />
+                          )}
+
                           <div className="rounded border border-emerald-800/50 bg-emerald-950/20 px-2 py-2">
                             <p className="text-[10px] uppercase tracking-wider text-emerald-300">Bundle status</p>
                             <p className="mt-1 text-[11px] text-emerald-100">{selectedExecutionBundle.status}</p>
@@ -1269,7 +1785,16 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                       ) : (
                         <div className="space-y-2">
                           <p className="text-[10px] text-gray-400">Structured preview</p>
-                          <PreformattedArtifactView content={selectedArtifactContent} isMobile={isMobile} />
+                          {selectedInvoiceResult ? (
+                            <InvoiceSummaryView
+                              result={selectedInvoiceResult}
+                              isMobile={isMobile}
+                              onDownloadCsv={() => downloadInvoiceCsv(selectedInvoiceResult)}
+                              onDownloadXlsx={() => downloadInvoiceXlsx(selectedInvoiceResult)}
+                            />
+                          ) : (
+                            <PreformattedArtifactView content={selectedArtifactContent} isMobile={isMobile} />
+                          )}
                           {selectedArtifactMeta.rawContent?.trim() && (
                             <PreformattedArtifactView content={selectedArtifactMeta.rawContent} isMobile={isMobile} />
                           )}
@@ -1392,6 +1917,13 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                 </div>
               ) : isMarkdownArtifact(selectedArtifactMeta.path) ? (
                 <MarkdownArtifactView content={selectedArtifactContent} isMobile={false} />
+              ) : selectedInvoiceResult ? (
+                <InvoiceSummaryView
+                  result={selectedInvoiceResult}
+                  isMobile={false}
+                  onDownloadCsv={() => downloadInvoiceCsv(selectedInvoiceResult)}
+                  onDownloadXlsx={() => downloadInvoiceXlsx(selectedInvoiceResult)}
+                />
               ) : (
                 <PreformattedArtifactView
                   content={selectedArtifactMeta.rawContent?.trim() || selectedArtifactContent}

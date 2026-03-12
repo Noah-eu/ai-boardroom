@@ -482,6 +482,133 @@ function normalizeRowValues(value: Record<string, unknown>): Record<string, unkn
   return Object.fromEntries(entries);
 }
 
+function toNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/,/g, '.')
+    .replace(/[^0-9+\-.]/g, '');
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toStringValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+}
+
+function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
+  invoiceCount: number;
+  uniqueVariableSymbolCount: number;
+  duplicateVariableSymbolCount: number;
+  totalOverpayment: number;
+  totalUnderpayment: number;
+  netTotal: number;
+  vatNote: string | null;
+  warnings: string[];
+  duplicateVariableSymbols: string[];
+  filesProcessed: string[];
+  filesFailed: string[];
+} {
+  const symbols = rows
+    .map((row) =>
+      toStringValue(row.values.variableSymbol) ??
+      toStringValue(row.values.varSymbol) ??
+      toStringValue(row.values.vs)
+    )
+    .filter((value): value is string => Boolean(value));
+
+  const frequencies = symbols.reduce<Record<string, number>>((acc, symbol) => {
+    acc[symbol] = (acc[symbol] ?? 0) + 1;
+    return acc;
+  }, {});
+  const duplicateVariableSymbols = Object.keys(frequencies).filter((symbol) => frequencies[symbol] > 1);
+
+  const normalized = rows.map((row) => {
+    const amount =
+      toNumber(row.values.amount) ??
+      toNumber(row.values.total) ??
+      toNumber(row.values.balance) ??
+      null;
+    const amountTypeRaw =
+      (toStringValue(row.values.amountType) ?? toStringValue(row.values.type) ?? '').toLowerCase();
+    const isOverType = amountTypeRaw.includes('overpayment') || amountTypeRaw.includes('preplatek') || amountTypeRaw.includes('přeplatek');
+    const isUnderType = amountTypeRaw.includes('underpayment') || amountTypeRaw.includes('nedoplatek');
+
+    const explicitSign =
+      typeof row.values.normalizedSign === 'number'
+        ? row.values.normalizedSign
+        : typeof row.values.sign === 'number'
+        ? row.values.sign
+        : null;
+    const sign =
+      explicitSign !== null && Number.isFinite(explicitSign)
+        ? Math.sign(explicitSign)
+        : amount !== null
+        ? Math.sign(amount)
+        : isOverType
+        ? 1
+        : isUnderType
+        ? -1
+        : 0;
+
+    return { amount, sign };
+  });
+
+  const totalOverpayment = normalized.reduce((acc, row) => {
+    if (row.amount === null || row.sign <= 0) return acc;
+    return acc + Math.abs(row.amount);
+  }, 0);
+  const totalUnderpayment = normalized.reduce((acc, row) => {
+    if (row.amount === null || row.sign >= 0) return acc;
+    return acc + Math.abs(row.amount);
+  }, 0);
+  const netTotal = normalized.reduce((acc, row) => {
+    if (row.amount === null) return acc;
+    return acc + Math.abs(row.amount) * row.sign;
+  }, 0);
+
+  const warnings = rows
+    .map((row) =>
+      toStringValue(row.values.extractionWarning) ??
+      toStringValue(row.values.warning)
+    )
+    .filter((value): value is string => Boolean(value));
+
+  const vatNote =
+    rows
+      .map((row) =>
+        toStringValue(row.values.vatNote) ??
+        toStringValue(row.values.note)
+      )
+      .find((value) => Boolean(value && /\b(vat|dph)\b/i.test(value))) ?? null;
+
+  const filesProcessed = Array.from(new Set(rows.map((row) => row.sourceTitle).filter(Boolean)));
+
+  return {
+    invoiceCount: rows.length,
+    uniqueVariableSymbolCount: new Set(symbols).size,
+    duplicateVariableSymbolCount: duplicateVariableSymbols.length,
+    totalOverpayment,
+    totalUnderpayment,
+    netTotal,
+    vatNote,
+    warnings: Array.from(new Set(warnings)),
+    duplicateVariableSymbols,
+    filesProcessed,
+    filesFailed: [],
+  };
+}
+
 function parseBuilderChunkRows(raw: string, chunkPdfEntries: PdfSnapshotInput[]): BuilderExtractionRow[] {
   const parsed = parseJsonObjectFromModelText(raw);
   const root = asRecord(parsed);
@@ -562,12 +689,15 @@ function buildBuilderChunkPrompt(
     `Extract structured invoice/document rows only from PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
     'Return JSON only. No markdown fences or prose.',
     'Contract:',
-    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"field":"value"}]}]}',
+    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","variableSymbol":"...","amount":0,"amountType":"overpayment|underpayment|unknown","normalizedSign":-1|0|1,"billingPeriod":"...","issueDate":"...","dueDate":"...","supplierName":"...","supplyPoint":"...","note":"...","extractionWarning":"...","confidence":0.0}]}]}',
     'Rules:',
     '- Use only sourceAttachmentId/sourceTitle listed below.',
     '- Keep source mapping exact per row.',
     '- If a document has no rows, return an empty rows array for it.',
     '- Do not include data from files outside this chunk.',
+    '- Keep missing fields null/empty; never fabricate values.',
+    '- For amountType use only: overpayment, underpayment, unknown.',
+    '- normalizedSign should be -1 for underpayment/debit, 1 for overpayment/credit, 0 when neutral/unknown.',
     `Project prompt:\n${shorten(snapshot.projectPrompt, 1200)}`,
     `Approved debate summary:\n${shorten(snapshot.approvedDebateSummary, 1400)}`,
     `Chunk files:\n${pdfChunk.map((entry) => `- ${entry.attachmentId} | ${entry.title}`).join('\n')}`,
@@ -4334,6 +4464,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             }
 
             const mergedRows = mergeExtractionRows(extractedRowsAcrossChunks);
+            const mergedRowsSummary = buildMergedRowsSummary(mergedRows);
             const rowsForFinalPrompt = mergedRows
               .slice(0, BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT)
               .map((row) => ({
@@ -4363,6 +4494,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     completedChunks: completedChunkSummaries,
                   },
                   mergedRowsCount: mergedRows.length,
+                  summary: mergedRowsSummary,
                   rows: rowsForFinalPrompt,
                 },
                 null,

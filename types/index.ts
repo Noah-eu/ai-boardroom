@@ -86,6 +86,43 @@ export interface ExecutionOutputBundle {
   removePaths?: string[];
 }
 
+export type InvoiceAmountType = 'overpayment' | 'underpayment' | 'unknown';
+
+export interface InvoiceSummaryRow {
+  sourceFileName: string | null;
+  variableSymbol: string | null;
+  amount: number | null;
+  amountType: InvoiceAmountType;
+  normalizedSign: -1 | 0 | 1 | null;
+  billingPeriod: string | null;
+  issueDate: string | null;
+  dueDate: string | null;
+  supplierName: string | null;
+  supplyPoint: string | null;
+  note: string | null;
+  extractionWarning: string | null;
+  confidence: number | null;
+}
+
+export interface InvoiceSummaryMeta {
+  invoiceCount: number;
+  uniqueVariableSymbolCount: number;
+  duplicateVariableSymbolCount: number;
+  totalOverpayment: number;
+  totalUnderpayment: number;
+  netTotal: number;
+  vatNote: string | null;
+  warnings: string[];
+  duplicateVariableSymbols: string[];
+  filesProcessed: string[];
+  filesFailed: string[];
+}
+
+export interface InvoiceSummaryResult {
+  rows: InvoiceSummaryRow[];
+  summary: InvoiceSummaryMeta;
+}
+
 export type RevisionExecutionStatus =
   | 'pending'
   | 'running'
