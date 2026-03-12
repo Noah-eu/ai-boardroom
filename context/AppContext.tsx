@@ -1562,6 +1562,9 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
   const primaryArtifact = getPrimaryArtifactPath(task);
   if (!primaryArtifact) return [];
 
+  const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
+  const isCodePipelineTask = /CodePlanner|AppArchitect|FileBuilder|QA|BundleExporter/i.test(task.title);
+
   if (primaryArtifact === 'normalized-rows.json') {
     return [{ path: 'extracted-rows.json' }];
   }
@@ -1572,16 +1575,43 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
     return [{ path: 'validated-rows.json' }];
   }
   if (primaryArtifact === 'generated-files.json') {
+    if (isDocumentPipelineTask) {
+      return [
+        { path: 'validated-rows.json' },
+        { path: 'summary-metadata.json' },
+      ];
+    }
+    if (isCodePipelineTask) {
+      return [
+        { path: 'execution-plan.md' },
+        { path: 'architecture-review.md' },
+      ];
+    }
+  }
+  if (primaryArtifact === 'review-notes.md') {
     return [
-      { path: 'validated-rows.json' },
-      { path: 'summary-metadata.json' },
+      { path: 'generated-files.json', requiresExecutionOutput: true },
+      { path: 'patch-plan.md' },
+    ];
+  }
+  if (primaryArtifact === 'bundle-export.md') {
+    return [
+      { path: 'generated-files.json', requiresExecutionOutput: true },
+      { path: 'review-notes.md' },
     ];
   }
   if (primaryArtifact === 'final-summary.md') {
+    if (isDocumentPipelineTask) {
+      return [
+        { path: 'generated-files.json', requiresExecutionOutput: true },
+        { path: 'summary-metadata.json' },
+        { path: 'validated-rows.json' },
+      ];
+    }
     return [
       { path: 'generated-files.json', requiresExecutionOutput: true },
-      { path: 'summary-metadata.json' },
-      { path: 'validated-rows.json' },
+      { path: 'review-notes.md' },
+      { path: 'bundle-export.md' },
     ];
   }
 
@@ -1722,6 +1752,40 @@ function isFailureTerminalStatus(status: Task['status']): boolean {
     status === 'canceled_due_to_failed_dependency' ||
     status === 'blocked_due_to_failed_dependency'
   );
+}
+
+type ExecutionPipelineKind = 'document' | 'code';
+
+function decideExecutionPipeline(project: Project): ExecutionPipelineKind {
+  const combinedText = [project.name, project.description, project.latestRevisionFeedback ?? '']
+    .join(' ')
+    .toLowerCase();
+
+  const documentSignals =
+    /\binvoice\b|\binvoices\b|\bpdf\b|\bcsv\b|\bxlsx\b|\bextract\b|\breport\b|\bsummary\b|\bfaktur\b|\buctenk\b|\bvyuctovan/i.test(
+      combinedText
+    );
+  const codeSignals =
+    /\bapp\b|\bweb\b|\bwebsite\b|\bgame\b|\bpong\b|\btodo\b|\bhtml\b|\bcss\b|\bjavascript\b|\bjs\b|\btypescript\b|\bcode\b|\bfrontend\b|\bui\b/.test(
+      combinedText
+    );
+
+  const attachments = project.attachments ?? [];
+  const pdfLikeAttachments = attachments.filter((attachment) => attachment.kind === 'pdf').length;
+  const zipCodeSignals = attachments.some((attachment) => {
+    if (attachment.kind !== 'zip') return false;
+    const tree = attachment.ingestion?.zipFileTree ?? [];
+    return tree.some((entry) => /\.(html|css|js|ts|tsx|jsx|json|md)$/i.test(entry));
+  });
+
+  if (project.outputType === 'document') return 'document';
+  if (project.outputType === 'app' || project.outputType === 'website') return 'code';
+
+  if (documentSignals && !codeSignals) return 'document';
+  if (codeSignals && !documentSignals) return 'code';
+  if (pdfLikeAttachments > 0 && !zipCodeSignals) return 'document';
+
+  return 'code';
 }
 
 function findDependencyFailureTrace(
@@ -5504,6 +5568,88 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const maxRetries = project.simulationMode ? 2 : 1;
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
       const taskModel = resolveOpenAiModel(project.model);
+      const pipeline = decideExecutionPipeline(project);
+
+      if (pipeline === 'code') {
+        const codePlanner = createTask({
+          title: 'CodePlanner: Execution plan',
+          description: 'Generate prioritized implementation plan for requested app/web/game/code output.',
+          agent: 'Planner',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [],
+          status: 'queued',
+          producesArtifacts: [{ path: 'execution-plan.md', label: 'Execution Plan', kind: 'doc' }],
+        });
+
+        const appArchitect = createTask({
+          title: 'AppArchitect: Architecture review',
+          description: 'Define file-level architecture and implementation boundaries for generated app/game output.',
+          agent: 'Architect',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [codePlanner.id],
+          status: statusFor([codePlanner.id]),
+          producesArtifacts: [{ path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' }],
+        });
+
+        const fileBuilder = createTask({
+          title: 'FileBuilder: Generate runnable files',
+          description: 'Generate runnable static files (index.html + optional style.css/script.js) and patch plan.',
+          agent: 'Builder',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [appArchitect.id],
+          status: statusFor([appArchitect.id]),
+          producesArtifacts: [
+            { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
+            { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
+          ],
+        });
+
+        const qaReviewer = createTask({
+          title: 'QA: Quality and risk review',
+          description: 'Review generated files for requirement coverage, quality risks, and functional gaps.',
+          agent: 'Reviewer',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [fileBuilder.id],
+          status: statusFor([fileBuilder.id]),
+          producesArtifacts: [{ path: 'review-notes.md', label: 'Review Notes', kind: 'report' }],
+          retryCount: 0,
+          maxRetries,
+        });
+
+        const bundleExporter = createTask({
+          title: 'BundleExporter: Packaging notes',
+          description: 'Prepare bundle/export packaging notes from generated files and QA feedback.',
+          agent: 'Tester',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [qaReviewer.id],
+          status: statusFor([qaReviewer.id]),
+          producesArtifacts: [{ path: 'bundle-export.md', label: 'Bundle Export', kind: 'report' }],
+          retryCount: 0,
+          maxRetries,
+        });
+
+        const integrator = createTask({
+          title: 'Integrator: Final combined result',
+          description: 'Assemble final result from generated files, QA notes, and packaging guidance.',
+          agent: 'Integrator',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [bundleExporter.id],
+          status: statusFor([bundleExporter.id]),
+          producesArtifacts: [{ path: 'final-summary.md', label: 'Final Summary', kind: 'doc' }],
+        });
+
+        return {
+          tasks: [codePlanner, appArchitect, fileBuilder, qaReviewer, bundleExporter, integrator],
+          concurrencyLimit: 2,
+          maxRetries,
+        };
+      }
 
       const documentExtractor = createTask({
         title: 'DocumentExtractor: Required field extraction',
@@ -5605,6 +5751,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       const taskGraph = generateExecutionTaskGraph(project);
+      const selectedPipeline = decideExecutionPipeline(project);
 
       const normalizedTaskGraph: TaskGraph = {
         ...taskGraph,
@@ -5624,6 +5771,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         type: 'ADD_LOG',
         level: 'info',
         message: 'Execution phase started; remaining tasks will auto-continue through Integrator.',
+      });
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: `Execution pipeline selected: ${selectedPipeline}`,
       });
       dispatch({
         type: 'ADD_LOG',
