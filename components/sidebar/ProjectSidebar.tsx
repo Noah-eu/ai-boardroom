@@ -344,10 +344,10 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
           <p className={`${isMobile ? 'mt-3 text-sm' : 'mt-1 text-[10px]'} text-gray-500`}>{t('projectForm.attachmentsEmpty')}</p>
         )}
 
-        <input ref={fileInputRef} type="file" className="hidden" onChange={(event) => onFilePicked(event, 'file')} />
-        <input ref={photoInputRef} type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" className="hidden" onChange={(event) => onFilePicked(event, 'image')} />
-        <input ref={pdfInputRef} type="file" accept=".pdf,application/pdf" className="hidden" onChange={(event) => onFilePicked(event, 'pdf')} />
-        <input ref={zipInputRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" className="hidden" onChange={(event) => onFilePicked(event, 'zip')} />
+        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(event) => onFilePicked(event, 'file')} />
+        <input ref={photoInputRef} type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" className="hidden" onChange={(event) => onFilePicked(event, 'image')} />
+        <input ref={pdfInputRef} type="file" multiple accept=".pdf,application/pdf" className="hidden" onChange={(event) => onFilePicked(event, 'pdf')} />
+        <input ref={zipInputRef} type="file" multiple accept=".zip,application/zip,application/x-zip-compressed" className="hidden" onChange={(event) => onFilePicked(event, 'zip')} />
         </div>
       </div>
 
