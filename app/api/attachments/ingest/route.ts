@@ -11,8 +11,6 @@ const requestSchema = z.object({
   sourceUrl: z.string().url().optional(),
   downloadUrl: z.string().url().optional(),
   mimeType: z.string().optional(),
-  maxPages: z.number().int().min(1).max(20).optional(),
-  maxDepth: z.number().int().min(0).max(3).optional(),
 });
 
 type IngestPayload = {
@@ -25,40 +23,10 @@ type IngestPayload = {
   excerpt?: string;
   pageTitle?: string;
   sourceUrl?: string;
-  urlPageCount?: number;
-  urlCrawlDepth?: number;
-  urlCrawlMaxPages?: number;
-  urlPages?: Array<{
-    url: string;
-    title: string;
-    metaDescription?: string;
-    excerpt: string;
-    summary: string;
-    extractedText: string;
-    depth: number;
-    rendered?: boolean;
-  }>;
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
   error?: string;
-  crawlEvents?: string[];
 };
-
-type UrlPageSnapshot = {
-  url: string;
-  title: string;
-  metaDescription?: string;
-  extractedText: string;
-  excerpt: string;
-  summary: string;
-  links: string[];
-  depth: number;
-  rendered?: boolean;
-};
-
-const DEFAULT_CRAWL_MAX_PAGES = 5;
-const DEFAULT_CRAWL_MAX_DEPTH = 1;
-const MIN_TEXT_LENGTH_FOR_STATIC = 220;
 
 function trimText(value: string, max = 12000): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -118,54 +86,8 @@ async function extractPdfText(buffer: Buffer): Promise<{ pageCount: number; text
   });
 }
 
-function normalizeHref(baseUrl: string, href: string): string | null {
-  const normalized = href.trim();
-  if (!normalized) return null;
-
-  if (
-    normalized.startsWith('#') ||
-    normalized.startsWith('mailto:') ||
-    normalized.startsWith('tel:') ||
-    normalized.startsWith('javascript:')
-  ) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(normalized, baseUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return null;
-    }
-    parsed.hash = '';
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function shouldSkipInternalUrl(candidateUrl: string): boolean {
-  const lower = candidateUrl.toLowerCase();
-
-  if (
-    /\b(logout|log-out|log_out|signout|sign-out|sign_out)\b/.test(lower) ||
-    /[?&](logout|signout)=/i.test(lower)
-  ) {
-    return true;
-  }
-
-  if (/\.(pdf|zip|rar|7z|gz|png|jpe?g|gif|webp|svg|ico|mp4|mp3|wav|avi|mov|css|js)(\?|$)/i.test(lower)) {
-    return true;
-  }
-
-  if (/(\/download\/|[?&]download=|\/wp-login\.php)/i.test(lower)) {
-    return true;
-  }
-
-  return false;
-}
-
-async function fetchHtmlPage(url: string): Promise<{ finalUrl: string; html: string }> {
-  const response = await fetch(url, {
+async function ingestUrl(sourceUrl: string): Promise<IngestPayload> {
+  const response = await fetch(sourceUrl, {
     headers: {
       'User-Agent': 'AI-Boardroom-Ingest/1.0',
       Accept: 'text/html,application/xhtml+xml',
@@ -176,200 +98,19 @@ async function fetchHtmlPage(url: string): Promise<{ finalUrl: string; html: str
     throw new Error(`URL fetch failed (${response.status})`);
   }
 
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.toLowerCase().includes('html')) {
-    throw new Error(`Non-HTML content (${contentType || 'unknown'})`);
-  }
-
-  return {
-    finalUrl: response.url || url,
-    html: await response.text(),
-  };
-}
-
-async function tryRenderHtmlPage(url: string): Promise<{ finalUrl: string; html: string } | null> {
-  try {
-    const playwright = await import('playwright');
-    const browser = await playwright.chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForTimeout(1200);
-    const finalUrl = page.url();
-    const html = await page.content();
-    await browser.close();
-    return { finalUrl, html };
-  } catch {
-    return null;
-  }
-}
-
-function extractPageSnapshot(html: string, pageUrl: string, depth: number): UrlPageSnapshot {
+  const html = await response.text();
   const $ = loadHtml(html);
   $('script,style,noscript').remove();
-
-  const title =
-    $('title').first().text().trim() ||
-    $('meta[property="og:title"]').attr('content')?.trim() ||
-    $('h1').first().text().trim() ||
-    pageUrl;
-
-  const metaDescription =
-    $('meta[name="description"]').attr('content')?.trim() ||
-    $('meta[property="og:description"]').attr('content')?.trim() ||
-    undefined;
-
-  const extractedText = trimText($('body').text(), 9000);
-  const pageExcerpt = excerpt(metaDescription || extractedText || title, 260);
-
-  const links = $('a[href]')
-    .map((_, element) => $(element).attr('href') ?? '')
-    .get()
-    .map((href) => normalizeHref(pageUrl, href))
-    .filter((href): href is string => Boolean(href));
-
-  return {
-    url: pageUrl,
-    title,
-    metaDescription,
-    extractedText,
-    excerpt: pageExcerpt,
-    summary: `${title} - ${pageExcerpt}`,
-    links,
-    depth,
-  };
-}
-
-function buildSiteSnapshotText(sourceUrl: string, pages: UrlPageSnapshot[]): string {
-  const pageLines = pages.map(
-    (page, index) =>
-      `${index + 1}. ${page.title} (${page.url})${page.metaDescription ? `\nMeta: ${page.metaDescription}` : ''}\nSummary: ${page.excerpt}`
-  );
-
-  const combinedPageContent = pages
-    .map((page, index) => `[Page ${index + 1}] ${page.title}\nURL: ${page.url}\n${page.extractedText}`)
-    .join('\n\n');
-
-  return trimText(
-    [
-      `Site snapshot source URL: ${sourceUrl}`,
-      `Pages visited: ${pages.length}`,
-      'Page summaries:',
-      pageLines.join('\n\n'),
-      'Combined extracted content:',
-      combinedPageContent,
-    ].join('\n\n'),
-    26000
-  );
-}
-
-async function ingestUrl(sourceUrl: string, maxPages: number, maxDepth: number): Promise<IngestPayload> {
-  const crawlEvents: string[] = [];
-  crawlEvents.push(`URL crawl started: source=${sourceUrl} maxPages=${maxPages} maxDepth=${maxDepth}`);
-  console.info(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
-
-  const rootUrl = new URL(sourceUrl);
-  const queue: Array<{ url: string; depth: number }> = [{ url: rootUrl.toString(), depth: 0 }];
-  const visited = new Set<string>();
-  const indexedPages: UrlPageSnapshot[] = [];
-  const importantLinks = new Set<string>();
-
-  while (queue.length > 0 && indexedPages.length < maxPages) {
-    const current = queue.shift();
-    if (!current) break;
-    if (visited.has(current.url)) continue;
-    if (current.depth > maxDepth) continue;
-
-    visited.add(current.url);
-
-    try {
-      crawlEvents.push(`page fetched: depth=${current.depth} url=${current.url}`);
-      console.info(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
-
-      let fetched = await fetchHtmlPage(current.url);
-      let pageSnapshot = extractPageSnapshot(fetched.html, fetched.finalUrl, current.depth);
-      let rendered = false;
-
-      const shouldRender =
-        pageSnapshot.extractedText.length < MIN_TEXT_LENGTH_FOR_STATIC &&
-        (current.depth === 0 || importantLinks.has(current.url));
-
-      if (shouldRender) {
-        const renderedPage = await tryRenderHtmlPage(current.url);
-        if (renderedPage) {
-          crawlEvents.push(`page rendered: depth=${current.depth} url=${current.url}`);
-          console.info(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
-          fetched = renderedPage;
-          pageSnapshot = extractPageSnapshot(fetched.html, fetched.finalUrl, current.depth);
-          rendered = true;
-        }
-      }
-
-      pageSnapshot.rendered = rendered;
-      indexedPages.push(pageSnapshot);
-
-      crawlEvents.push(`page extracted: depth=${current.depth} url=${pageSnapshot.url} chars=${pageSnapshot.extractedText.length}`);
-      console.info(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
-
-      if (current.depth === 0) {
-        pageSnapshot.links.slice(0, 3).forEach((link) => importantLinks.add(link));
-      }
-
-      if (current.depth < maxDepth) {
-        for (const link of pageSnapshot.links) {
-          if (queue.length + indexedPages.length >= maxPages * 3) break;
-          if (visited.has(link)) continue;
-          if (shouldSkipInternalUrl(link)) continue;
-
-          const parsed = new URL(link);
-          if (parsed.origin !== rootUrl.origin) {
-            continue;
-          }
-          queue.push({ url: parsed.toString(), depth: current.depth + 1 });
-        }
-      }
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'unknown error';
-      crawlEvents.push(`page fetch failed: depth=${current.depth} url=${current.url} error=${detail}`);
-      console.warn(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
-    }
-  }
-
-  if (indexedPages.length === 0) {
-    throw new Error('URL crawl produced no readable pages.');
-  }
-
-  const snapshotText = buildSiteSnapshotText(sourceUrl, indexedPages);
-  const primaryTitle = indexedPages[0]?.title || sourceUrl;
-  const crawlComplete = `crawl completed: pages=${indexedPages.length}`;
-  crawlEvents.push(crawlComplete);
-  console.info(`[attachments/ingest] ${crawlComplete}`);
-
-  const pagesForMetadata = indexedPages.map((page) => ({
-    url: page.url,
-    title: page.title,
-    metaDescription: page.metaDescription,
-    excerpt: page.excerpt,
-    summary: page.summary,
-    extractedText: trimText(page.extractedText, 4500),
-    depth: page.depth,
-    rendered: page.rendered,
-  }));
+  const title = $('title').first().text().trim() || $('h1').first().text().trim() || sourceUrl;
+  const text = trimText($('body').text());
 
   return {
     status: 'parsed',
-    summary: `Crawled ${indexedPages.length} page(s) and built site snapshot (${primaryTitle}).`,
-    pageTitle: primaryTitle,
+    summary: `Fetched and parsed webpage content (${title}).`,
+    pageTitle: title,
     sourceUrl,
-    extractedText: snapshotText,
-    excerpt: excerpt(snapshotText, 360),
-    urlPageCount: indexedPages.length,
-    urlCrawlDepth: maxDepth,
-    urlCrawlMaxPages: maxPages,
-    urlPages: pagesForMetadata,
-    crawlEvents,
+    extractedText: text,
+    excerpt: excerpt(text),
   };
 }
 
@@ -499,9 +240,7 @@ export async function POST(request: Request) {
       if (!payload.sourceUrl) {
         return NextResponse.json({ error: 'URL is required for URL ingestion.' }, { status: 400 });
       }
-      const maxPages = payload.maxPages ?? DEFAULT_CRAWL_MAX_PAGES;
-      const maxDepth = payload.maxDepth ?? DEFAULT_CRAWL_MAX_DEPTH;
-      const result = await ingestUrl(payload.sourceUrl, maxPages, maxDepth);
+      const result = await ingestUrl(payload.sourceUrl);
       return NextResponse.json({ ingest: result });
     }
 

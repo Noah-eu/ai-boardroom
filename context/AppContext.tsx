@@ -13,35 +13,27 @@ import React, {
 import { onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
-import { z } from 'zod';
 import {
-  AIProvider,
   AttachmentIngestion,
   AppLanguage,
   Agent,
   AgentName,
   AgentStatus,
   DebateMode,
-  ExecutionSnapshot,
-  ExecutionOutputBundle,
-  ExecutionOutputFile,
   LogEntry,
   ProjectAttachment,
   ProjectAttachmentKind,
-  ProjectRevisionCycle,
   ProjectUsage,
-  RevisionExecutionStatus,
   OrchestratorState,
   OutputType,
   Project,
   ProjectStatus,
   Task,
   TaskGraph,
-  OpenAIModel,
-  resolveOpenAiModel,
   UsageTotals,
   WorkflowPhase,
 } from '@/types';
+import { z } from 'zod';
 import { getFirebaseClient, getFirebaseInitError, getFirebaseStorageBucketName } from '@/lib/firebase';
 import {
   createInitialState,
@@ -76,50 +68,41 @@ const SPEED_CONFIG: Record<ExecutionSpeed, { tickMs: number; minTaskMs: number; 
 };
 
 const MAX_REVISION_ROUNDS = 5;
-const MIN_EXECUTION_TASK_TIMEOUT_MS = 60_000;
-const MAX_EXECUTION_TASK_TIMEOUT_MS = 120_000;
-const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
-const MAX_AI_ATTACHMENT_SECTIONS = 6;
-const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
-const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
-const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
-const REAL_PLANNER_BUILD_MARKER =
-  (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
-    process.env.NEXT_PUBLIC_BUILD_MARKER ||
-    'local')
-    .toString()
-    .slice(0, 7);
 
-function resolveExecutionTaskTimeoutMs(): number {
-  const raw = process.env.NEXT_PUBLIC_EXECUTION_TASK_TIMEOUT_MS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    return DEFAULT_EXECUTION_TASK_TIMEOUT_MS;
-  }
-  return Math.max(MIN_EXECUTION_TASK_TIMEOUT_MS, Math.min(MAX_EXECUTION_TASK_TIMEOUT_MS, Math.floor(parsed)));
-}
+const plannerAgentSchema = z.enum([
+  'Planner',
+  'Architect',
+  'Builder',
+  'Reviewer',
+  'Tester',
+  'Integrator',
+]);
 
-function estimatePromptSize(inputText: string, context: unknown): { chars: number; tokensApprox: number } {
-  const contextText = (() => {
-    try {
-      return JSON.stringify(context ?? null);
-    } catch {
-      return String(context ?? '');
-    }
-  })();
-  const chars = inputText.length + contextText.length;
-  return {
-    chars,
-    tokensApprox: Math.ceil(chars / 4),
-  };
-}
+const plannerArtifactSchema = z.object({
+  path: z.string().min(1),
+  label: z.string().min(1),
+  kind: z.enum(['doc', 'json', 'report', 'zip', 'image']),
+});
+
+const plannerTaskSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  agent: plannerAgentSchema,
+  dependsOn: z.array(z.string()).default([]),
+  artifacts: z.array(plannerArtifactSchema).default([]),
+});
+
+const plannerTaskGraphSchema = z.object({
+  tasks: z.array(plannerTaskSchema).min(1),
+  concurrencyLimit: z.number().int().min(1).max(4).default(2),
+  maxRetries: z.number().int().min(0).max(4).default(2),
+});
 
 type AiRespondPayload = {
   projectId: string;
   language: AppLanguage;
   agentRole: string;
-  model?: OpenAIModel;
-  responseMode?: 'default' | 'structured_execution_bundle';
   inputText: string;
   context?: unknown;
   attachmentContext?: {
@@ -134,11 +117,6 @@ type AiUsageMeta = {
 };
 
 type AiRespondMeta = {
-  requestedModel: string | null;
-  resolvedModel: string;
-  reasoningIncluded: boolean;
-  reasoningEffort?: string | null;
-  textVerbosity?: string | null;
   model: string;
   usage: AiUsageMeta;
   imageContext?: {
@@ -156,109 +134,6 @@ type AiRespondResult = {
 
 type AiRespondLogContext = {
   agent?: AgentName;
-};
-
-type AiRespondOptions = {
-  timeoutMs?: number;
-};
-
-type AiRequestFailureKind = 'infrastructure' | 'request' | 'content';
-
-class AiRequestError extends Error {
-  kind: AiRequestFailureKind;
-  statusCode: number | null;
-  responseContentType: string | null;
-  rawBodySnippet: string | null;
-  retryable: boolean;
-
-  constructor(params: {
-    message: string;
-    kind: AiRequestFailureKind;
-    statusCode?: number | null;
-    responseContentType?: string | null;
-    rawBodySnippet?: string | null;
-    retryable?: boolean;
-  }) {
-    super(params.message);
-    this.name = 'AiRequestError';
-    this.kind = params.kind;
-    this.statusCode = params.statusCode ?? null;
-    this.responseContentType = params.responseContentType ?? null;
-    this.rawBodySnippet = params.rawBodySnippet ?? null;
-    this.retryable = params.retryable ?? false;
-  }
-}
-
-function shortBodySnippet(value: string, maxChars = 600): string {
-  return value.replace(/\s+/g, ' ').trim().slice(0, maxChars);
-}
-
-function classifyAiRequestFailure(params: {
-  statusCode?: number | null;
-  contentType?: string | null;
-  rawBody?: string | null;
-  parseFailed?: boolean;
-  timeout?: boolean;
-  missingText?: boolean;
-}): AiRequestError {
-  const statusCode = params.statusCode ?? null;
-  const contentType = params.contentType ?? null;
-  const rawBody = params.rawBody ?? '';
-  const snippet = rawBody ? shortBodySnippet(rawBody) : null;
-  const bodyLooksHtml = /<html|<!doctype html|<body/i.test(rawBody);
-  const nonJson = Boolean(contentType && !contentType.includes('application/json'));
-  const is5xx = statusCode !== null && statusCode >= 500;
-  const retryableStatus = statusCode !== null && [502, 503, 504].includes(statusCode);
-
-  if (params.timeout) {
-    return new AiRequestError({
-      message: 'AI endpoint timeout',
-      kind: 'infrastructure',
-      statusCode,
-      responseContentType: contentType,
-      rawBodySnippet: snippet,
-      retryable: true,
-    });
-  }
-
-  if (is5xx || nonJson || bodyLooksHtml || params.parseFailed) {
-    return new AiRequestError({
-      message:
-        `AI endpoint infrastructure failure` +
-        (statusCode ? ` (HTTP ${statusCode})` : '') +
-        (nonJson || bodyLooksHtml ? ': non-JSON/HTML response' : ''),
-      kind: 'infrastructure',
-      statusCode,
-      responseContentType: contentType,
-      rawBodySnippet: snippet,
-      retryable: retryableStatus || bodyLooksHtml || nonJson,
-    });
-  }
-
-  if (params.missingText) {
-    return new AiRequestError({
-      message: `AI request content failure${statusCode ? ` (HTTP ${statusCode})` : ''}: empty or invalid body`,
-      kind: 'content',
-      statusCode,
-      responseContentType: contentType,
-      rawBodySnippet: snippet,
-      retryable: false,
-    });
-  }
-
-  return new AiRequestError({
-    message: `AI request failed${statusCode ? ` (HTTP ${statusCode})` : ''}`,
-    kind: 'request',
-    statusCode,
-    responseContentType: contentType,
-    rawBodySnippet: snippet,
-    retryable: false,
-  });
-}
-
-type AttachmentIngestApiResponse = {
-  ingest?: AttachmentIngestion & { crawlEvents?: string[] };
-  error?: string;
 };
 
 type AttachmentContextSnapshot = {
@@ -351,7 +226,6 @@ type DraftAttachmentInput =
 const MODEL_PRICING_PER_MILLION: Record<string, { input: number; output: number }> = {
   'gpt-4.1': { input: 2.0, output: 8.0 },
   'gpt-4.1-mini': { input: 0.4, output: 1.6 },
-  'gpt-5.4': { input: 2.5, output: 15.0 },
   'gpt-4.1-nano': { input: 0.1, output: 0.4 },
   'gpt-4o': { input: 2.5, output: 10.0 },
   'gpt-4o-mini': { input: 0.15, output: 0.6 },
@@ -369,394 +243,6 @@ function estimateCostUsd(totals: UsageTotals, modelName: string | null): number 
   const inputCost = (totals.inputTokens / 1_000_000) * rates.input;
   const outputCost = (totals.outputTokens / 1_000_000) * rates.output;
   return Number((inputCost + outputCost).toFixed(6));
-}
-
-function estimateUsageCostUsd(usage: AiUsageMeta, modelName: string | null): number {
-  return estimateCostUsd(
-    {
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      totalTokens: usage.totalTokens,
-    },
-    modelName
-  );
-}
-
-const executionOutputFileSchema = z.object({
-  path: z.string().min(1),
-  content: z.string(),
-});
-
-const executionOutputSchema = z.object({
-  status: z.enum(['success', 'failed']),
-  summary: z.string().min(1),
-  files: z.array(executionOutputFileSchema),
-  notes: z.array(z.string()).optional().default([]),
-  removePaths: z.array(z.string().min(1)).optional().default([]),
-});
-
-function normalizeExecutionFilePath(filePath: string): string {
-  return filePath.replace(/^\.\//, '').replace(/^\/+/, '').trim();
-}
-
-function createRevisionCycle(cycleNumber: number, userPrompt: string): ProjectRevisionCycle {
-  return {
-    cycleNumber,
-    userPrompt,
-    requestedAt: new Date(),
-    approved: false,
-    executionStatus: 'pending',
-    baselineUpdated: false,
-  };
-}
-
-function mergeExecutionBaselineFiles(
-  previousFiles: ExecutionOutputFile[],
-  bundle: ExecutionOutputBundle
-): ExecutionOutputFile[] {
-  const merged = new Map<string, string>();
-  previousFiles.forEach((file) => {
-    merged.set(normalizeExecutionFilePath(file.path), file.content);
-  });
-
-  bundle.files.forEach((file) => {
-    merged.set(normalizeExecutionFilePath(file.path), file.content);
-  });
-
-  (bundle.removePaths ?? []).forEach((filePath) => {
-    merged.delete(normalizeExecutionFilePath(filePath));
-  });
-
-  return Array.from(merged.entries()).map(([path, content]) => ({ path, content }));
-}
-
-function findBuilderExecutionBundle(tasks: Task[]): ExecutionOutputBundle | null {
-  const builderTask = [...tasks].reverse().find((task) => task.agent === 'Builder');
-  if (!builderTask) return null;
-  const generated = builderTask.producesArtifacts.find((artifact) => artifact.path === 'generated-files.json');
-  return generated?.executionOutput ?? null;
-}
-
-function findIntegratorFinalSummary(tasks: Task[]): string | null {
-  const integratorTask = [...tasks].reverse().find((task) => task.agent === 'Integrator');
-  if (!integratorTask) return null;
-  const finalArtifact = integratorTask.producesArtifacts.find((artifact) => artifact.path === 'final-summary.md');
-  return finalArtifact?.content ?? null;
-}
-
-function deriveRevisionExecutionStatus(tasks: Task[]): RevisionExecutionStatus {
-  if (tasks.some((task) => task.status === 'failed' || task.status === 'canceled_due_to_failed_dependency')) {
-    return 'failed';
-  }
-  if (tasks.some((task) => task.status === 'queued' || task.status === 'blocked' || task.status === 'running')) {
-    return 'running';
-  }
-  if (tasks.some((task) => task.status === 'completed_with_fallback')) return 'completed_with_fallback';
-  return 'completed';
-}
-
-function isSupportedExecutionFilePath(filePath: string): boolean {
-  const normalized = normalizeExecutionFilePath(filePath).toLowerCase();
-  if (!normalized || normalized.includes('..')) {
-    return false;
-  }
-  return EXECUTION_OUTPUT_ALLOWED_EXTENSIONS.some((extension) => normalized.endsWith(extension));
-}
-
-function taskRequiresHtmlEntry(task: Task, project: Project): boolean {
-  if (task.agent !== 'Builder') {
-    return false;
-  }
-
-  if (project.outputType === 'app' || project.outputType === 'website') {
-    return true;
-  }
-
-  const combined = [project.description, task.title, task.description].join(' ').toLowerCase();
-  return /\b(html|website|web app|webapp|landing page|homepage|page|site)\b/.test(combined);
-}
-
-function parseExecutionOutputBundle(
-  raw: string,
-  task: Task,
-  project: Project
-): { bundle: ExecutionOutputBundle; error: null } | { bundle: null; error: string } {
-  let parsed: unknown;
-  try {
-    parsed = parseJsonObjectFromModelText(raw);
-  } catch {
-    const trimmed = raw.trim();
-    const looksLikeTruncated =
-      trimmed.length > 200 &&
-      !trimmed.endsWith('}') &&
-      !trimmed.endsWith(']') &&
-      !trimmed.endsWith('"');
-    if (looksLikeTruncated) {
-      return {
-        bundle: null,
-        error: `Execution output was truncated (${trimmed.length} chars). The model likely hit the output token limit. Try a shorter prompt or simpler project.`,
-      };
-    }
-    return { bundle: null, error: `Execution output is not valid JSON (${trimmed.length} chars).` };
-  }
-
-  const result = executionOutputSchema.safeParse(parsed);
-  if (!result.success) {
-    return { bundle: null, error: 'Execution output does not match the required schema.' };
-  }
-
-  const normalizedFiles: ExecutionOutputFile[] = [];
-  const seenPaths = new Set<string>();
-  for (const file of result.data.files) {
-    const normalizedPath = normalizeExecutionFilePath(file.path);
-    if (!isSupportedExecutionFilePath(normalizedPath)) {
-      return { bundle: null, error: `Unsupported generated file path: ${file.path}` };
-    }
-    if (seenPaths.has(normalizedPath)) {
-      return { bundle: null, error: `Duplicate generated file path: ${normalizedPath}` };
-    }
-    seenPaths.add(normalizedPath);
-    normalizedFiles.push({
-      path: normalizedPath,
-      content: file.content,
-    });
-  }
-
-  if (normalizedFiles.length === 0) {
-    return { bundle: null, error: 'Execution output must contain at least one file.' };
-  }
-
-  if (taskRequiresHtmlEntry(task, project) && !normalizedFiles.some((file) => file.path.toLowerCase() === 'index.html')) {
-    return { bundle: null, error: 'Website execution output must include index.html.' };
-  }
-
-  const bundle: ExecutionOutputBundle = {
-    status: result.data.status,
-    summary: result.data.summary,
-    files: normalizedFiles,
-    notes: result.data.notes ?? [],
-    removePaths: (result.data.removePaths ?? [])
-      .map((filePath) => normalizeExecutionFilePath(filePath))
-      .filter((filePath) => isSupportedExecutionFilePath(filePath)),
-  };
-
-  if (bundle.status !== 'success') {
-    return { bundle: null, error: 'Execution output returned failed status.' };
-  }
-
-  return { bundle, error: null };
-}
-
-function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['producesArtifacts'][number]): boolean {
-  return task.agent === 'Builder' && artifact.path === 'generated-files.json';
-}
-
-function artifactCanBeGeneratedLocally(task: Task, artifact: Task['producesArtifacts'][number]): boolean {
-  return task.agent === 'Builder' && artifact.path === 'patch-plan.md';
-}
-
-function buildPatchPlanFromExecutionBundle(
-  bundle: ExecutionOutputBundle,
-  project: Project
-): string {
-  const heading = project.language === 'cz' ? '# Patch Plan' : '# Patch Plan';
-  const summaryHeading = project.language === 'cz' ? '## Summary' : '## Summary';
-  const stepsHeading = project.language === 'cz' ? '## Ordered patch steps' : '## Ordered patch steps';
-  const filesHeading = project.language === 'cz' ? '## Target files and reasons' : '## Target files and reasons';
-  const notesHeading = project.language === 'cz' ? '## Dependencies and rollout notes' : '## Dependencies and rollout notes';
-  const emptyNotes = project.language === 'cz' ? '- No additional rollout notes.' : '- No additional rollout notes.';
-
-  const orderedSteps = bundle.files.map((file, index) => {
-    const normalizedPath = normalizeExecutionFilePath(file.path);
-    const reason = normalizedPath.endsWith('.html')
-      ? 'Entry structure and UI markup'
-      : normalizedPath.endsWith('.css')
-      ? 'Styling and layout rules'
-      : normalizedPath.endsWith('.js')
-      ? 'Interactive behavior and state handling'
-      : normalizedPath.endsWith('.json')
-      ? 'Supporting data/config payload'
-      : 'Supporting documentation or notes';
-    return `${index + 1}. Update ${normalizedPath} to deliver ${reason.toLowerCase()}.`;
-  });
-
-  const fileReasons = bundle.files.map((file) => {
-    const normalizedPath = normalizeExecutionFilePath(file.path);
-    const reason = normalizedPath.endsWith('.html')
-      ? 'Primary application shell and visible interface.'
-      : normalizedPath.endsWith('.css')
-      ? 'Visual styling, spacing, color, and responsive behavior.'
-      : normalizedPath.endsWith('.js')
-      ? 'Client-side interactions, events, and persistence logic.'
-      : normalizedPath.endsWith('.json')
-      ? 'Machine-readable support data for the generated output.'
-      : 'Supporting documentation for the generated output.';
-    return `- ${normalizedPath}: ${reason}`;
-  });
-
-  const rolloutNotes = bundle.notes.length > 0 ? bundle.notes.map((note) => `- ${note}`) : [emptyNotes];
-
-  return [
-    heading,
-    '',
-    summaryHeading,
-    bundle.summary,
-    '',
-    stepsHeading,
-    ...orderedSteps,
-    '',
-    filesHeading,
-    ...fileReasons,
-    '',
-    notesHeading,
-    ...rolloutNotes,
-  ].join('\n');
-}
-
-function stripJsonCodeFence(value: string): string {
-  return value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-}
-
-function extractFirstJsonObject(value: string): string | null {
-  const start = value.indexOf('{');
-  if (start < 0) return null;
-
-  let depth = 0;
-  let inString = false;
-  let escaping = false;
-
-  for (let index = start; index < value.length; index += 1) {
-    const char = value[index];
-
-    if (inString) {
-      if (escaping) {
-        escaping = false;
-        continue;
-      }
-      if (char === '\\') {
-        escaping = true;
-        continue;
-      }
-      if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (char === '{') {
-      depth += 1;
-    } else if (char === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        return value.slice(start, index + 1);
-      }
-    }
-  }
-
-  return null;
-}
-
-function repairJsonStringEscapes(value: string): string {
-  let repaired = '';
-  let inString = false;
-
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index];
-
-    if (!inString) {
-      repaired += char;
-      if (char === '"') {
-        inString = true;
-      }
-      continue;
-    }
-
-    if (char === '\\') {
-      const next = value[index + 1];
-      if (next === undefined) {
-        repaired += '\\\\';
-        continue;
-      }
-
-      if (/^["\\/bfnrt]$/.test(next)) {
-        repaired += `\\${next}`;
-        index += 1;
-        continue;
-      }
-
-      if (next === 'u') {
-        const unicodeDigits = value.slice(index + 2, index + 6);
-        if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
-          repaired += `\\u${unicodeDigits}`;
-          index += 5;
-          continue;
-        }
-      }
-
-      if (/\s/.test(next)) {
-        continue;
-      }
-
-      repaired += '\\\\';
-      continue;
-    }
-
-    if (char === '"') {
-      inString = false;
-      repaired += char;
-      continue;
-    }
-
-    if (char === '\n') {
-      repaired += '\\n';
-      continue;
-    }
-
-    if (char === '\r') {
-      repaired += '\\r';
-      continue;
-    }
-
-    if (char === '\t') {
-      repaired += '\\t';
-      continue;
-    }
-
-    repaired += char;
-  }
-
-  return repaired;
-}
-
-function parseJsonObjectFromModelText(raw: string): unknown {
-  const normalizedRaw = raw.trim();
-  const candidates = [
-    normalizedRaw,
-    stripJsonCodeFence(normalizedRaw),
-    extractFirstJsonObject(stripJsonCodeFence(normalizedRaw)),
-  ].filter((candidate, index, all): candidate is string => Boolean(candidate) && all.indexOf(candidate) === index);
-
-  let lastError: unknown = null;
-  for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate);
-    } catch (error) {
-      lastError = error;
-    }
-
-    try {
-      return JSON.parse(repairJsonStringEscapes(candidate));
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error('Invalid JSON payload.');
 }
 
 function createEmptyUsage(): ProjectUsage {
@@ -788,17 +274,6 @@ function detectFileKind(file: File): ProjectAttachmentKind {
     return 'zip';
   }
   return 'file';
-}
-
-function normalizeUserUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return '';
-
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
-  }
-
-  return `https://${trimmed}`;
 }
 
 function normalizeAiImageUrl(value?: string): string | null {
@@ -890,8 +365,6 @@ type Action =
       name: string;
       description: string;
       language: AppLanguage;
-      provider: AIProvider;
-      model: OpenAIModel;
       outputType: OutputType;
       simulationMode: boolean;
       debateRounds: number;
@@ -905,7 +378,6 @@ type Action =
   | { type: 'REQUEST_APPROVAL' }
   | { type: 'APPROVE_PLAN' }
   | { type: 'REJECT_PLAN'; feedback: string; attachmentIds?: string[] }
-  | { type: 'REVISION_FROM_COMPLETE'; feedback: string; attachmentIds?: string[] }
   | { type: 'SET_PHASE'; phase: WorkflowPhase }
   | { type: 'UPDATE_AGENT_STATUS'; agent: AgentName; status: AgentStatus; lastOutput?: string }
   | { type: 'ADD_USER_MESSAGE'; content: string; attachmentIds?: string[] }
@@ -944,33 +416,6 @@ type Action =
       projectId: string;
       attachmentId: string;
       ingestion: Partial<AttachmentIngestion>;
-    }
-  | {
-      type: 'SET_EXECUTION_SNAPSHOT';
-      projectId: string;
-      snapshot: ExecutionSnapshot;
-    }
-  | {
-      type: 'MARK_REVISION_APPROVED';
-      projectId: string;
-      cycleNumber: number;
-      debateSummary: string;
-      snapshotId: string;
-    }
-  | {
-      type: 'COMPLETE_REVISION_CYCLE';
-      projectId: string;
-      cycleNumber: number;
-      status: RevisionExecutionStatus;
-      baselineUpdated: boolean;
-      finalSummary?: string;
-      generatedFilesCount?: number;
-    }
-  | {
-      type: 'SET_STABLE_BASELINE';
-      projectId: string;
-      bundle: ExecutionOutputBundle;
-      files: ExecutionOutputFile[];
     }
   | { type: 'RESET' };
 
@@ -1020,283 +465,11 @@ function syncProjectById(
 
 function dependencySatisfied(tasks: Task[], dependencyId: string): boolean {
   const dependencyTask = tasks.find((task) => task.id === dependencyId);
-  return dependencyTask
-  ? dependencyTask.status === 'done' || dependencyTask.status === 'completed_with_fallback'
-    : false;
+  return dependencyTask ? dependencyTask.status === 'done' || dependencyTask.status === 'failed' : false;
 }
 
 function dependenciesSatisfied(tasks: Task[], task: Task): boolean {
   return task.dependsOn.every((dependencyId) => dependencySatisfied(tasks, dependencyId));
-}
-
-type TaskPrerequisiteValidationResult =
-  | { ok: true }
-  | {
-      ok: false;
-      reason: 'dependency-failed' | 'dependency-pending' | 'artifact-missing' | 'artifact-invalid' | 'artifact-stale';
-      dependencyTask?: Task;
-      artifactPath?: string;
-      details: string;
-    };
-
-type DependencyFailureTrace = {
-  rootFailedTask: Task;
-  chain: Task[];
-};
-
-function getRequiredUpstreamArtifacts(task: Task): Array<{ agent: AgentName; path: string; requiresExecutionOutput?: boolean }> {
-  if (task.agent === 'Reviewer') {
-    return [
-      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
-      { agent: 'Builder', path: 'patch-plan.md' },
-    ];
-  }
-  if (task.agent === 'Tester') {
-    return [
-      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
-      { agent: 'Reviewer', path: 'review-notes.md' },
-    ];
-  }
-  if (task.agent === 'Integrator') {
-    return [
-      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
-      { agent: 'Reviewer', path: 'review-notes.md' },
-      { agent: 'Tester', path: 'test-checklist.md' },
-    ];
-  }
-  return [];
-}
-
-function validateTaskPrerequisites(project: Project, task: Task): TaskPrerequisiteValidationResult {
-  const executionSnapshot = project.executionSnapshot;
-  const snapshotCreatedAt = executionSnapshot ? new Date(executionSnapshot.createdAt).getTime() : 0;
-
-  for (const dependencyId of task.dependsOn) {
-    const dependencyTask = project.tasks.find((candidate) => candidate.id === dependencyId);
-    if (!dependencyTask) {
-      return {
-        ok: false,
-        reason: 'artifact-missing',
-        details: `Dependency task not found (${dependencyId}).`,
-      };
-    }
-
-    if (
-      dependencyTask.status === 'failed' ||
-      dependencyTask.status === 'canceled_due_to_failed_dependency' ||
-      dependencyTask.status === 'blocked_due_to_failed_dependency'
-    ) {
-      return {
-        ok: false,
-        reason: 'dependency-failed',
-        dependencyTask,
-        details: `Dependency ${dependencyTask.title} is ${dependencyTask.status}.`,
-      };
-    }
-
-    if (dependencyTask.status !== 'done' && dependencyTask.status !== 'completed_with_fallback') {
-      return {
-        ok: false,
-        reason: 'dependency-pending',
-        dependencyTask,
-        details: `Dependency ${dependencyTask.title} is ${dependencyTask.status}.`,
-      };
-    }
-  }
-
-  const requiredArtifacts = getRequiredUpstreamArtifacts(task);
-  for (const requirement of requiredArtifacts) {
-    const sourceTask = project.tasks.find((candidate) => candidate.agent === requirement.agent);
-    if (!sourceTask) {
-      return {
-        ok: false,
-        reason: 'artifact-missing',
-        artifactPath: requirement.path,
-        details: `Required upstream task (${requirement.agent}) is missing.`,
-      };
-    }
-
-    if (
-      sourceTask.status === 'failed' ||
-      sourceTask.status === 'canceled_due_to_failed_dependency' ||
-      sourceTask.status === 'blocked_due_to_failed_dependency'
-    ) {
-      return {
-        ok: false,
-        reason: 'dependency-failed',
-        dependencyTask: sourceTask,
-        artifactPath: requirement.path,
-        details: `Required upstream task ${sourceTask.title} failed before ${requirement.path}.`,
-      };
-    }
-
-    const artifact = sourceTask.producesArtifacts.find((entry) => entry.path === requirement.path);
-    if (!artifact) {
-      return {
-        ok: false,
-        reason: 'artifact-missing',
-        dependencyTask: sourceTask,
-        artifactPath: requirement.path,
-        details: `Required artifact ${requirement.path} not found on ${sourceTask.title}.`,
-      };
-    }
-
-    if (requirement.requiresExecutionOutput && !artifact.executionOutput) {
-      return {
-        ok: false,
-        reason: 'artifact-invalid',
-        dependencyTask: sourceTask,
-        artifactPath: requirement.path,
-        details: `Required artifact ${requirement.path} has no valid executionOutput.`,
-      };
-    }
-
-    if (!requirement.requiresExecutionOutput && !artifact.content?.trim()) {
-      return {
-        ok: false,
-        reason: 'artifact-invalid',
-        dependencyTask: sourceTask,
-        artifactPath: requirement.path,
-        details: `Required artifact ${requirement.path} is empty.`,
-      };
-    }
-
-    if (executionSnapshot) {
-      if (!artifact.generatedAt) {
-        return {
-          ok: false,
-          reason: 'artifact-invalid',
-          dependencyTask: sourceTask,
-          artifactPath: requirement.path,
-          details: `Required artifact ${requirement.path} has no generatedAt timestamp for current cycle.`,
-        };
-      }
-
-      const generatedAt = new Date(artifact.generatedAt).getTime();
-      if (generatedAt < snapshotCreatedAt) {
-        return {
-          ok: false,
-          reason: 'artifact-stale',
-          dependencyTask: sourceTask,
-          artifactPath: requirement.path,
-          details: `Required artifact ${requirement.path} is stale for cycle ${executionSnapshot.cycleNumber}.`,
-        };
-      }
-    }
-  }
-
-  return { ok: true };
-}
-
-function isFailureTerminalStatus(status: Task['status']): boolean {
-  return (
-    status === 'failed' ||
-    status === 'canceled_due_to_failed_dependency' ||
-    status === 'blocked_due_to_failed_dependency'
-  );
-}
-
-function findDependencyFailureTrace(
-  project: Project,
-  task: Task,
-  visited = new Set<string>()
-): DependencyFailureTrace | null {
-  if (visited.has(task.id)) {
-    return null;
-  }
-  visited.add(task.id);
-
-  if (task.status === 'failed') {
-    return { rootFailedTask: task, chain: [task] };
-  }
-
-  for (const dependencyId of task.dependsOn) {
-    const dependencyTask = project.tasks.find((candidate) => candidate.id === dependencyId);
-    if (!dependencyTask) {
-      continue;
-    }
-
-    if (dependencyTask.status === 'failed') {
-      return {
-        rootFailedTask: dependencyTask,
-        chain: [task, dependencyTask],
-      };
-    }
-
-    if (
-      dependencyTask.status === 'blocked' ||
-      dependencyTask.status === 'canceled_due_to_failed_dependency' ||
-      dependencyTask.status === 'blocked_due_to_failed_dependency'
-    ) {
-      const nested = findDependencyFailureTrace(project, dependencyTask, visited);
-      if (nested) {
-        return {
-          rootFailedTask: nested.rootFailedTask,
-          chain: [task, ...nested.chain],
-        };
-      }
-    }
-  }
-
-  return null;
-}
-
-function summarizeFailureType(errorMessage?: string): string | null {
-  if (!errorMessage) return null;
-  const normalized = errorMessage.replace(/\s+/g, ' ').trim();
-  if (!normalized) return null;
-  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
-}
-
-function formatDependencyFailureMessage(
-  task: Task,
-  dependencyTask: Task | undefined,
-  trace: DependencyFailureTrace | null,
-  artifactPath?: string,
-  action: 'blocked' | 'canceled' = 'canceled'
-): string {
-  const immediateTask = dependencyTask ?? trace?.chain[1] ?? trace?.rootFailedTask;
-  const rootTask = trace?.rootFailedTask ?? dependencyTask;
-  const failureType = summarizeFailureType(rootTask?.errorMessage);
-  const artifactInfo = artifactPath ? ` on ${artifactPath}` : '';
-  const failureInfo = failureType ? ` (${failureType})` : '';
-
-  if (immediateTask && rootTask && immediateTask.id !== rootTask.id) {
-    return `${task.title} ${action} because ${immediateTask.title} was blocked after ${rootTask.title} failed${artifactInfo}${failureInfo}.`;
-  }
-
-  if (rootTask) {
-    return `${task.title} ${action} because ${rootTask.title} failed${artifactInfo}${failureInfo}.`;
-  }
-
-  if (immediateTask) {
-    return `${task.title} ${action} because dependency ${immediateTask.title} failed${artifactInfo}.`;
-  }
-
-  return `${task.title} ${action} due to failed upstream dependency${artifactInfo}.`;
-}
-
-function buildWorkflowFailurePropagationSummary(tasks: Task[]): string | null {
-  const rootFailedTask = tasks.find((task) => task.status === 'failed');
-  const blockedDueToFailure = tasks.filter(
-    (task) => task.status === 'blocked_due_to_failed_dependency'
-  ).length;
-  const canceledDueToFailure = tasks.filter(
-    (task) => task.status === 'canceled_due_to_failed_dependency'
-  ).length;
-  const downstreamImpacted = blockedDueToFailure + canceledDueToFailure;
-
-  if (!rootFailedTask || downstreamImpacted === 0) {
-    return null;
-  }
-
-  const failureType = summarizeFailureType(rootFailedTask.errorMessage);
-  const failureDetails = failureType ? ` (${failureType})` : '';
-  return (
-    `Workflow ended due to upstream failure propagation: root cause ${rootFailedTask.title} failed` +
-    `${failureDetails}. Downstream impacted: ${downstreamImpacted} task(s)` +
-    ` (${blockedDueToFailure} blocked, ${canceledDueToFailure} canceled).`
-  );
 }
 
 function getLatestOrchestratorSummary(project: Project): string | null {
@@ -1304,78 +477,6 @@ function getLatestOrchestratorSummary(project: Project): string | null {
     .reverse()
     .find((entry) => entry.sender === 'orchestrator' && entry.type === 'system');
   return message?.content ?? null;
-}
-
-function shorten(value: string | undefined, maxChars: number): string {
-  if (!value) return '';
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}...`;
-}
-
-function compactAttachmentContextSnapshot(snapshot: AttachmentContextSnapshot): {
-  snapshot: AttachmentContextSnapshot;
-  originalSectionCount: number;
-  keptSectionCount: number;
-  originalChars: number;
-  keptChars: number;
-  truncatedSections: number;
-} {
-  const originalSectionCount = snapshot.textSections.length;
-  const originalChars = snapshot.textSections.reduce((sum, section) => sum + section.text.length, 0);
-  let remainingChars = MAX_AI_ATTACHMENT_TOTAL_CHARS;
-  let truncatedSections = 0;
-
-  const textSections = snapshot.textSections
-    .slice(0, MAX_AI_ATTACHMENT_SECTIONS)
-    .map((section) => {
-      if (remainingChars <= 0) {
-        truncatedSections += 1;
-        return null;
-      }
-
-      const budget = Math.min(MAX_AI_ATTACHMENT_SECTION_CHARS, remainingChars);
-      const text = shorten(section.text, budget);
-      if (text.length < section.text.length) {
-        truncatedSections += 1;
-      }
-      remainingChars -= text.length;
-      return {
-        ...section,
-        text,
-      };
-    })
-    .filter((section): section is AttachmentContextSnapshot['textSections'][number] => Boolean(section));
-
-  truncatedSections += Math.max(0, snapshot.textSections.length - MAX_AI_ATTACHMENT_SECTIONS);
-
-  return {
-    snapshot: {
-      ...snapshot,
-      textSections,
-    },
-    originalSectionCount,
-    keptSectionCount: textSections.length,
-    originalChars,
-    keptChars: textSections.reduce((sum, section) => sum + section.text.length, 0),
-    truncatedSections,
-  };
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value === null || typeof value !== 'object') {
-    return value;
-  }
-  if (Object.isFrozen(value)) {
-    return value;
-  }
-  Object.freeze(value);
-  Object.getOwnPropertyNames(value).forEach((prop) => {
-    const nested = (value as Record<string, unknown>)[prop];
-    if (nested && typeof nested === 'object') {
-      deepFreeze(nested);
-    }
-  });
-  return value;
 }
 
 function appReducer(state: AppState, action: Action): AppState {
@@ -1390,9 +491,7 @@ function appReducer(state: AppState, action: Action): AppState {
         action.debateRounds,
         action.debateMode,
         action.maxWordsPerAgent,
-        action.projectId,
-        action.provider,
-        action.model
+        action.projectId
       );
       return {
         ...state,
@@ -1452,14 +551,8 @@ function appReducer(state: AppState, action: Action): AppState {
         ...agent,
         status: (phaseAgents.includes(agent.name) ? 'thinking' : 'idle') as AgentStatus,
       }));
-      const cycleNumber = targetProject.revisionRound + 1;
-      const hasCycle = targetProject.revisionHistory.some((cycle) => cycle.cycleNumber === cycleNumber);
       const updatedProject: Project = {
         ...targetProject,
-        currentCycleNumber: cycleNumber,
-        revisionHistory: hasCycle
-          ? targetProject.revisionHistory
-          : [...targetProject.revisionHistory, createRevisionCycle(cycleNumber, action.task)],
         status: 'debating',
         messages: [...targetProject.messages, createMessage('user', action.task), welcomeMsg],
         updatedAt: new Date(),
@@ -1567,39 +660,8 @@ function appReducer(state: AppState, action: Action): AppState {
       const updatedProject: Project = {
         ...state.activeProject,
         status: 'debating',
-        currentCycleNumber: nextRound,
         latestRevisionFeedback: action.feedback,
         revisionRound: nextRound,
-        revisionHistory: [...state.activeProject.revisionHistory, createRevisionCycle(nextRound, action.feedback)],
-        messages: [...state.activeProject.messages, msg],
-        updatedAt: new Date(),
-      };
-      return {
-        ...state,
-        currentPhase: 'debate',
-        agents: state.agents.map((agent) => ({ ...agent, status: 'idle' })),
-        activeProject: updatedProject,
-        projects: state.projects.map((p) => (p.id === updatedProject.id ? updatedProject : p)),
-        executionLog: [...state.executionLog, log],
-      };
-    }
-
-    case 'REVISION_FROM_COMPLETE': {
-      if (!state.activeProject) return state;
-      const lang = state.activeProject.language;
-      const nextRound = state.activeProject.revisionRound + 1;
-      const msg = createMessage('user', action.feedback, 'chat', undefined, action.attachmentIds);
-      const log = createLogEntry(
-        translateWithVars(lang, 'workflow.revision.fromComplete', { round: nextRound }),
-        'warning'
-      );
-      const updatedProject: Project = {
-        ...state.activeProject,
-        status: 'debating',
-        currentCycleNumber: nextRound,
-        latestRevisionFeedback: action.feedback,
-        revisionRound: nextRound,
-        revisionHistory: [...state.activeProject.revisionHistory, createRevisionCycle(nextRound, action.feedback)],
         messages: [...state.activeProject.messages, msg],
         updatedAt: new Date(),
       };
@@ -1728,10 +790,9 @@ function appReducer(state: AppState, action: Action): AppState {
             currentUsage.session.totalTokens +
             (action.usage.totalTokens || action.usage.inputTokens + action.usage.outputTokens),
         };
-        const modelName = action.model || project.model || currentUsage.activeModel || null;
+        const modelName = action.model || currentUsage.activeModel || null;
         const modelIndex = currentUsage.models.findIndex((entry) => entry.model === action.model);
         const nextModels = [...currentUsage.models];
-        const incrementalCostUsd = estimateUsageCostUsd(action.usage, action.model || project.model || null);
 
         if (modelIndex >= 0) {
           const current = nextModels[modelIndex];
@@ -1766,8 +827,8 @@ function appReducer(state: AppState, action: Action): AppState {
             session: nextSession,
             activeModel: modelName,
             models: nextModels,
-            estimatedProjectCostUsd: Number((currentUsage.estimatedProjectCostUsd + incrementalCostUsd).toFixed(6)),
-            sessionCostUsd: Number((currentUsage.sessionCostUsd + incrementalCostUsd).toFixed(6)),
+            estimatedProjectCostUsd: estimateCostUsd(nextTotals, modelName),
+            sessionCostUsd: estimateCostUsd(nextSession, modelName),
             lastUpdatedAt: new Date(),
             persistence: {
               ...currentUsage.persistence,
@@ -1815,62 +876,6 @@ function appReducer(state: AppState, action: Action): AppState {
       }));
     }
 
-    case 'SET_EXECUTION_SNAPSHOT': {
-      return syncProjectById(state, action.projectId, (project) => ({
-        ...project,
-        executionSnapshot: action.snapshot,
-        updatedAt: new Date(),
-      }));
-    }
-
-    case 'MARK_REVISION_APPROVED': {
-      return syncProjectById(state, action.projectId, (project) => ({
-        ...project,
-        revisionHistory: project.revisionHistory.map((cycle) =>
-          cycle.cycleNumber === action.cycleNumber
-            ? {
-                ...cycle,
-                approved: true,
-                approvedAt: new Date(),
-                debateSummary: action.debateSummary,
-                executionSnapshotId: action.snapshotId,
-                executionStatus: 'running',
-              }
-            : cycle
-        ),
-        updatedAt: new Date(),
-      }));
-    }
-
-    case 'COMPLETE_REVISION_CYCLE': {
-      return syncProjectById(state, action.projectId, (project) => ({
-        ...project,
-        revisionHistory: project.revisionHistory.map((cycle) =>
-          cycle.cycleNumber === action.cycleNumber
-            ? {
-                ...cycle,
-                executionStatus: action.status,
-                baselineUpdated: action.baselineUpdated,
-                finalSummary: action.finalSummary ?? cycle.finalSummary,
-                generatedFilesCount: action.generatedFilesCount ?? cycle.generatedFilesCount,
-                completedAt: new Date(),
-              }
-            : cycle
-        ),
-        updatedAt: new Date(),
-      }));
-    }
-
-    case 'SET_STABLE_BASELINE': {
-      return syncProjectById(state, action.projectId, (project) => ({
-        ...project,
-        latestStableBundle: action.bundle,
-        latestStableFiles: action.files,
-        latestStableUpdatedAt: new Date(),
-        updatedAt: new Date(),
-      }));
-    }
-
     case 'RESET': {
       return createInitialAppState();
     }
@@ -1899,7 +904,6 @@ interface AppContextValue {
     name: string,
     description: string,
     projectLanguage: AppLanguage,
-    model: OpenAIModel,
     outputType: OutputType,
     simulationMode: boolean,
     debateRounds: number,
@@ -1914,7 +918,6 @@ interface AppContextValue {
   requestApproval: () => void;
   approvePlan: () => void;
   rejectPlan: (feedback: string, attachmentIds?: string[]) => void;
-  requestRevisionFromComplete: (feedback: string, attachmentIds?: string[]) => void;
   updateAgentStatus: (agent: AgentName, status: AgentStatus, lastOutput?: string) => void;
   addUserMessage: (content: string, attachmentIds?: string[]) => void;
   attachToProject: (projectId: string, attachment: DraftAttachmentInput) => Promise<ProjectAttachment>;
@@ -1952,10 +955,9 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
   const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
-  const [language, setLanguage] = useState<Language>('cz');
+  const [language, setLanguage] = useState<Language>('en');
   const [executionSpeed, setExecutionSpeed] = useState<ExecutionSpeed>('normal');
   const [autoPauseCheckpoints, setAutoPauseCheckpoints] = useState(true);
-  const executionTaskTimeoutMs = useMemo(() => resolveExecutionTaskTimeoutMs(), []);
   const [pausedSchedulers, setPausedSchedulers] = useState<Record<string, boolean>>({});
   const [deadlocks, setDeadlocks] = useState<Record<string, DeadlockState | null>>({});
   const stateRef = useRef<AppState>(state);
@@ -1963,9 +965,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const schedulerIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const schedulerPausedRef = useRef<Record<string, boolean>>({});
   const taskTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const checkpointHitRef = useRef<Record<string, { approval: boolean }>>({});
+  const checkpointHitRef = useRef<Record<string, { approval: boolean; integrator: boolean }>>({});
   const deadlockSignatureRef = useRef<Record<string, string>>({});
-  const completedSnapshotRef = useRef<Record<string, string>>({});
   const debateRunsRef = useRef<Record<string, boolean>>({});
   const debateRoundStateRef = useRef<Record<string, { isRunning: boolean; currentRound: number }>>({});
   const projectPhaseRef = useRef<Record<string, WorkflowPhase>>({});
@@ -2194,126 +1195,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const createExecutionSnapshot = useCallback((project: Project): ExecutionSnapshot => {
-    const approvedDebateSummary = getLatestOrchestratorSummary(project) ?? '';
-    const cycleNumber = project.revisionRound + 1;
-    const attachmentContext = buildAttachmentContext(project);
-    const imageInputs: ExecutionSnapshot['imageInputs'] = [];
-    const pdfTexts: ExecutionSnapshot['pdfTexts'] = [];
-    const zipSnapshots: ExecutionSnapshot['zipSnapshots'] = [];
-    const siteSnapshots: ExecutionSnapshot['siteSnapshots'] = [];
-    const missingInputNotes: string[] = [];
-
-    for (const attachment of project.attachments) {
-      const source = (attachment.source ?? 'message') as 'project' | 'message';
-      const ingestion = attachment.ingestion;
-
-      if (attachment.kind === 'image') {
-        const resolvedUrl = resolveAttachmentImageUrl(attachment);
-        if (resolvedUrl) {
-          imageInputs.push({
-            attachmentId: attachment.id,
-            title: attachment.title,
-            source,
-            url: resolvedUrl,
-            description: ingestion?.summary ?? ingestion?.excerpt,
-          });
-        } else {
-          missingInputNotes.push(`Image input missing URL: ${attachment.title}`);
-        }
-      }
-
-      if (attachment.kind === 'pdf') {
-        if (ingestion?.extractedText?.trim()) {
-          pdfTexts.push({
-            attachmentId: attachment.id,
-            title: attachment.title,
-            source,
-            text: shorten(ingestion.extractedText, 24_000),
-          });
-        } else {
-          missingInputNotes.push(`PDF text missing or unreadable: ${attachment.title}`);
-        }
-      }
-
-      if (attachment.kind === 'zip') {
-        if (ingestion?.zipFileTree?.length) {
-          zipSnapshots.push({
-            attachmentId: attachment.id,
-            title: attachment.title,
-            source,
-            fileTree: ingestion.zipFileTree.slice(0, 300),
-            keyFiles: (ingestion.zipKeyFiles ?? []).slice(0, 12).map((file) => ({
-              path: file.path,
-              content: shorten(file.content, 3_500),
-            })),
-          });
-        } else {
-          missingInputNotes.push(`ZIP tree missing or unreadable: ${attachment.title}`);
-        }
-      }
-
-      if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
-          siteSnapshots.push({
-            attachmentId: attachment.id,
-            title: attachment.title,
-            source,
-            pageTitle: ingestion?.pageTitle,
-            summary: ingestion?.summary,
-            extractedText: shorten(ingestion?.extractedText, 24_000),
-            pages: ingestion?.urlPages?.slice(0, 10).map((page) => ({
-              url: page.url,
-              title: page.title,
-              summary: page.summary,
-              excerpt: shorten(page.excerpt, 700),
-            })),
-          });
-        } else {
-          missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
-        }
-      }
-    }
-
-    if (!approvedDebateSummary.trim()) {
-      missingInputNotes.push('Approved debate summary missing.');
-    }
-
-    const snapshot: ExecutionSnapshot = {
-      id: `snapshot-${generateId()}`,
-      createdAt: new Date(),
-      cycleNumber,
-      revisionPrompt: project.latestRevisionFeedback,
-      projectPrompt: project.description,
-      approvedDebateSummary,
-      latestStableSummary: project.latestStableBundle?.summary ?? null,
-      latestStableFiles: project.latestStableFiles,
-      projectAttachments: attachmentContext.projectAttachments,
-      messageAttachments: attachmentContext.messageAttachments,
-      imageInputs,
-      pdfTexts,
-      zipSnapshots,
-      siteSnapshots,
-      missingInputNotes,
-    };
-
-    return deepFreeze(snapshot);
-  }, [buildAttachmentContext]);
-
   const callAiRespond = useCallback(
     async (
       payload: AiRespondPayload,
       logContext?: AiRespondLogContext,
-      attachmentSnapshot?: AttachmentContextSnapshot,
-      options?: AiRespondOptions
+      attachmentSnapshot?: AttachmentContextSnapshot
     ): Promise<AiRespondResult> => {
       const role = payload.agentRole;
       const project = stateRef.current.projects.find((candidate) => candidate.id === payload.projectId);
       const attachmentContext = attachmentSnapshot ?? (project ? buildAttachmentContext(project) : null);
-      const compactedAttachmentContext = attachmentContext
-        ? compactAttachmentContextSnapshot(attachmentContext)
-        : null;
-      const requestAttachmentContext = compactedAttachmentContext?.snapshot ?? attachmentContext;
       const imageContextByUrl = new Map<
         string,
         {
@@ -2324,8 +1214,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       >();
 
-      if (requestAttachmentContext) {
-        requestAttachmentContext.images.forEach((image) => {
+      if (attachmentContext) {
+        attachmentContext.images.forEach((image) => {
           const existing = imageContextByUrl.get(image.url);
           if (existing) {
             if (!existing.attachmentIds.includes(image.attachmentId)) {
@@ -2343,17 +1233,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       const aiImages = Array.from(imageContextByUrl.values()).slice(0, 8);
-      const requestedModel = payload.model ?? project?.model ?? undefined;
       const requestPayload: AiRespondPayload = {
         ...payload,
-        model: requestedModel,
         context: {
           ...(typeof payload.context === 'object' && payload.context !== null ? payload.context : { raw: payload.context ?? null }),
-          attachments: requestAttachmentContext
+          attachments: attachmentContext
             ? {
-                projectAttachments: requestAttachmentContext.projectAttachments,
-                messageAttachments: requestAttachmentContext.messageAttachments,
-                extractedSections: requestAttachmentContext.textSections.map((section) => ({
+                projectAttachments: attachmentContext.projectAttachments,
+                messageAttachments: attachmentContext.messageAttachments,
+                extractedSections: attachmentContext.textSections.map((section) => ({
                   title: section.title,
                   source: section.source,
                   kind: section.kind,
@@ -2370,17 +1258,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           })),
         },
       };
-
-      console.info(
-        '[ai/respond][client] request boundary',
-        JSON.stringify({
-          projectId: payload.projectId,
-          agentRole: payload.agentRole,
-          selectedModel: requestedModel ?? null,
-          projectModel: project?.model ?? null,
-          imageCount: aiImages.length,
-        })
-      );
 
       if (logContext) {
         dispatch({
@@ -2399,19 +1276,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
         }
 
-        if (compactedAttachmentContext && compactedAttachmentContext.truncatedSections > 0) {
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'warning',
-            agent: logContext.agent,
-            message:
-              `AI context trimmed: kept ${compactedAttachmentContext.keptSectionCount}/` +
-              `${compactedAttachmentContext.originalSectionCount} text sections, ` +
-              `chars ${compactedAttachmentContext.keptChars}/${compactedAttachmentContext.originalChars}.`,
-          });
-        }
-
-        if (requestAttachmentContext && requestAttachmentContext.images.length > aiImages.length) {
+        if (attachmentContext && attachmentContext.images.length > aiImages.length) {
           dispatch({
             type: 'ADD_LOG',
             level: 'warning',
@@ -2421,10 +1286,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (
-          requestAttachmentContext &&
-          requestAttachmentContext.droppedImageAttachments.length > 0
+          attachmentContext &&
+          attachmentContext.droppedImageAttachments.length > 0
         ) {
-          const droppedTitles = requestAttachmentContext.droppedImageAttachments
+          const droppedTitles = attachmentContext.droppedImageAttachments
             .map((image) => image.title)
             .slice(0, 3)
             .join(', ');
@@ -2433,20 +1298,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             level: 'warning',
             agent: logContext.agent,
             message:
-              `Image attachment warning: ${requestAttachmentContext.droppedImageAttachments.length} image(s) ` +
+              `Image attachment warning: ${attachmentContext.droppedImageAttachments.length} image(s) ` +
               `could not be linked to AI (missing server-reachable URL).` +
               (droppedTitles ? ` Example: ${droppedTitles}` : ''),
-          });
-        }
-
-        const urlSnapshotSections =
-          attachmentContext?.textSections.filter((section) => section.kind === 'url').length ?? 0;
-        if (urlSnapshotSections > 0) {
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: logContext.agent,
-            message: `Site snapshot included in AI context: ${urlSnapshotSections}`,
           });
         }
 
@@ -2466,120 +1320,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const endpoint = resolveAiRespondEndpoint();
-        const maxAttempts = 2;
-        const timeoutMs = options?.timeoutMs;
-        let responsePayload: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestPayload),
+        });
 
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          const controller = new AbortController();
-          const timeoutHandle =
-            typeof timeoutMs === 'number' && timeoutMs > 0
-              ? setTimeout(() => controller.abort(), timeoutMs)
-              : null;
+        const contentType = response.headers.get('content-type') ?? '';
+        const rawBody = await response.text();
+        let data: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
 
+        if (contentType.includes('application/json')) {
           try {
-            const response = await fetch(endpoint, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              signal: controller.signal,
-              body: JSON.stringify(requestPayload),
-            });
-
-            const contentType = response.headers.get('content-type') ?? '';
-            const rawBody = await response.text();
-            let data: { text?: string; error?: string; meta?: AiRespondMeta } | null = null;
-
-            if (contentType.includes('application/json')) {
-              try {
-                data = JSON.parse(rawBody) as { text?: string; error?: string; meta?: AiRespondMeta };
-              } catch {
-                data = null;
-              }
-            }
-
-            if (!data) {
-              throw classifyAiRequestFailure({
-                statusCode: response.status,
-                contentType,
-                rawBody,
-                parseFailed: true,
-              });
-            }
-
-            if (!response.ok) {
-              throw classifyAiRequestFailure({
-                statusCode: response.status,
-                contentType,
-                rawBody: data.error ?? rawBody,
-              });
-            }
-
-            if (!data.text) {
-              throw classifyAiRequestFailure({
-                statusCode: response.status,
-                contentType,
-                rawBody,
-                missingText: true,
-              });
-            }
-
-            responsePayload = data;
-            break;
-          } catch (error) {
-            const classifiedError =
-              error instanceof AiRequestError
-                ? error
-                : error instanceof DOMException && error.name === 'AbortError'
-                ? classifyAiRequestFailure({ timeout: true })
-                : new AiRequestError({
-                    message: error instanceof Error ? error.message : 'Unknown AI request failure',
-                    kind: 'request',
-                  });
-
-            const canRetry = classifiedError.retryable && attempt < maxAttempts;
-            if (canRetry) {
-              const backoffMs = 350 * attempt;
-              dispatch({
-                type: 'ADD_LOG',
-                level: 'warning',
-                agent: logContext?.agent,
-                message:
-                  `AI retry ${attempt}/${maxAttempts - 1} after ${classifiedError.message}` +
-                  `${classifiedError.statusCode ? ` [HTTP ${classifiedError.statusCode}]` : ''}`,
-              });
-              await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
-              continue;
-            }
-
-            throw classifiedError;
-          } finally {
-            if (timeoutHandle) {
-              clearTimeout(timeoutHandle);
-            }
+            data = JSON.parse(rawBody) as { text?: string; error?: string; meta?: AiRespondMeta };
+          } catch {
+            data = null;
           }
         }
 
-        const data = responsePayload;
-        if (!data?.text) {
-          throw new AiRequestError({
-            message: 'AI request failed: empty response payload after retry',
-            kind: 'request',
-          });
+        if (!data) {
+          const snippet = rawBody.slice(0, 200).replace(/\s+/g, ' ').trim();
+          const detail = `status=${response.status} body="${snippet || '<empty>'}"`;
+          console.warn(`[ai/respond] Non-JSON response from ${endpoint}: ${detail}`);
+          throw new Error(`AI endpoint returned non-JSON response (${detail}).`);
         }
 
-        console.info(
-          '[ai/respond][client] response meta',
-          JSON.stringify({
-            projectId: payload.projectId,
-            agentRole: payload.agentRole,
-            selectedModel: requestedModel ?? null,
-            resolvedModel: data.meta?.resolvedModel ?? null,
-            actualModel: data.meta?.model ?? null,
-            reasoningIncluded: data.meta?.reasoningIncluded ?? null,
-            reasoningEffort: data.meta?.reasoningEffort ?? null,
-            textVerbosity: data.meta?.textVerbosity ?? null,
-          })
-        );
+        if (!response.ok || !data.text) {
+          const detail = data.error ? ` ${data.error}` : '';
+          throw new Error(`AI request failed.${detail}`);
+        }
 
         if (logContext && data.meta?.imageContext) {
           dispatch({
@@ -2606,19 +1375,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             agent: logContext.agent,
             message: translateProject(payload.language, 'workflow.openai.callSuccess'),
           });
-
-          if (data.meta) {
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              agent: logContext.agent,
-              message:
-                `OpenAI meta: selected=${data.meta.requestedModel ?? 'none'}, ` +
-                `resolved=${data.meta.resolvedModel}, actual=${data.meta.model}, ` +
-                `reasoning=${data.meta.reasoningIncluded ? (data.meta.reasoningEffort ?? 'included') : 'omitted'}, ` +
-                `verbosity=${data.meta.textVerbosity ?? 'omitted'}`,
-            });
-          }
         }
 
         if (project && attachmentContext && attachmentContext.includedAttachmentIds.length > 0) {
@@ -2653,7 +1409,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dispatch({
             type: 'ADD_PROJECT_USAGE',
             projectId: payload.projectId,
-            model: data.meta.model || data.meta.resolvedModel,
+            model: data.meta.model,
             usage: data.meta.usage,
           });
         }
@@ -2663,24 +1419,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           meta: data.meta ?? null,
         };
       } catch (error) {
-        const timeoutError =
-          error instanceof DOMException && error.name === 'AbortError'
-            ? classifyAiRequestFailure({ timeout: true })
-            : error;
-        console.warn(
-          '[ai/respond][client] request failed',
-          JSON.stringify({
-            projectId: payload.projectId,
-            agentRole: payload.agentRole,
-            selectedModel: requestedModel ?? null,
-            projectModel: project?.model ?? null,
-            error: timeoutError instanceof Error ? timeoutError.message : 'Unknown OpenAI error',
-            statusCode: timeoutError instanceof AiRequestError ? timeoutError.statusCode : null,
-            failureKind: timeoutError instanceof AiRequestError ? timeoutError.kind : 'unknown',
-          })
-        );
         if (logContext) {
-          const message = timeoutError instanceof Error ? timeoutError.message : 'Unknown OpenAI error';
+          const message = error instanceof Error ? error.message : 'Unknown OpenAI error';
           const shortError = message.length > 140 ? `${message.slice(0, 137)}...` : message;
           dispatch({
             type: 'ADD_LOG',
@@ -2690,23 +1430,63 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               error: shortError,
             }),
           });
-          if (timeoutError instanceof AiRequestError) {
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'error',
-              agent: logContext.agent,
-              message:
-                `AI infrastructure failure: kind=${timeoutError.kind}` +
-                `${timeoutError.statusCode ? ` status=${timeoutError.statusCode}` : ''}` +
-                `${timeoutError.rawBodySnippet ? ` body="${timeoutError.rawBodySnippet}"` : ''}`,
-            });
-          }
         }
-        throw timeoutError;
+        throw error;
       }
     },
     [buildAttachmentContext, resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
   );
+
+  const materializePlannerGraph = useCallback((rawGraph: z.infer<typeof plannerTaskGraphSchema>): TaskGraph => {
+    const idMap = new Map<string, string>();
+    rawGraph.tasks.forEach((task) => {
+      idMap.set(task.id, generateId());
+    });
+
+    const now = new Date();
+    const tasks: Task[] = rawGraph.tasks.map((task) => {
+      const dependsOn = task.dependsOn
+        .map((dependencyId) => idMap.get(dependencyId))
+        .filter((dependencyId): dependencyId is string => Boolean(dependencyId));
+      return {
+        id: idMap.get(task.id) as string,
+        title: task.title,
+        description: task.description,
+        agent: task.agent,
+        status: dependsOn.length === 0 ? 'queued' : 'blocked',
+        dependsOn,
+        producesArtifacts: task.artifacts,
+        createdAt: now,
+        updatedAt: now,
+        retryCount: 0,
+        maxRetries: rawGraph.maxRetries,
+      };
+    });
+
+    return {
+      tasks,
+      concurrencyLimit: rawGraph.concurrencyLimit,
+      maxRetries: rawGraph.maxRetries,
+    };
+  }, []);
+
+  const buildPlannerPrompt = useCallback((project: Project, strictJsonOnly: boolean) => {
+    const instructions = [
+      'Build a TaskGraph for this project.',
+      'Return JSON with shape: {"tasks":[...],"concurrencyLimit":number,"maxRetries":number}.',
+      'Each task must contain: id,title,description,agent,dependsOn,artifacts.',
+      'Use agent values only from: Planner, Architect, Builder, Reviewer, Tester, Integrator.',
+      'Use artifact kind values only from: doc,json,report,zip,image.',
+      'dependsOn must reference task ids from the same payload.',
+      'Include enough tasks to cover planning, architecture, implementation, review, testing, integration.',
+    ];
+
+    if (strictJsonOnly) {
+      instructions.push('Return ONLY valid JSON.');
+    }
+
+    return `${instructions.join(' ')}\n\nProject name: ${project.name}\nProject description: ${project.description}\nOutput type: ${project.outputType}`;
+  }, []);
 
   const setSchedulerPaused = useCallback(
     (projectId: string, paused: boolean, withLog: boolean) => {
@@ -2736,7 +1516,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       name: string,
       description: string,
       projectLanguage: AppLanguage,
-      model: OpenAIModel,
       outputType: OutputType,
       simulationMode: boolean,
       debateRounds: number,
@@ -2754,9 +1533,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         debateRounds,
         debateMode,
         maxWordsPerAgent,
-        projectId,
-        'openai',
-        model
+        projectId
       );
 
       dispatch({
@@ -2765,8 +1542,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         name,
         description,
         language: projectLanguage,
-        provider: 'openai',
-        model,
         outputType,
         simulationMode,
         debateRounds,
@@ -2852,17 +1627,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const derivePhaseFromTasks = useCallback((tasks: Task[]): WorkflowPhase => {
-    if (
-      tasks.length > 0 &&
-      tasks.every(
-        (task) =>
-          task.status === 'done' ||
-          task.status === 'failed' ||
-          task.status === 'completed_with_fallback' ||
-          task.status === 'canceled_due_to_failed_dependency' ||
-          task.status === 'blocked_due_to_failed_dependency'
-      )
-    ) {
+    if (tasks.length > 0 && tasks.every((task) => task.status === 'done' || task.status === 'failed')) {
       return 'complete';
     }
     if (tasks.some((task) => task.status === 'running' && task.agent === 'Integrator')) {
@@ -2886,14 +1651,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       let changed = false;
 
       project.tasks.forEach((task) => {
-        if (
-          task.status === 'done' ||
-          task.status === 'failed' ||
-          task.status === 'completed_with_fallback' ||
-          task.status === 'canceled_due_to_failed_dependency' ||
-          task.status === 'blocked_due_to_failed_dependency' ||
-          task.status === 'running'
-        ) {
+        if (task.status === 'done' || task.status === 'failed' || task.status === 'running') {
           return;
         }
 
@@ -2962,346 +1720,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const agentStartLogKey: Record<AgentName, TranslationKey | null> = useMemo(
-    () => ({
-      Strategist: null,
-      Skeptic: null,
-      Pragmatist: null,
-      Planner: 'workflow.exec.log.planner.start',
-      Architect: 'workflow.exec.log.architect.start',
-      Builder: 'workflow.exec.log.builder.start',
-      Reviewer: 'workflow.exec.log.reviewer.start',
-      Tester: 'workflow.exec.log.tester.start',
-      Integrator: 'workflow.exec.log.integrator.start',
-    }),
-    []
-  );
-
-  const agentDoneLogKey: Record<AgentName, TranslationKey | null> = useMemo(
-    () => ({
-      Strategist: null,
-      Skeptic: null,
-      Pragmatist: null,
-      Planner: 'workflow.exec.log.planner.done',
-      Architect: 'workflow.exec.log.architect.done',
-      Builder: 'workflow.exec.log.builder.done',
-      Reviewer: 'workflow.exec.log.reviewer.done',
-      Tester: 'workflow.exec.log.tester.done',
-      Integrator: 'workflow.exec.log.integrator.done',
-    }),
-    []
-  );
-
-  const buildExecutionArtifactPrompt = useCallback(
-    (task: Task, artifact: Task['producesArtifacts'][number], snapshot: ExecutionSnapshot, project: Project) => {
-      if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
-        const websiteRequirement = taskRequiresHtmlEntry(task, project)
-          ? 'Because this run is building a website/app/page, index.html is required.'
-          : 'If you are building a website/page, include index.html.';
-
-        return [
-          project.language === 'cz' ? 'Write summary and notes in Czech.' : 'Write summary and notes in English.',
-          'You are Builder. Revise the current project baseline; do not restart from scratch unless requested.',
-          'Return JSON only. Do not wrap the response in markdown fences.',
-          'Prefer a minimal working static website bundle using index.html and optional style.css and script.js.',
-          'Never finish with only patch notes or prose when the user asked to build something.',
-          'JSON contract:',
-          '{"status":"success","summary":"short summary","files":[{"path":"index.html","content":"<!doctype html>..."}],"notes":["optional note"],"removePaths":["obsolete.js"]}',
-          'Allowed file extensions only: .html, .css, .js, .json, .md',
-          'files must be an array of objects with path and content. Return changed/new files only.',
-          'removePaths is optional. Use it only for files that should be removed from baseline.',
-          'Execution is successful only if at least one file is present.',
-          websiteRequirement,
-          'Use only local generated files. Do not reference remote scripts, packages, build tools, or deployment steps.',
-          `Project prompt:\n${snapshot.projectPrompt}`,
-          snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
-          `Approved debate summary:\n${snapshot.approvedDebateSummary}`,
-          snapshot.latestStableFiles.length > 0
-            ? `Current baseline files (${snapshot.latestStableFiles.length}):\n${snapshot.latestStableFiles
-                .slice(0, 20)
-                .map((file) => `${file.path}\n${shorten(file.content, 800)}`)
-                .join('\n\n')}`
-            : 'Current baseline files: none (first execution cycle).',
-          `ZIP snapshots count: ${snapshot.zipSnapshots.length}`,
-          `Site snapshots count: ${snapshot.siteSnapshots.length}`,
-          `PDF snapshots count: ${snapshot.pdfTexts.length}`,
-          `Image inputs count: ${snapshot.imageInputs.length}`,
-        ].join('\n\n');
-      }
-
-      const requiredSectionsByArtifact: Record<string, string[]> = {
-        'execution-plan.md': [
-          'Prioritized task list',
-          'Milestones',
-          'Dependencies',
-          'Estimated implementation order',
-        ],
-        'architecture-review.md': [
-          'Affected modules/components/files',
-          'Proposed structural changes',
-          'Technical constraints and assumptions',
-        ],
-        'patch-plan.md': [
-          'Ordered patch steps',
-          'Target files and reasons',
-          'Dependencies and rollout notes',
-        ],
-        'review-notes.md': [
-          'Quality concerns',
-          'Missing requirements',
-          'Risks and ambiguity list',
-          'Suggested corrections to Builder output',
-        ],
-        'test-checklist.md': [
-          'Functional test cases',
-          'Regression checklist',
-          'Edge cases',
-          'Acceptance criteria',
-        ],
-        'final-summary.md': [
-          'Final merged implementation recommendation',
-          'Ordered execution package',
-          'What should be changed first',
-          'What can wait for v2',
-        ],
-      };
-
-      const sectionList = requiredSectionsByArtifact[artifact.path] ?? ['Key recommendations'];
-      const missingInputs = snapshot.missingInputNotes.length
-        ? `Missing inputs to mention explicitly if relevant:\n- ${snapshot.missingInputNotes.join('\n- ')}`
-        : 'Missing inputs: none detected.';
-
-      return [
-        project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
-        `You are ${task.agent}. Produce artifact \"${artifact.path}\" only in Markdown.`,
-        'Do not produce placeholder text. Ground claims in provided inputs (ZIP tree, site snapshot, PDF text, images).',
-        'If an expected input is missing, explicitly state that in a short "Missing Inputs" section.',
-        `Required sections:\n- ${sectionList.join('\n- ')}`,
-        missingInputs,
-        `Project prompt:\n${snapshot.projectPrompt}`,
-        `Approved debate summary:\n${snapshot.approvedDebateSummary}`,
-        `ZIP snapshots count: ${snapshot.zipSnapshots.length}`,
-        `Site snapshots count: ${snapshot.siteSnapshots.length}`,
-        `PDF snapshots count: ${snapshot.pdfTexts.length}`,
-        `Image inputs count: ${snapshot.imageInputs.length}`,
-      ].join('\n\n');
-    },
-    []
-  );
-
-  const buildExecutionAgentContext = useCallback(
-    (task: Task, snapshot: ExecutionSnapshot) => {
-      return {
-        snapshotId: snapshot.id,
-        cycleNumber: snapshot.cycleNumber,
-        revisionPrompt: snapshot.revisionPrompt,
-        projectPrompt: shorten(snapshot.projectPrompt, 1_800),
-        approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 3_000),
-        latestStableSummary: shorten(snapshot.latestStableSummary ?? '', 1_800),
-        latestStableFiles: snapshot.latestStableFiles.slice(0, 25).map((file) => ({
-          path: file.path,
-          excerpt: shorten(file.content, 800),
-        })),
-        attachmentOverview: {
-          project: snapshot.projectAttachments.map((item) => ({
-            title: item.title,
-            kind: item.kind,
-            status: item.status,
-          })),
-          message: snapshot.messageAttachments.map((item) => ({
-            title: item.title,
-            kind: item.kind,
-            status: item.status,
-          })),
-        },
-        zipSummary: snapshot.zipSnapshots.map((entry) => ({
-          title: entry.title,
-          fileTreeTop: entry.fileTree.slice(0, 80),
-          keyFiles: entry.keyFiles.slice(0, 8).map((file) => ({
-            path: file.path,
-            excerpt: shorten(file.content, 800),
-          })),
-        })),
-        siteSummary: snapshot.siteSnapshots.map((entry) => ({
-          title: entry.title,
-          pageTitle: entry.pageTitle,
-          summary: shorten(entry.summary, 600),
-          extractedExcerpt: shorten(entry.extractedText, 1_000),
-          pages: (entry.pages ?? []).slice(0, 5).map((page) => ({
-            title: page.title,
-            url: page.url,
-            excerpt: shorten(page.excerpt ?? page.summary, 220),
-          })),
-        })),
-        pdfSummary: snapshot.pdfTexts.map((entry) => ({
-          title: entry.title,
-          excerpt: shorten(entry.text, 1_200),
-        })),
-        imageSummary: snapshot.imageInputs.map((entry) => ({
-          title: entry.title,
-          description: shorten(entry.description, 300),
-          source: entry.source,
-        })),
-        missingInputNotes: snapshot.missingInputNotes,
-      };
-    },
-    []
-  );
-
-  type PlannerPriority = 'high' | 'medium' | 'low';
-  type PlannerStructuredTask = {
-    id: string;
-    title: string;
-    description: string;
-    priority: PlannerPriority;
-    dependsOn?: string[];
-  };
-
-  type PlannerStructuredPlan = {
-    title: string;
-    summary: string;
-    tasks: PlannerStructuredTask[];
-  };
-
-  const normalizePlannerTaskId = useCallback((value: string, index: number): string => {
-    const trimmed = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
-    return trimmed || `task-${index + 1}`;
-  }, []);
-
-  const validatePlannerStructuredPlan = useCallback(
-    (raw: string): PlannerStructuredPlan => {
-      let parsed: unknown;
-      try {
-        parsed = parseJsonObjectFromModelText(raw);
-      } catch (error) {
-        throw new Error(`Planner conversion JSON parse failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-
-      if (!parsed || typeof parsed !== 'object') {
-        throw new Error('Planner conversion payload is not an object.');
-      }
-
-      const candidate = parsed as Record<string, unknown>;
-      const title = typeof candidate.title === 'string' ? candidate.title.trim() : '';
-      const summary = typeof candidate.summary === 'string' ? candidate.summary.trim() : '';
-      const tasks = Array.isArray(candidate.tasks) ? candidate.tasks : [];
-
-      if (!title) throw new Error('Planner conversion missing title.');
-      if (!summary) throw new Error('Planner conversion missing summary.');
-      if (tasks.length < 3 || tasks.length > 7) {
-        throw new Error(`Planner conversion task count out of range: ${tasks.length} (expected 3-7).`);
-      }
-
-      const normalizedTasks: PlannerStructuredTask[] = tasks.map((task, index) => {
-        if (!task || typeof task !== 'object') {
-          throw new Error(`Planner task at index ${index} is not an object.`);
-        }
-        const item = task as Record<string, unknown>;
-        const taskId = normalizePlannerTaskId(String(item.id ?? ''), index);
-        const taskTitle = typeof item.title === 'string' ? item.title.trim() : '';
-        const taskDescription = typeof item.description === 'string' ? item.description.trim() : '';
-        const rawPriority = typeof item.priority === 'string' ? item.priority.toLowerCase() : 'medium';
-        const priority: PlannerPriority =
-          rawPriority === 'high' || rawPriority === 'medium' || rawPriority === 'low'
-            ? rawPriority
-            : 'medium';
-        const dependsOn = Array.isArray(item.dependsOn)
-          ? item.dependsOn.map((dep) => String(dep)).filter(Boolean)
-          : undefined;
-
-        if (!taskTitle) throw new Error(`Planner task at index ${index} missing title.`);
-        if (!taskDescription) throw new Error(`Planner task at index ${index} missing description.`);
-
-        return {
-          id: taskId,
-          title: taskTitle,
-          description: taskDescription,
-          priority,
-          dependsOn,
-        };
-      });
-
-      return {
-        title,
-        summary,
-        tasks: normalizedTasks,
-      };
-    },
-    [normalizePlannerTaskId]
-  );
-
-  const buildPlannerFallbackPlan = useCallback(
-    (project: Project, stageAText: string): PlannerStructuredPlan => {
-      const extractedLines = stageAText
-        .split('\n')
-        .map((line) => line.replace(/^[-*\d.)\s]+/, '').trim())
-        .filter((line) => line.length > 10)
-        .slice(0, 5);
-
-      const fallbackLines =
-        extractedLines.length >= 3
-          ? extractedLines
-          : [
-              'Audit current static website baseline and identify top user-facing issues.',
-              'Propose high-impact UX/content/performance improvements for v1.',
-              'Implement and review prioritized improvements with quick validation.',
-            ];
-
-      const tasks: PlannerStructuredTask[] = fallbackLines.map((line, index) => ({
-        id: `fallback-${index + 1}`,
-        title: `Task ${index + 1}`,
-        description: shorten(line, 180),
-        priority: index === 0 ? 'high' : index < 3 ? 'medium' : 'low',
-        dependsOn: index > 0 ? [`fallback-${index}`] : [],
-      }));
-
-      return {
-        title: `Planner fallback plan: ${project.name}`,
-        summary: 'Structured conversion failed; generated fallback task list from planner plain-text output.',
-        tasks,
-      };
-    },
-    []
-  );
-
-  const buildPlannerArtifactMarkdown = useCallback(
-    (
-      plan: PlannerStructuredPlan,
-      stageAText: string,
-      options?: { fallbackReason?: string; usedFallback?: boolean }
-    ): string => {
-      return [
-        `# ${plan.title}`,
-        '',
-        '## Summary',
-        plan.summary,
-        '',
-        '## Tasks',
-        ...plan.tasks.map((task) => {
-          const deps = task.dependsOn?.length ? task.dependsOn.join(', ') : 'none';
-          return `- id: ${task.id}\n  - title: ${task.title}\n  - description: ${task.description}\n  - priority: ${task.priority}\n  - dependsOn: ${deps}`;
-        }),
-        '',
-        '## Planner Stage A (plain text)',
-        stageAText,
-        '',
-        '## Planner Final Status',
-        options?.usedFallback ? 'completed_with_fallback' : 'completed',
-        options?.fallbackReason ? `Fallback reason: ${options.fallbackReason}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
-    },
-    []
-  );
-
   const rerouteDependencies = useCallback((project: Project, fromTaskId: string, toTaskId: string) => {
     project.tasks
       .filter(
         (task) =>
           task.id !== toTaskId &&
           task.status !== 'done' &&
-          task.status !== 'completed_with_fallback' &&
           task.status !== 'running' &&
           task.dependsOn.includes(fromTaskId)
       )
@@ -3321,11 +1745,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const completeTask = useCallback(
-    (
-      projectId: string,
-      taskId: string,
-      options?: { skipFailure?: boolean; lastOutput?: string }
-    ) => {
+    (projectId: string, taskId: string) => {
       const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
       const task = project?.tasks.find((candidate) => candidate.id === taskId);
       if (!project || !task || task.status !== 'running') {
@@ -3335,15 +1755,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const lang = project.language;
       const retryCount = task.retryCount ?? 0;
       const maxRetries = task.maxRetries ?? project.taskGraph?.maxRetries ?? 2;
-      const failProbability = options?.skipFailure
-        ? 0
-        : project.simulationMode
-        ? task.agent === 'Tester'
-          ? 0.25
-          : task.agent === 'Reviewer'
-          ? 0.15
-          : 0
-        : 0;
+      const failProbability = task.agent === 'Tester' ? 0.25 : task.agent === 'Reviewer' ? 0.15 : 0;
       const shouldFail = failProbability > 0 && retryCount < maxRetries && Math.random() < failProbability;
 
       if (shouldFail) {
@@ -3371,8 +1783,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             title: task.title,
           }),
           agent: 'Builder',
-          provider: task.provider,
-          model: task.model,
           dependsOn: [task.id],
           status: 'blocked',
           producesArtifacts: [
@@ -3396,8 +1806,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             title: task.title,
           }),
           agent: task.agent,
-          provider: task.provider,
-          model: task.model,
           dependsOn: [reworkTask.id],
           status: 'blocked',
           producesArtifacts: task.producesArtifacts,
@@ -3466,718 +1874,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           type: 'UPDATE_AGENT_STATUS',
           agent: task.agent,
           status: 'idle',
-          lastOutput:
-            options?.lastOutput ??
-            translateProjectWithVars(lang, 'workflow.task.doneSummary', {
-              title: task.title,
-            }),
+          lastOutput: translateProjectWithVars(lang, 'workflow.task.doneSummary', {
+            title: task.title,
+          }),
         });
-
-        const doneLogKey = agentDoneLogKey[task.agent];
-        if (doneLogKey) {
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'success',
-            agent: task.agent,
-            message: translateProject(lang, doneLogKey),
-          });
-        }
       }
 
       delete taskTimersRef.current[taskId];
     },
-    [
-      agentDoneLogKey,
-      autoPauseCheckpoints,
-      rerouteDependencies,
-      setSchedulerPaused,
-      translateProject,
-      translateProjectWithVars,
-    ]
-  );
-
-  const runLiveTaskExecution = useCallback(
-    async (projectId: string, taskId: string) => {
-      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-      const getLiveTask = () => {
-        const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-        const liveTask = liveProject?.tasks.find((candidate) => candidate.id === taskId);
-        return { liveProject, liveTask };
-      };
-
-      const failLiveTask = (
-        agent: AgentName,
-        message: string,
-        options?: { artifactPath?: string; rawBodySnippet?: string | null }
-      ) => {
-        if (options?.artifactPath) {
-          const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-          const liveTask = liveProject?.tasks.find((candidate) => candidate.id === taskId);
-          const artifacts = liveTask?.producesArtifacts ?? [];
-          const updatedArtifacts = artifacts.map((artifact) =>
-            artifact.path === options.artifactPath
-              ? {
-                  ...artifact,
-                  rawContent: options.rawBodySnippet ?? artifact.rawContent,
-                  generatedAt: new Date(),
-                }
-              : artifact
-          );
-          if (updatedArtifacts.length > 0) {
-            dispatch({
-              type: 'UPDATE_TASK',
-              projectId,
-              taskId,
-              patch: { producesArtifacts: updatedArtifacts },
-            });
-          }
-        }
-
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'error',
-          agent,
-          message,
-        });
-        dispatch({
-          type: 'UPDATE_TASK',
-          projectId,
-          taskId,
-          patch: { status: 'failed', errorMessage: message },
-        });
-        dispatch({
-          type: 'UPDATE_AGENT_STATUS',
-          agent,
-          status: 'error',
-          lastOutput: message,
-        });
-
-        if (agent === 'Planner') {
-          const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-          if (!liveProject) return;
-          liveProject.tasks
-            .filter((candidate) => candidate.id !== taskId && (candidate.status === 'queued' || candidate.status === 'blocked'))
-            .forEach((candidate) => {
-              dispatch({
-                type: 'UPDATE_TASK',
-                projectId,
-                taskId: candidate.id,
-                patch: {
-                  status: 'canceled_due_to_failed_dependency',
-                  errorMessage: 'Planner failed; downstream execution canceled due to failed dependency.',
-                },
-              });
-            });
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'warning',
-            message: 'Planner failed; downstream queued/blocked tasks were canceled due to failed dependency.',
-          });
-        }
-      };
-
-      const formatAiExecutionError = (error: unknown): { message: string; rawBodySnippet: string | null } => {
-        if (error instanceof AiRequestError) {
-          const classified =
-            `${error.kind === 'infrastructure' ? 'Infrastructure' : 'Request'} failure` +
-            `${error.statusCode ? ` HTTP ${error.statusCode}` : ''}: ${error.message}`;
-          return {
-            message: classified,
-            rawBodySnippet: error.rawBodySnippet ?? null,
-          };
-        }
-        return {
-          message: error instanceof Error ? error.message : 'Unknown OpenAI execution error',
-          rawBodySnippet: null,
-        };
-      };
-
-      const project = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-      if (!project) return;
-
-      let task = project.tasks.find((candidate) => candidate.id === taskId);
-      if (!task) return;
-
-      if (task.status !== 'running') {
-        for (let attempt = 1; attempt <= 20; attempt += 1) {
-          await sleep(100);
-          const refreshed = stateRef.current.projects
-            .find((candidate) => candidate.id === projectId)
-            ?.tasks.find((candidate) => candidate.id === taskId);
-          if (!refreshed) return;
-          task = refreshed;
-          if (task.status === 'running') {
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              agent: task.agent,
-              message: `planner/live runner synchronized after status commit (attempt ${attempt}).`,
-            });
-            break;
-          }
-        }
-      }
-
-      if (task.status !== 'running') {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'error',
-          agent: task.agent,
-          message: `Live runner aborted: task status stayed ${task.status} and never reached running.`,
-        });
-        return;
-      }
-
-      dispatch({
-        type: 'ADD_LOG',
-        level: 'info',
-        agent: task.agent,
-        message: `${task.agent} agent started`,
-      });
-
-      const snapshot = project.executionSnapshot;
-      if (!snapshot) {
-        failLiveTask(task.agent, 'Execution snapshot missing; task cannot use approved immutable context.');
-        return;
-      }
-
-      const stallTimer = setTimeout(() => {
-        const { liveTask } = getLiveTask();
-        if (!liveTask || liveTask.status !== 'running') {
-          return;
-        }
-        failLiveTask(task.agent, `Task timed out after ${executionTaskTimeoutMs} ms (timeout / stalled).`);
-      }, executionTaskTimeoutMs);
-
-      try {
-        const snapshotAttachmentContext: AttachmentContextSnapshot = {
-          projectAttachments: snapshot.projectAttachments,
-          messageAttachments: snapshot.messageAttachments,
-          textSections: [
-            ...snapshot.pdfTexts.map((entry) => ({
-              title: entry.title,
-              kind: 'pdf' as const,
-              source: entry.source,
-              text: entry.text,
-            })),
-            ...snapshot.zipSnapshots.map((entry) => ({
-              title: entry.title,
-              kind: 'zip' as const,
-              source: entry.source,
-              text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
-                .map((file) => `${file.path}\n${file.content}`)
-                .join('\n\n')}`,
-            })),
-            ...snapshot.siteSnapshots.map((entry) => ({
-              title: entry.title,
-              kind: 'url' as const,
-              source: entry.source,
-              text: [
-                entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
-                entry.summary ? `Summary: ${entry.summary}` : '',
-                entry.extractedText ?? '',
-              ]
-                .filter(Boolean)
-                .join('\n\n'),
-            })),
-          ],
-          images: snapshot.imageInputs.map((entry) => ({
-            url: entry.url,
-            title: entry.title,
-            source: entry.source,
-            attachmentId: entry.attachmentId,
-          })),
-          droppedImageAttachments: [],
-          includedAttachmentIds: [
-            ...snapshot.imageInputs.map((entry) => entry.attachmentId),
-            ...snapshot.pdfTexts.map((entry) => entry.attachmentId),
-            ...snapshot.zipSnapshots.map((entry) => entry.attachmentId),
-            ...snapshot.siteSnapshots.map((entry) => entry.attachmentId),
-          ],
-        };
-
-        const updatedArtifacts = [...task.producesArtifacts];
-
-        if (task.agent === 'Planner') {
-          const plannerArtifactIndex = updatedArtifacts.findIndex((artifact) => artifact.path === 'execution-plan.md');
-          if (plannerArtifactIndex < 0) {
-            failLiveTask('Planner', 'Planner artifact execution-plan.md missing in task output contract.');
-            return;
-          }
-
-          const plannerArtifact = updatedArtifacts[plannerArtifactIndex];
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: 'Planner',
-            message: 'planner prompt built',
-          });
-
-          const plannerStageAPrompt = [
-            project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
-            'You are Planner. Return concise plain-text plan only.',
-            'Include: a short title, one-paragraph summary, and 3-7 actionable tasks in bullet form.',
-            `Project prompt: ${snapshot.projectPrompt}`,
-            `Approved debate summary: ${shorten(snapshot.approvedDebateSummary, 2600)}`,
-          ].join('\n\n');
-
-          const plannerStageAContext = buildExecutionAgentContext(task, snapshot);
-          const plannerStageASize = estimatePromptSize(plannerStageAPrompt, plannerStageAContext);
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: 'Planner',
-            message: `Planner prompt size estimate chars=${plannerStageASize.chars}, tokens~=${plannerStageASize.tokensApprox}`,
-          });
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: 'Planner',
-            message: 'planner OpenAI call started',
-          });
-
-          let stageAText = '';
-          try {
-            const stageAResponse = await callAiRespond(
-              {
-                projectId,
-                language: project.language,
-                agentRole: 'Planner',
-                model: task.model,
-                inputText: plannerStageAPrompt,
-                context: plannerStageAContext,
-              },
-              { agent: 'Planner' },
-              snapshotAttachmentContext,
-              { timeoutMs: executionTaskTimeoutMs }
-            );
-            stageAText = stageAResponse.text;
-          } catch (error) {
-            const detail = formatAiExecutionError(error);
-            failLiveTask('Planner', `planner OpenAI call failed: ${detail.message}`, {
-              artifactPath: 'execution-plan.md',
-              rawBodySnippet: detail.rawBodySnippet,
-            });
-            return;
-          }
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'success',
-            agent: 'Planner',
-            message: 'planner OpenAI call returned',
-          });
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: 'Planner',
-            message: 'planner parse started',
-          });
-
-          let plan: PlannerStructuredPlan;
-          let usedFallback = false;
-          let fallbackReason = '';
-
-          const plannerStageBPrompt = [
-            project.language === 'cz' ? 'Write in English for JSON keys and values.' : 'Write in English.',
-            'Convert the planner text into minimal JSON only.',
-            'Do not include markdown fences, commentary, prefaces, or trailing text.',
-            'JSON contract:',
-            '{"title":"...","summary":"...","tasks":[{"id":"...","title":"...","description":"...","priority":"high|medium|low","dependsOn":["id"]}]}',
-            'Rules: task count must be 3 to 7, dependsOn optional array, no additional nesting.',
-            'Planner plain-text input:',
-            stageAText,
-          ].join('\n\n');
-
-          try {
-            const stageBResponse = await callAiRespond(
-              {
-                projectId,
-                language: project.language,
-                agentRole: 'Planner',
-                model: task.model,
-                inputText: plannerStageBPrompt,
-                context: {
-                  snapshotId: snapshot.id,
-                  conversionMode: 'planner-minimal-v1',
-                },
-              },
-              { agent: 'Planner' },
-              snapshotAttachmentContext,
-              { timeoutMs: executionTaskTimeoutMs }
-            );
-
-            try {
-              plan = validatePlannerStructuredPlan(stageBResponse.text);
-              dispatch({
-                type: 'ADD_LOG',
-                level: 'success',
-                agent: 'Planner',
-                message: 'planner parse success',
-              });
-            } catch (parseError) {
-              fallbackReason = parseError instanceof Error ? parseError.message : 'Unknown planner parse error';
-              dispatch({
-                type: 'ADD_LOG',
-                level: 'error',
-                agent: 'Planner',
-                message: `planner parse failure: ${fallbackReason}`,
-              });
-              plan = buildPlannerFallbackPlan(project, stageAText);
-              usedFallback = true;
-            }
-          } catch (conversionError) {
-            fallbackReason =
-              conversionError instanceof Error
-                ? conversionError.message
-                : 'Unknown planner conversion stage error';
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'error',
-              agent: 'Planner',
-              message: `planner parse failure: ${fallbackReason}`,
-            });
-            plan = buildPlannerFallbackPlan(project, stageAText);
-            usedFallback = true;
-          }
-
-          const plannerMarkdown = buildPlannerArtifactMarkdown(plan, stageAText, {
-            usedFallback,
-            fallbackReason,
-          });
-
-          updatedArtifacts[plannerArtifactIndex] = {
-            ...plannerArtifact,
-            content: plannerMarkdown,
-            producedBy: 'Planner',
-            generatedAt: new Date(),
-          };
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: 'Planner',
-            message: 'planner artifact save started',
-          });
-
-          try {
-            dispatch({
-              type: 'UPDATE_TASK',
-              projectId,
-              taskId,
-              patch: { producesArtifacts: updatedArtifacts },
-            });
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'success',
-              agent: 'Planner',
-              message: 'planner artifact save success',
-            });
-          } catch (saveError) {
-            const detail = saveError instanceof Error ? saveError.message : 'Unknown planner artifact save error';
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'error',
-              agent: 'Planner',
-              message: `planner artifact save failure: ${detail}`,
-            });
-            failLiveTask('Planner', `planner artifact save failure: ${detail}`);
-            return;
-          }
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: 'Planner',
-            message: 'planner task graph save started',
-          });
-
-          try {
-            const liveProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-            if (liveProject) {
-              const nonPlanner = liveProject.tasks.filter((candidate) => candidate.id !== taskId);
-              nonPlanner.forEach((candidate, index) => {
-                const mapped = plan.tasks[index];
-                if (!mapped) return;
-                dispatch({
-                  type: 'UPDATE_TASK',
-                  projectId,
-                  taskId: candidate.id,
-                  patch: {
-                    title: `${candidate.agent}: ${mapped.title}`,
-                    description: mapped.description,
-                  },
-                });
-              });
-            }
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'success',
-              agent: 'Planner',
-              message: 'planner task graph save success',
-            });
-          } catch (graphError) {
-            const detail = graphError instanceof Error ? graphError.message : 'Unknown planner task graph save error';
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'error',
-              agent: 'Planner',
-              message: `planner task graph save failure: ${detail}`,
-            });
-          }
-
-          dispatch({
-            type: 'UPDATE_TASK',
-            projectId,
-            taskId,
-            patch: {
-              status: usedFallback ? 'completed_with_fallback' : 'done',
-              errorMessage: usedFallback ? `Planner fallback used: ${fallbackReason || 'conversion failed'}` : undefined,
-            },
-          });
-          dispatch({
-            type: 'UPDATE_AGENT_STATUS',
-            agent: 'Planner',
-            status: 'idle',
-            lastOutput: usedFallback ? 'completed_with_fallback' : 'completed',
-          });
-          dispatch({
-            type: 'ADD_LOG',
-            level: usedFallback ? 'warning' : 'success',
-            agent: 'Planner',
-            message: `planner final status: ${usedFallback ? 'completed_with_fallback' : 'completed'}`,
-          });
-          return;
-        }
-
-        for (let index = 0; index < updatedArtifacts.length; index += 1) {
-          const { liveTask } = getLiveTask();
-          if (!liveTask || liveTask.status !== 'running') {
-            return;
-          }
-
-          const artifact = updatedArtifacts[index];
-
-          if (artifactCanBeGeneratedLocally(task, artifact)) {
-            const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
-            const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
-            if (!executionBundle) {
-              failLiveTask(task.agent, `${task.agent}: patch-plan generation requires parsed generated-files.json output first.`);
-              return;
-            }
-
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              agent: task.agent,
-              message: `${task.agent}: generating ${artifact.path} locally from structured bundle`,
-            });
-
-            updatedArtifacts[index] = {
-              ...artifact,
-              content: buildPatchPlanFromExecutionBundle(executionBundle, project),
-              rawContent: '',
-              producedBy: task.agent,
-              generatedAt: new Date(),
-            };
-            continue;
-          }
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: task.agent,
-            message: `${task.agent}: building prompt (${artifact.path})`,
-          });
-
-          const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
-          const compactContext = buildExecutionAgentContext(task, snapshot);
-          const promptSize = estimatePromptSize(prompt, compactContext);
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: task.agent,
-            message: `${task.agent}: prompt size estimate chars=${promptSize.chars}, tokens~=${promptSize.tokensApprox}`,
-          });
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            agent: task.agent,
-            message: `${task.agent}: calling OpenAI`,
-          });
-
-          let response: AiRespondResult;
-          try {
-            response = await callAiRespond(
-              {
-                projectId,
-                language: project.language,
-                agentRole: task.agent,
-                model: task.model,
-                responseMode: artifactRequiresStructuredExecutionOutput(task, artifact)
-                  ? 'structured_execution_bundle'
-                  : 'default',
-                inputText: prompt,
-                context: {
-                  artifactPath: artifact.path,
-                  ...compactContext,
-                },
-              },
-              { agent: task.agent },
-              snapshotAttachmentContext,
-              { timeoutMs: executionTaskTimeoutMs }
-            );
-          } catch (error) {
-            const detail = formatAiExecutionError(error);
-            const infra = error instanceof AiRequestError ? error : null;
-            failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail.message}`, {
-              artifactPath: artifact.path,
-              rawBodySnippet: infra?.rawBodySnippet ?? null,
-            });
-            if (infra?.kind === 'infrastructure') {
-              dispatch({
-                type: 'ADD_LOG',
-                level: 'error',
-                agent: task.agent,
-                message:
-                  `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
-                  `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
-              });
-            }
-            return;
-          }
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'success',
-            agent: task.agent,
-            message: `${task.agent}: OpenAI returned (${artifact.path})`,
-          });
-
-          if (!response.text || !response.text.trim()) {
-            failLiveTask(task.agent, `${task.agent}: artifact parsing failed for ${artifact.path} (empty output).`);
-            return;
-          }
-
-          if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
-            const parsedExecutionOutput = parseExecutionOutputBundle(response.text, task, project);
-            if (parsedExecutionOutput.error) {
-              updatedArtifacts[index] = {
-                ...artifact,
-                content: response.text,
-                rawContent: response.text,
-                executionOutput: null,
-                producedBy: task.agent,
-                generatedAt: new Date(),
-              };
-
-              dispatch({
-                type: 'UPDATE_TASK',
-                projectId,
-                taskId,
-                patch: { producesArtifacts: updatedArtifacts },
-              });
-
-              failLiveTask(
-                task.agent,
-                `${task.agent}: structured execution output invalid for ${artifact.path}: ${parsedExecutionOutput.error}`
-              );
-              return;
-            }
-
-            const executionBundle = parsedExecutionOutput.bundle;
-            if (!executionBundle) {
-              failLiveTask(
-                task.agent,
-                `${task.agent}: structured execution output missing for ${artifact.path}`
-              );
-              return;
-            }
-
-            updatedArtifacts[index] = {
-              ...artifact,
-              content: executionBundle.summary,
-              rawContent: response.text,
-              executionOutput: executionBundle,
-              producedBy: task.agent,
-              generatedAt: new Date(),
-            };
-            continue;
-          }
-
-          updatedArtifacts[index] = {
-            ...artifact,
-            content: response.text,
-            rawContent: response.text,
-            producedBy: task.agent,
-            generatedAt: new Date(),
-          };
-        }
-
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'info',
-          agent: task.agent,
-          message: `${task.agent}: saving artifact`,
-        });
-
-        try {
-          dispatch({
-            type: 'UPDATE_TASK',
-            projectId,
-            taskId,
-            patch: { producesArtifacts: updatedArtifacts },
-          });
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : 'Unknown artifact save error';
-          failLiveTask(task.agent, `${task.agent}: artifact save failed: ${detail}`);
-          return;
-        }
-
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'success',
-          agent: task.agent,
-          message: `${task.agent} agent completed`,
-        });
-
-        completeTask(projectId, taskId, { skipFailure: true, lastOutput: task.title });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : 'Unknown execution runner error';
-        failLiveTask(task.agent, `${task.agent}: execution runner failed: ${detail}`);
-      } finally {
-        clearTimeout(stallTimer);
-      }
-    },
-    [
-      buildPlannerArtifactMarkdown,
-      buildPlannerFallbackPlan,
-      buildExecutionAgentContext,
-      buildExecutionArtifactPrompt,
-      callAiRespond,
-      completeTask,
-      executionTaskTimeoutMs,
-      validatePlannerStructuredPlan,
-    ]
+    [autoPauseCheckpoints, rerouteDependencies, setSchedulerPaused, translateProject, translateProjectWithVars]
   );
 
   const startTask = useCallback(
     (project: Project, task: Task) => {
-      if (task.agent === 'Planner') {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'warning',
-          agent: 'Planner',
-          message:
-            `REAL PLANNER PATH REACHED ${REAL_PLANNER_BUILD_MARKER} ` +
-            `(startTask -> ${project.simulationMode ? 'simulation' : 'runLiveTaskExecution'})`,
-        });
-      }
-
       dispatch({
         type: 'UPDATE_TASK',
         projectId: project.id,
@@ -4199,39 +1908,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }),
       });
 
-      const startLogKey = agentStartLogKey[task.agent];
-      if (startLogKey) {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'info',
-          agent: task.agent,
-          message: translateProject(project.language, startLogKey),
-        });
-      }
-
-      if (!project.simulationMode) {
-        setTimeout(() => {
-          void runLiveTaskExecution(project.id, task.id);
-        }, 0);
-        return;
-      }
-
-      if (task.agent === 'Planner') {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'warning',
-          agent: 'Planner',
-          message: 'planner final status: simulation_branch_no_openai',
-        });
-      }
-
       const speed = executionSpeedRef.current;
       const config = SPEED_CONFIG[speed];
       const durationMs =
         config.minTaskMs + Math.round(Math.random() * (config.maxTaskMs - config.minTaskMs));
       taskTimersRef.current[task.id] = setTimeout(() => completeTask(project.id, task.id), durationMs);
     },
-    [agentStartLogKey, completeTask, runLiveTaskExecution, translateProject, translateProjectWithVars]
+    [completeTask, translateProjectWithVars]
   );
 
   const schedulerTick = useCallback(
@@ -4261,70 +1944,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       syncAgentStatusesFromTasks(refreshedProject);
 
       if (phase === 'complete') {
-        const completionSnapshotId =
-          refreshedProject.executionSnapshot?.id ??
-          `cycle-${refreshedProject.revisionRound + 1}-${refreshedProject.tasks.length}`;
-        if (completedSnapshotRef.current[projectId] !== completionSnapshotId) {
-          completedSnapshotRef.current[projectId] = completionSnapshotId;
-
-          const cycleNumber = refreshedProject.revisionRound + 1;
-          const status = deriveRevisionExecutionStatus(refreshedProject.tasks);
-          let finalSummary = findIntegratorFinalSummary(refreshedProject.tasks) ?? undefined;
-
-          let baselineUpdated = false;
-          let generatedFilesCount: number | undefined;
-
-          if (status === 'completed' || status === 'completed_with_fallback') {
-            const builderBundle = findBuilderExecutionBundle(refreshedProject.tasks);
-            if (builderBundle) {
-              const mergedFiles = mergeExecutionBaselineFiles(
-                refreshedProject.latestStableFiles,
-                builderBundle
-              );
-              dispatch({
-                type: 'SET_STABLE_BASELINE',
-                projectId,
-                bundle: {
-                  ...builderBundle,
-                  files: mergedFiles,
-                },
-                files: mergedFiles,
-              });
-              baselineUpdated = true;
-              generatedFilesCount = mergedFiles.length;
-              dispatch({
-                type: 'ADD_LOG',
-                level: 'success',
-                message: `Stable baseline updated for cycle ${cycleNumber} (${mergedFiles.length} files).`,
-              });
-            }
-          }
-
-          if (status === 'failed') {
-            const propagationSummary = buildWorkflowFailurePropagationSummary(refreshedProject.tasks);
-            if (propagationSummary) {
-              dispatch({
-                type: 'ADD_LOG',
-                level: 'warning',
-                message: propagationSummary,
-              });
-              if (!finalSummary) {
-                finalSummary = propagationSummary;
-              }
-            }
-          }
-
-          dispatch({
-            type: 'COMPLETE_REVISION_CYCLE',
-            projectId,
-            cycleNumber,
-            status,
-            baselineUpdated,
-            finalSummary,
-            generatedFilesCount,
-          });
-        }
-
         const scheduler = schedulerIntervalsRef.current[projectId];
         if (scheduler) {
           clearInterval(scheduler);
@@ -4343,122 +1962,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      for (const task of refreshedProject.tasks) {
-        if (task.status !== 'queued' && task.status !== 'blocked') {
-          continue;
-        }
-
-        const prerequisite = validateTaskPrerequisites(refreshedProject, task);
-        if (!prerequisite.ok && prerequisite.reason === 'dependency-failed') {
-          const nextStatus: Task['status'] =
-            task.status === 'blocked'
-              ? 'blocked_due_to_failed_dependency'
-              : 'canceled_due_to_failed_dependency';
-          const trace = prerequisite.dependencyTask
-            ? findDependencyFailureTrace(refreshedProject, prerequisite.dependencyTask)
-            : findDependencyFailureTrace(refreshedProject, task);
-          const reason = formatDependencyFailureMessage(
-            task,
-            prerequisite.dependencyTask,
-            trace,
-            prerequisite.artifactPath,
-            nextStatus === 'blocked_due_to_failed_dependency' ? 'blocked' : 'canceled'
-          );
-          dispatch({
-            type: 'UPDATE_TASK',
-            projectId,
-            taskId: task.id,
-            patch: {
-              status: nextStatus,
-              errorMessage: reason,
-            },
-          });
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'warning',
-            agent: task.agent,
-            message: reason,
-          });
-        }
-      }
-
-      const postValidationProject = stateRef.current.projects.find((candidate) => candidate.id === projectId);
-      if (!postValidationProject?.taskGraph) return;
-
-      const validatedRunningTasks = postValidationProject.tasks.filter((task) => task.status === 'running');
-      const validatedReadyTasks = postValidationProject.tasks.filter(
-        (task) => task.status === 'queued' && dependenciesSatisfied(postValidationProject.tasks, task)
+      const runningTasks = refreshedProject.tasks.filter((task) => task.status === 'running');
+      const readyTasks = refreshedProject.tasks.filter(
+        (task) => task.status === 'queued' && dependenciesSatisfied(refreshedProject.tasks, task)
       );
-      const validatedBlockedTasks = postValidationProject.tasks.filter((task) => task.status === 'blocked');
+      const blockedTasks = refreshedProject.tasks.filter((task) => task.status === 'blocked');
 
-      if (!schedulerPausedRef.current[projectId] && validatedRunningTasks.length === 0 && validatedReadyTasks.length === 0 && validatedBlockedTasks.length > 0) {
-        let propagatedBlockedTasks = 0;
-        for (const blockedTask of validatedBlockedTasks) {
-          const trace = findDependencyFailureTrace(postValidationProject, blockedTask);
-          if (!trace) {
-            continue;
-          }
-
-          const prerequisite = validateTaskPrerequisites(postValidationProject, blockedTask);
-          const reason = formatDependencyFailureMessage(
-            blockedTask,
-            prerequisite.ok ? undefined : prerequisite.dependencyTask,
-            trace,
-            prerequisite.ok ? undefined : prerequisite.artifactPath,
-            'blocked'
-          );
-          dispatch({
-            type: 'UPDATE_TASK',
-            projectId,
-            taskId: blockedTask.id,
-            patch: {
-              status: 'blocked_due_to_failed_dependency',
-              errorMessage: reason,
-            },
-          });
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'warning',
-            agent: blockedTask.agent,
-            message: reason,
-          });
-          propagatedBlockedTasks += 1;
-        }
-
-        if (propagatedBlockedTasks > 0) {
-          return 0;
-        }
-
-        const blockedDetails: DeadlockTaskDetail[] = validatedBlockedTasks.map((task) => {
-          const missingDependencies = task.dependsOn.filter(
-            (dependencyId) => !postValidationProject.tasks.some((candidate) => candidate.id === dependencyId)
-          );
-
-          const unresolvedDependencies = task.dependsOn
-            .map((dependencyId) => postValidationProject.tasks.find((candidate) => candidate.id === dependencyId))
-            .filter(
-              (dependency): dependency is Task =>
-                Boolean(
-                  dependency &&
-                    dependency.status !== 'done' &&
-                    dependency.status !== 'completed_with_fallback' &&
-                    !isFailureTerminalStatus(dependency.status)
-                )
-            )
+      if (!schedulerPausedRef.current[projectId] && runningTasks.length === 0 && readyTasks.length === 0 && blockedTasks.length > 0) {
+        const blockedDetails: DeadlockTaskDetail[] = blockedTasks.map((task) => {
+          const unmetDependencies = task.dependsOn
+            .map((dependencyId) => refreshedProject.tasks.find((candidate) => candidate.id === dependencyId))
+            .filter((dependency): dependency is Task => Boolean(dependency && dependency.status !== 'done' && dependency.status !== 'failed'))
             .map((dependency) => `${dependency.title} [${dependency.status}]`);
-
-          const prerequisite = validateTaskPrerequisites(postValidationProject, task);
-          const unmetDependencies = [
-            ...missingDependencies.map((dependencyId) => `missing dependency id ${dependencyId}`),
-            ...unresolvedDependencies,
-          ];
-
-          if (!prerequisite.ok && prerequisite.reason !== 'dependency-failed') {
-            const referenceTask = prerequisite.dependencyTask?.title ?? 'graph reference';
-            const artifact = prerequisite.artifactPath ? ` (${prerequisite.artifactPath})` : '';
-            unmetDependencies.push(`${prerequisite.reason}: ${referenceTask}${artifact}`);
-          }
-
           return {
             taskId: task.id,
             taskTitle: task.title,
@@ -4467,10 +1982,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const deadlockMessage = blockedDetails
-          .map(
-            (detail) =>
-              `${detail.taskTitle} <= ${detail.unmetDependencies.join(', ') || 'dependency state unresolved'}`
-          )
+          .map((detail) => `${detail.taskTitle} <= ${detail.unmetDependencies.join(', ') || 'unknown dependency'}`)
           .join(' | ');
         const signature = `${projectId}:${deadlockMessage}`;
         if (deadlockSignatureRef.current[projectId] !== signature) {
@@ -4498,41 +2010,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         delete deadlockSignatureRef.current[projectId];
       }
 
-      const slots = Math.max(0, postValidationProject.taskGraph.concurrencyLimit - validatedRunningTasks.length);
+      const slots = Math.max(0, refreshedProject.taskGraph.concurrencyLimit - runningTasks.length);
       let startedCount = 0;
-      for (const task of validatedReadyTasks.slice(0, slots)) {
-        const prerequisite = validateTaskPrerequisites(postValidationProject, task);
-        if (!prerequisite.ok) {
-          if (prerequisite.reason === 'dependency-pending') {
-            continue;
-          }
-
-          const upstreamTask = prerequisite.dependencyTask?.title ?? 'unknown dependency';
-          const upstreamArtifact = prerequisite.artifactPath ? ` (${prerequisite.artifactPath})` : '';
-          const status: Task['status'] =
-            prerequisite.reason === 'dependency-failed'
-              ? 'canceled_due_to_failed_dependency'
-              : 'blocked_due_to_failed_dependency';
-
-          dispatch({
-            type: 'UPDATE_TASK',
-            projectId,
-            taskId: task.id,
-            patch: {
-              status,
-              errorMessage: `${prerequisite.details}`,
-            },
-          });
+      for (const task of readyTasks.slice(0, slots)) {
+        const checkpointState = checkpointHitRef.current[projectId] ?? {
+          approval: false,
+          integrator: false,
+        };
+        if (autoPauseCheckpoints && task.agent === 'Integrator' && !checkpointState.integrator) {
+          checkpointHitRef.current[projectId] = {
+            ...checkpointState,
+            integrator: true,
+          };
+          setSchedulerPaused(projectId, true, false);
           dispatch({
             type: 'ADD_LOG',
             level: 'warning',
-            agent: task.agent,
-            message: `${task.agent} blocked because required artifact is missing/invalid: ${upstreamTask}${upstreamArtifact}`,
+            message: translateProject(refreshedProject.language, 'workflow.scheduler.checkpoint.integrator'),
           });
-          continue;
+          break;
         }
-
-        startTask(postValidationProject, task);
+        startTask(refreshedProject, task);
         startedCount += 1;
       }
 
@@ -4546,108 +2044,142 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       startTask,
       syncAgentStatusesFromTasks,
       syncTaskAvailability,
-      validateTaskPrerequisites,
       translateProject,
       translateProjectWithVars,
     ]
   );
 
-  const generateExecutionTaskGraph = useCallback(
+  const generateSimulatedTaskGraph = useCallback(
     (project: Project): TaskGraph => {
-      const maxRetries = project.simulationMode ? 2 : 1;
+      const lang = project.language;
+      const maxRetries = 2;
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
-      const taskModel = resolveOpenAiModel(project.model);
 
       const planner = createTask({
-        title: 'Planner: Execution plan',
-        description: 'Generate a prioritized plan with milestones, dependencies, and implementation order.',
+        title: translateProject(lang, 'workflow.task.title.planMvp'),
+        description: translateProject(lang, 'workflow.task.desc.planMvp'),
         agent: 'Planner',
-        provider: 'openai',
-        model: taskModel,
         dependsOn: [],
         status: 'queued',
         producesArtifacts: [
-          { path: 'execution-plan.md', label: 'Execution Plan', kind: 'doc' },
+          { path: 'docs/execution-plan.md', label: translateProject(lang, 'workflow.artifact.executionPlan'), kind: 'doc' },
         ],
       });
 
       const architect = createTask({
-        title: 'Architect: Architecture review',
-        description: 'Review architecture impacts, module boundaries, and implementation constraints.',
+        title: translateProject(lang, 'workflow.task.title.defineArchitecture'),
+        description: translateProject(lang, 'workflow.task.desc.defineArchitecture'),
         agent: 'Architect',
-        provider: 'openai',
-        model: taskModel,
         dependsOn: [planner.id],
         status: statusFor([planner.id]),
         producesArtifacts: [
-          { path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' },
+          { path: 'docs/architecture-overview.md', label: translateProject(lang, 'workflow.artifact.architectureOverview'), kind: 'doc' },
         ],
       });
 
-      const builder = createTask({
-        title: 'Builder: Implementation proposal',
-        description: 'Draft concrete file-level change proposals and patch plan based on ingested inputs.',
+      const buildUi = createTask({
+        title: translateProject(lang, 'workflow.task.title.buildUiSkeleton'),
+        description: translateProject(lang, 'workflow.task.desc.buildUiSkeleton'),
         agent: 'Builder',
-        provider: 'openai',
-        model: taskModel,
         dependsOn: [architect.id],
         status: statusFor([architect.id]),
         producesArtifacts: [
-          { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
-          { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
+          { path: 'artifacts/ui-skeleton.json', label: translateProject(lang, 'workflow.artifact.uiSkeleton'), kind: 'json' },
+        ],
+      });
+
+      const buildEngine = createTask({
+        title: translateProject(lang, 'workflow.task.title.buildEngine'),
+        description: translateProject(lang, 'workflow.task.desc.buildEngine'),
+        agent: 'Builder',
+        dependsOn: [architect.id],
+        status: statusFor([architect.id]),
+        producesArtifacts: [
+          {
+            path: 'artifacts/orchestration-engine.json',
+            label: translateProject(lang, 'workflow.artifact.orchestrationEngine'),
+            kind: 'json',
+          },
         ],
       });
 
       const reviewer = createTask({
-        title: 'Reviewer: Quality and risk review',
-        description: 'Audit Builder outputs for quality, requirement coverage, and risks.',
+        title: translateProject(lang, 'workflow.task.title.reviewQuality'),
+        description: translateProject(lang, 'workflow.task.desc.reviewQuality'),
         agent: 'Reviewer',
-        provider: 'openai',
-        model: taskModel,
-        dependsOn: [builder.id],
-        status: statusFor([builder.id]),
+        dependsOn: [buildUi.id, buildEngine.id],
+        status: statusFor([buildUi.id, buildEngine.id]),
         producesArtifacts: [
-          { path: 'review-notes.md', label: 'Review Notes', kind: 'report' },
+          { path: 'reports/review-notes.md', label: translateProject(lang, 'workflow.artifact.reviewNotes'), kind: 'report' },
         ],
         retryCount: 0,
         maxRetries,
       });
 
       const tester = createTask({
-        title: 'Tester: Test checklist and acceptance criteria',
-        description: 'Create functional, regression, and edge-case test checklist with acceptance criteria.',
+        title: translateProject(lang, 'workflow.task.title.runQaChecks'),
+        description: translateProject(lang, 'workflow.task.desc.runQaChecks'),
         agent: 'Tester',
-        provider: 'openai',
-        model: taskModel,
         dependsOn: [reviewer.id],
         status: statusFor([reviewer.id]),
         producesArtifacts: [
-          { path: 'test-checklist.md', label: 'Test Checklist', kind: 'report' },
+          { path: 'reports/test-results.md', label: translateProject(lang, 'workflow.artifact.testResults'), kind: 'report' },
         ],
         retryCount: 0,
         maxRetries,
       });
 
       const integrator = createTask({
-        title: 'Integrator: Final merged recommendation',
-        description: 'Merge all execution outputs into a final ordered package and phased recommendation.',
+        title: translateProject(lang, 'workflow.task.title.integrateOutputs'),
+        description: translateProject(lang, 'workflow.task.desc.integrateOutputs'),
         agent: 'Integrator',
-        provider: 'openai',
-        model: taskModel,
         dependsOn: [tester.id],
         status: statusFor([tester.id]),
         producesArtifacts: [
-          { path: 'final-summary.md', label: 'Final Summary', kind: 'doc' },
+          { path: 'release/final-package.zip', label: translateProject(lang, 'workflow.artifact.finalPackage'), kind: 'zip' },
         ],
       });
 
+      const tasks =
+        project.outputType === 'app' || project.outputType === 'website'
+          ? [planner, architect, buildUi, buildEngine, reviewer, tester, integrator]
+          : [planner, architect, buildEngine, reviewer, tester, integrator];
+
       return {
-        tasks: [planner, architect, builder, reviewer, tester, integrator],
+        tasks,
         concurrencyLimit: 2,
         maxRetries,
       };
     },
-    []
+    [translateProject]
+  );
+
+  const generatePlannerTaskGraph = useCallback(
+    async (project: Project): Promise<TaskGraph> => {
+      const attemptPlannerRequest = async (strictJsonOnly: boolean) => {
+        const plannerResponse = await callAiRespond({
+          projectId: project.id,
+          language: project.language,
+          agentRole: 'Planner',
+          inputText: buildPlannerPrompt(project, strictJsonOnly),
+          context: {
+            projectName: project.name,
+            projectDescription: project.description,
+            outputType: project.outputType,
+          },
+        }, { agent: 'Planner' });
+
+        const parsed = plannerTaskGraphSchema.parse(JSON.parse(plannerResponse.text));
+        return materializePlannerGraph(parsed);
+      };
+
+      try {
+        return await attemptPlannerRequest(false);
+      } catch {
+        return await attemptPlannerRequest(true);
+      }
+    },
+    [buildPlannerPrompt, callAiRespond, materializePlannerGraph]
   );
 
   const startTaskGraphExecution = useCallback(
@@ -4657,38 +2189,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearInterval(previous);
       }
 
-      const taskGraph = generateExecutionTaskGraph(project);
+      let taskGraph: TaskGraph;
+      if (project.simulationMode) {
+        taskGraph = generateSimulatedTaskGraph(project);
+      } else {
+        try {
+          taskGraph = await generatePlannerTaskGraph(project);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown planner error';
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            agent: 'Planner',
+            message: `OpenAI planner failed, falling back to simulation: ${message}`,
+          });
+          taskGraph = generateSimulatedTaskGraph(project);
+        }
+      }
 
       const normalizedTaskGraph: TaskGraph = {
         ...taskGraph,
         concurrencyLimit: Math.max(2, taskGraph.concurrencyLimit),
       };
-      delete completedSnapshotRef.current[project.id];
       dispatch({ type: 'SET_TASK_GRAPH', projectId: project.id, taskGraph: normalizedTaskGraph });
-      checkpointHitRef.current[project.id] = { approval: false };
+      checkpointHitRef.current[project.id] = { approval: false, integrator: false };
       dispatch({ type: 'SET_PHASE', phase: 'execution' });
       setSchedulerPaused(project.id, false, false);
       dispatch({
         type: 'ADD_LOG',
         level: 'info',
         message: translateProject(project.language, 'workflow.graph.generated'),
-      });
-      dispatch({
-        type: 'ADD_LOG',
-        level: 'info',
-        message: 'Execution phase started; remaining tasks will auto-continue through Integrator.',
-      });
-      dispatch({
-        type: 'ADD_LOG',
-        level: 'info',
-        message:
-          `Revision cycle ${project.revisionRound + 1} started with baseline files: ` +
-          `${project.latestStableFiles.length}`,
-      });
-      dispatch({
-        type: 'ADD_LOG',
-        level: 'info',
-        message: `Execution agent timeout configured: ${executionTaskTimeoutMs} ms`,
       });
       projectPhaseRef.current[project.id] = 'execution';
 
@@ -4697,47 +2227,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }, SPEED_CONFIG[executionSpeedRef.current].tickMs);
     },
     [
-      generateExecutionTaskGraph,
+      generatePlannerTaskGraph,
+      generateSimulatedTaskGraph,
       schedulerTick,
       setSchedulerPaused,
       translateProject,
-      executionTaskTimeoutMs,
     ]
   );
 
   const approvePlan = useCallback(() => {
     if (!state.activeProject) return;
     const project = state.activeProject;
-    const snapshot = createExecutionSnapshot(project);
-    const cycleNumber = project.revisionRound + 1;
-    const debateSummary = getLatestOrchestratorSummary(project) ?? '';
-
-    dispatch({
-      type: 'SET_EXECUTION_SNAPSHOT',
-      projectId: project.id,
-      snapshot,
-    });
-    dispatch({
-      type: 'MARK_REVISION_APPROVED',
-      projectId: project.id,
-      cycleNumber,
-      debateSummary,
-      snapshotId: snapshot.id,
-    });
-    dispatch({
-      type: 'ADD_LOG',
-      level: 'info',
-      message: `Execution snapshot prepared (${snapshot.id})`,
-    });
-
     dispatch({ type: 'APPROVE_PLAN' });
     setTimeout(() => {
-      const latestProject = stateRef.current.projects.find((candidate) => candidate.id === project.id);
-      if (latestProject) {
-        void startTaskGraphExecution(latestProject);
-      }
+      void startTaskGraphExecution(project);
     }, 0);
-  }, [createExecutionSnapshot, startTaskGraphExecution, state.activeProject]);
+  }, [startTaskGraphExecution, state.activeProject]);
 
   const pauseExecution = useCallback(() => {
     const project = stateRef.current.activeProject;
@@ -4770,11 +2275,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         delete taskTimersRef.current[task.id];
       }
 
-      if (
-        task.status !== 'done' &&
-        task.status !== 'failed' &&
-        task.status !== 'completed_with_fallback'
-      ) {
+      if (task.status !== 'done' && task.status !== 'failed') {
         dispatch({
           type: 'UPDATE_TASK',
           projectId: project.id,
@@ -4841,14 +2342,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
-        if (attachment.kind === 'url') {
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            message: `URL fetch started: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
-          });
-        }
-
         const response = await fetch('/api/attachments/ingest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4858,40 +2351,46 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             sourceUrl: attachment.sourceUrl,
             downloadUrl: attachment.downloadUrl,
             mimeType: attachment.mimeType,
-            ...(attachment.kind === 'url'
-              ? {
-                  maxPages: 5,
-                  maxDepth: 1,
-                }
-              : {}),
           }),
         });
 
-        const body = (await response.json()) as AttachmentIngestApiResponse;
+        const contentType = response.headers.get('content-type') || 'unknown';
+        const rawBody = await response.text();
+        const preview = rawBody.slice(0, 200);
+        const isHtml = contentType.toLowerCase().includes('text/html') || rawBody.startsWith('<!DOCTYPE');
+
+        if (isHtml) {
+          const htmlError =
+            `PDF ingest endpoint returned HTML instead of JSON. ` +
+            `status=${response.status}; content-type=${contentType}; first200=${preview}`;
+          console.error(`[ingest-attachment] ${htmlError}`);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: htmlError,
+          });
+          throw new Error(htmlError);
+        }
+
+        let body: { ingest?: AttachmentIngestion; error?: string };
+        try {
+          body = JSON.parse(rawBody) as { ingest?: AttachmentIngestion; error?: string };
+        } catch (parseError) {
+          const errorMsg =
+            `Failed to parse JSON response from ingest endpoint. ` +
+            `status=${response.status}; content-type=${contentType}; first200=${preview}`;
+          console.error(`[ingest-attachment] ${errorMsg}`);
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'error',
+            message: errorMsg,
+          });
+          throw new Error(errorMsg);
+        }
+
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
           throw new Error(body.error ?? 'Attachment ingestion failed');
-        }
-
-        if (attachment.kind === 'url') {
-          ingest.crawlEvents?.forEach((eventMessage) => {
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              message: eventMessage,
-            });
-          });
-
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'success',
-            message: `URL fetch success: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
-          });
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'info',
-            message: `Readable text extracted: ${ingest.extractedText?.length ?? 0} chars`,
-          });
         }
 
         dispatch({
@@ -4965,13 +2464,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       } catch (error) {
         const detail = error instanceof Error ? error.message : 'Ingestion failed';
-        if (attachment.kind === 'url') {
-          dispatch({
-            type: 'ADD_LOG',
-            level: 'error',
-            message: `URL fetch failure: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title} (${detail})`,
-          });
-        }
         dispatch({
           type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
           projectId,
@@ -5083,11 +2575,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
 
       if (attachment.kind === 'url') {
-        const normalizedUrl = normalizeUserUrl(attachment.url);
-        if (!normalizedUrl) {
-          throw new Error('URL attachment is empty.');
-        }
-
+        const normalizedUrl = attachment.url.trim();
         const title = normalizedUrl;
         const urlArtifact: ProjectAttachment = {
           id: artifactId,
@@ -5102,12 +2590,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           createdAt,
         };
 
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'info',
-          message: `URL attachment added: ${normalizedUrl}`,
-        });
-
         const client = getFirebaseClient();
         if (client) {
           try {
@@ -5121,11 +2603,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               urlArtifact.firestoreCollection ?? 'attachments'
             );
             urlArtifact.firestoreCollection = savedCollection;
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'success',
-              message: `URL artifact persisted: projects/${projectId}/${savedCollection}/${artifactId}`,
-            });
           } catch (error) {
             const detail = error instanceof Error ? error.message : 'URL metadata save failed';
             dispatch({
@@ -5152,7 +2629,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
           throw error;
         }
-
         maybeQueueForNextRound(urlArtifact.id);
         await ingestAttachment(projectId, urlArtifact);
         return urlArtifact;
@@ -5483,13 +2959,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           const rounds = clampDebateRounds(initialProject.debateRounds);
           const language = initialProject.language;
-          const revisionPrompt = initialProject.latestRevisionFeedback?.trim() || null;
-          const task = revisionPrompt || initialProject.description;
+          const task = initialProject.description;
           const taskType = detectDebateTaskType(task);
           const isOneRoundDescriptive = rounds === 1 && taskType === 'observational';
           const previousSummary = getLatestOrchestratorSummary(initialProject);
           const revisionFeedback = initialProject.latestRevisionFeedback;
-          const baselineFilesForDebate = initialProject.latestStableFiles;
           const debateRunRound = initialProject.revisionRound + 1;
           const roundMessages: Array<{ round: number; agent: AgentName; content: string }> = [];
           const debateAgents: AgentName[] = ['Strategist', 'Skeptic', 'Pragmatist'];
@@ -5524,16 +2998,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               type: 'ADD_LOG',
               level: 'info',
               message: snapshotLog,
-            });
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              message: `Round ${round} snapshot urls=${roundAttachmentCounts.urls}`,
-            });
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              message: `Cycle ${debateRunRound} baseline files available: ${baselineFilesForDebate.length}`,
             });
 
             roundAttachmentSnapshot.includedAttachmentIds.forEach((attachmentId) => {
@@ -5659,17 +3123,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       ? `Zpetna vazba uzivatele: ${revisionFeedback}`
                       : `User feedback: ${revisionFeedback}`
                     : '',
-                  baselineFilesForDebate.length > 0
-                    ? language === 'cz'
-                      ? `Aktualni baseline soubory (${baselineFilesForDebate.length}):\n${baselineFilesForDebate
-                          .slice(0, 20)
-                          .map((file) => file.path)
-                          .join('\n')}`
-                      : `Current baseline files (${baselineFilesForDebate.length}):\n${baselineFilesForDebate
-                          .slice(0, 20)
-                          .map((file) => file.path)
-                          .join('\n')}`
-                    : '',
                   previousRoundMessages.length > 0
                     ? language === 'cz'
                       ? `Vybrane body z predchoziho kola:\n${formatRoundExcerpts(previousRoundMessages)}`
@@ -5693,7 +3146,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       projectId,
                       language,
                       agentRole: agent,
-                      model: refreshedProject.model,
                       inputText: prompt,
                       context: {
                         projectName: refreshedProject.name,
@@ -5701,8 +3153,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                         debateRunRound,
                         round,
                         rounds,
-                        revisionPrompt,
-                        baselineFileCount: baselineFilesForDebate.length,
                         previousRoundExcerpts: formatRoundExcerpts(previousRoundMessages),
                         roundOneExcerpts: formatRoundExcerpts(roundOneMessages),
                         snapshotAttachmentCounts: roundAttachmentCounts,
@@ -5839,7 +3289,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   projectId,
                   language,
                   agentRole: 'Orchestrator',
-                  model: refreshedProject.model,
                   inputText: summaryPrompt,
                   context: {
                     projectName: refreshedProject.name,
@@ -5955,33 +3404,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [runAutoDebate, translateProjectWithVars]
   );
 
-  const requestRevisionFromComplete = useCallback(
-    (feedback: string, attachmentIds?: string[]) => {
-      const project = stateRef.current.activeProject;
-      if (!project) return;
-
-      if (project.revisionRound >= MAX_REVISION_ROUNDS) {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'warning',
-          message: translateProjectWithVars(project.language, 'workflow.revision.limitReached', {
-            max: MAX_REVISION_ROUNDS,
-          }),
-        });
-        return;
-      }
-
-      dispatch({ type: 'REVISION_FROM_COMPLETE', feedback, attachmentIds });
-      setTimeout(() => runAutoDebate(project.id), 0);
-    },
-    [runAutoDebate, translateProjectWithVars]
-  );
-
   const reset = useCallback(() => {
     schedulerPausedRef.current = {};
     setPausedSchedulers({});
     checkpointHitRef.current = {};
-    completedSnapshotRef.current = {};
     deadlockSignatureRef.current = {};
     setDeadlocks({});
     dispatch({ type: 'RESET' });
@@ -5999,8 +3425,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       name: demoProject.name,
       description: demoProject.description,
       language,
-      provider: demoProject.provider,
-      model: demoProject.model,
       outputType: demoProject.outputType,
       simulationMode: demoProject.simulationMode,
       debateRounds: demoProject.debateRounds,
@@ -6037,6 +3461,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!project) return;
     const checkpointState = checkpointHitRef.current[project.id] ?? {
       approval: false,
+      integrator: false,
     };
     if (state.currentPhase === 'awaiting-approval' && !checkpointState.approval) {
       checkpointHitRef.current[project.id] = {
@@ -6062,19 +3487,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const project = state.activeProject;
     const taskGraph = project?.taskGraph;
     const runningTasks = project?.tasks.filter((task) => task.status === 'running').length ?? 0;
-    const done =
-      project?.tasks.filter(
-        (task) => task.status === 'done' || task.status === 'completed_with_fallback'
-      ).length ?? 0;
+    const done = project?.tasks.filter((task) => task.status === 'done').length ?? 0;
     const queued = project?.tasks.filter((task) => task.status === 'queued').length ?? 0;
-    const blocked =
-      project?.tasks.filter(
-        (task) => task.status === 'blocked' || task.status === 'blocked_due_to_failed_dependency'
-      ).length ?? 0;
-    const failed =
-      project?.tasks.filter(
-        (task) => task.status === 'failed' || task.status === 'canceled_due_to_failed_dependency'
-      ).length ?? 0;
+    const blocked = project?.tasks.filter((task) => task.status === 'blocked').length ?? 0;
+    const failed = project?.tasks.filter((task) => task.status === 'failed').length ?? 0;
     const total = project?.tasks.length ?? 0;
     const isComplete = total > 0 && done + failed === total;
     return {
@@ -6116,7 +3532,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     requestApproval,
     approvePlan,
     rejectPlan,
-    requestRevisionFromComplete,
     updateAgentStatus: updateAgentStatusFn,
     addUserMessage,
     attachToProject,
