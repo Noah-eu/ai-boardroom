@@ -9,6 +9,11 @@ import remarkGfm from 'remark-gfm';
 import { useApp } from '@/context/AppContext';
 import { translate, translateWithVars } from '@/i18n';
 import {
+  decodeBase64BundleFileContent,
+  isBase64EncodedBundleFileContent,
+  parseInvoiceSummaryResultFromArtifacts,
+} from '@/lib/documentExporter';
+import {
   ExecutionOutputBundle,
   ExecutionOutputFile,
   InvoiceAmountType,
@@ -782,6 +787,20 @@ function getPreferredArtifactSelection(tasks: Task[]): { taskId: string; artifac
     : null;
 }
 
+function getLatestArtifactText(tasks: Task[], artifactPath: string): string | null {
+  for (const task of [...tasks].reverse()) {
+    const artifact = task.producesArtifacts.find((candidate) => candidate.path === artifactPath);
+    if (!artifact) continue;
+    if (artifact.rawContent?.trim()) return artifact.rawContent;
+    if (artifact.content?.trim()) return artifact.content;
+    if (artifact.executionOutput) {
+      const bundleFile = artifact.executionOutput.files.find((file) => normalizeBundleFilePath(file.path) === artifactPath);
+      if (bundleFile?.content?.trim()) return bundleFile.content;
+    }
+  }
+  return null;
+}
+
 function buildImageAiStatusKeys(attachment: ProjectAttachment): Array<Parameters<typeof translate>[1]> {
   const keys: Array<Parameters<typeof translate>[1]> = ['attachments.aiStatus.uploaded'];
   if (attachment.ingestion?.linkedToAi || attachment.ingestion?.includedInContext) {
@@ -1002,6 +1021,15 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     [selectedExecutionBundle]
   );
   const selectedInvoiceResult = useMemo(() => {
+    const canonicalValidatedRaw = getLatestArtifactText(tasks, 'validated-rows.json');
+    const canonicalSummaryRaw = getLatestArtifactText(tasks, 'summary-metadata.json');
+    if (canonicalValidatedRaw || canonicalSummaryRaw) {
+      const canonical = parseInvoiceSummaryResultFromArtifacts(canonicalValidatedRaw, canonicalSummaryRaw);
+      if (canonical.result.rows.length > 0 || canonical.result.summary.warnings.length > 0) {
+        return canonical.result;
+      }
+    }
+
     const fromArtifactRaw = selectedArtifactMeta?.rawContent ? parseInvoiceSummaryResult(selectedArtifactMeta.rawContent) : null;
     if (fromArtifactRaw) return fromArtifactRaw;
 
@@ -1009,6 +1037,16 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     if (fromArtifactContent) return fromArtifactContent;
 
     if (!selectedExecutionBundle) return null;
+
+    const bundleValidated = findBundleFile(selectedExecutionBundle, 'validated-rows.json')?.content ?? null;
+    const bundleSummary = findBundleFile(selectedExecutionBundle, 'summary-metadata.json')?.content ?? null;
+    if (bundleValidated || bundleSummary) {
+      const fromBundleStructured = parseInvoiceSummaryResultFromArtifacts(bundleValidated, bundleSummary);
+      if (fromBundleStructured.result.rows.length > 0 || fromBundleStructured.result.summary.warnings.length > 0) {
+        return fromBundleStructured.result;
+      }
+    }
+
     for (const file of selectedExecutionBundle.files) {
       if (!file.path.toLowerCase().endsWith('.json')) continue;
       const fromBundleFile = parseInvoiceSummaryResult(file.content);
@@ -1016,7 +1054,7 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
     }
 
     return null;
-  }, [selectedArtifactMeta, selectedExecutionBundle]);
+  }, [selectedArtifactMeta, selectedExecutionBundle, tasks]);
   const stableBaselineBundle = project?.latestStableBundle ?? null;
 
   const resultModalTitle = selectedExecutionBundle
@@ -1062,7 +1100,12 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
 
     const zip = new JSZip();
     bundle.files.forEach((file) => {
-      zip.file(normalizeBundleFilePath(file.path), file.content);
+      const normalizedPath = normalizeBundleFilePath(file.path);
+      if (isBase64EncodedBundleFileContent(normalizedPath, file.content)) {
+        zip.file(normalizedPath, decodeBase64BundleFileContent(file.content), { base64: true });
+        return;
+      }
+      zip.file(normalizedPath, file.content);
     });
 
     const blob = await zip.generateAsync({ type: 'blob' });

@@ -55,6 +55,7 @@ import {
 } from '@/orchestrator';
 import { createTask, patchTask } from '@/tasks';
 import { Language, TranslationKey, translate, translateWithVars } from '@/i18n';
+import { buildDeterministicDocumentExecutionBundle } from '@/lib/documentExporter';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -4953,6 +4954,48 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               producedBy: task.agent,
               generatedAt: new Date(),
             };
+            continue;
+          }
+
+          const isDeterministicDocumentExporterStage =
+            project.outputType === 'document' &&
+            artifact.path === 'generated-files.json' &&
+            /Exporter/i.test(task.title);
+
+          if (isDeterministicDocumentExporterStage) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: task.agent,
+              message: `${task.agent}: generating deterministic document export bundle (no OpenAI call).`,
+            });
+
+            const validatedRowsRaw = getLatestArtifactContent(project.tasks, 'validated-rows.json');
+            const summaryMetadataRaw = getLatestArtifactContent(project.tasks, 'summary-metadata.json');
+
+            const deterministicExport = buildDeterministicDocumentExecutionBundle({
+              validatedRowsRaw,
+              summaryMetadataRaw,
+              language: project.language,
+            });
+
+            updatedArtifacts[index] = {
+              ...artifact,
+              content: deterministicExport.bundle.summary,
+              rawContent: JSON.stringify(deterministicExport.bundle, null, 2),
+              executionOutput: deterministicExport.bundle,
+              producedBy: task.agent,
+              generatedAt: new Date(),
+            };
+
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'success',
+              agent: task.agent,
+              message:
+                `${task.agent}: deterministic export bundle ready ` +
+                `(${deterministicExport.invoiceSummary.summary.invoiceCount} row(s), ${deterministicExport.bundle.files.length} file(s)).`,
+            });
             continue;
           }
 
