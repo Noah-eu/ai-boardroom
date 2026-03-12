@@ -82,6 +82,8 @@ const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
 const MAX_AI_ATTACHMENT_SECTIONS = 6;
 const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
+const BUILDER_MAX_PDF_FILES_PER_CHUNK = 5;
+const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
@@ -289,6 +291,14 @@ type AttachmentTypeCounts = {
 
 type DebateTaskType = 'observational' | 'planning';
 
+type BuilderExtractionRow = {
+  sourceAttachmentId: string;
+  sourceTitle: string;
+  values: Record<string, unknown>;
+};
+
+type PdfSnapshotInput = ExecutionSnapshot['pdfTexts'][number];
+
 function getAttachmentTypeCounts(attachments: ProjectAttachment[]): AttachmentTypeCounts {
   return attachments.reduce<AttachmentTypeCounts>(
     (acc, attachment) => {
@@ -342,6 +352,226 @@ function detectDebateTaskType(task: string): DebateTaskType {
   if (hasPlanningSignal) return 'planning';
   if (hasObservationalSignal) return 'observational';
   return 'planning';
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  if (chunkSize <= 0) return [items];
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function shouldChunkBuilderPdfExtraction(task: Task, artifactPath: string, snapshot: ExecutionSnapshot, project: Project): boolean {
+  if (task.agent !== 'Builder') return false;
+  if (artifactPath !== 'generated-files.json') return false;
+  if (snapshot.pdfTexts.length <= BUILDER_MAX_PDF_FILES_PER_CHUNK) return false;
+
+  const intent = [project.outputType, project.description, project.latestRevisionFeedback ?? '', task.title, task.description]
+    .join(' ')
+    .toLowerCase();
+  const extractionSignals = [
+    /\binvoice\b/,
+    /\binvoices\b/,
+    /\bextract\b/,
+    /\bextraction\b/,
+    /\btabular\b/,
+    /\btable\b/,
+    /\bcsv\b/,
+    /\bfaktur\b/,
+    /\buctenk\b/,
+    /\bvytezen/i,
+  ];
+
+  return project.outputType === 'document' || extractionSignals.some((pattern) => pattern.test(intent));
+}
+
+function buildSnapshotAttachmentContext(
+  snapshot: ExecutionSnapshot,
+  includedPdfAttachmentIds?: Set<string>
+): AttachmentContextSnapshot {
+  const includePdf = (attachmentId: string) => {
+    if (!includedPdfAttachmentIds) return true;
+    return includedPdfAttachmentIds.has(attachmentId);
+  };
+
+  const pdfSections = snapshot.pdfTexts
+    .filter((entry) => includePdf(entry.attachmentId))
+    .map((entry) => ({
+      title: entry.title,
+      kind: 'pdf' as const,
+      source: entry.source,
+      text: entry.text,
+    }));
+
+  const zipSections = snapshot.zipSnapshots.map((entry) => ({
+    title: entry.title,
+    kind: 'zip' as const,
+    source: entry.source,
+    text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
+      .map((file) => `${file.path}\n${file.content}`)
+      .join('\n\n')}`,
+  }));
+
+  const siteSections = snapshot.siteSnapshots.map((entry) => ({
+    title: entry.title,
+    kind: 'url' as const,
+    source: entry.source,
+    text: [
+      entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
+      entry.summary ? `Summary: ${entry.summary}` : '',
+      entry.extractedText ?? '',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+  }));
+
+  const includedAttachmentIds = [
+    ...snapshot.imageInputs.map((entry) => entry.attachmentId),
+    ...snapshot.pdfTexts.filter((entry) => includePdf(entry.attachmentId)).map((entry) => entry.attachmentId),
+    ...snapshot.zipSnapshots.map((entry) => entry.attachmentId),
+    ...snapshot.siteSnapshots.map((entry) => entry.attachmentId),
+  ];
+
+  return {
+    projectAttachments: snapshot.projectAttachments,
+    messageAttachments: snapshot.messageAttachments,
+    textSections: [...pdfSections, ...zipSections, ...siteSections],
+    images: snapshot.imageInputs.map((entry) => ({
+      url: entry.url,
+      title: entry.title,
+      source: entry.source,
+      attachmentId: entry.attachmentId,
+    })),
+    droppedImageAttachments: [],
+    includedAttachmentIds,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function stableSerialize(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerialize(entry)).join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort((a, b) => a.localeCompare(b));
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function normalizeRowValues(value: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(value).slice(0, 40).map(([key, item]) => {
+    if (typeof item === 'string') {
+      return [key, shorten(item, 500)] as const;
+    }
+    if (Array.isArray(item)) {
+      return [key, item.slice(0, 20)] as const;
+    }
+    return [key, item] as const;
+  });
+  return Object.fromEntries(entries);
+}
+
+function parseBuilderChunkRows(raw: string, chunkPdfEntries: PdfSnapshotInput[]): BuilderExtractionRow[] {
+  const parsed = parseJsonObjectFromModelText(raw);
+  const root = asRecord(parsed);
+  if (!root) {
+    throw new Error('Chunk extraction output is not an object.');
+  }
+
+  const documentCandidates = [root.documents, root.results, root.items, root.records].find((candidate) =>
+    Array.isArray(candidate)
+  );
+
+  if (!Array.isArray(documentCandidates)) {
+    throw new Error('Chunk extraction output is missing documents/results/items array.');
+  }
+
+  const sourceById = new Map(chunkPdfEntries.map((entry) => [entry.attachmentId, entry] as const));
+  const sourceByTitle = new Map(chunkPdfEntries.map((entry) => [entry.title, entry] as const));
+
+  const rows: BuilderExtractionRow[] = [];
+  documentCandidates.forEach((docCandidate) => {
+    const doc = asRecord(docCandidate);
+    if (!doc) return;
+
+    const sourceAttachmentId =
+      typeof doc.sourceAttachmentId === 'string' && sourceById.has(doc.sourceAttachmentId)
+        ? doc.sourceAttachmentId
+        : null;
+    const sourceTitle = typeof doc.sourceTitle === 'string' ? doc.sourceTitle : null;
+
+    const resolvedSource =
+      (sourceAttachmentId ? sourceById.get(sourceAttachmentId) : null) ??
+      (sourceTitle ? sourceByTitle.get(sourceTitle) : null) ??
+      null;
+    if (!resolvedSource) return;
+
+    const rowCandidates =
+      (Array.isArray(doc.rows) ? doc.rows : null) ??
+      (Array.isArray(doc.records) ? doc.records : null) ??
+      (Array.isArray(doc.items) ? doc.items : null) ??
+      [];
+
+    rowCandidates.forEach((rowCandidate) => {
+      const record = asRecord(rowCandidate);
+      if (!record) return;
+      rows.push({
+        sourceAttachmentId: resolvedSource.attachmentId,
+        sourceTitle: resolvedSource.title,
+        values: record,
+      });
+    });
+  });
+
+  return rows;
+}
+
+function mergeExtractionRows(rows: BuilderExtractionRow[]): BuilderExtractionRow[] {
+  const deduped: BuilderExtractionRow[] = [];
+  const seen = new Set<string>();
+  rows.forEach((row) => {
+    const key = `${row.sourceAttachmentId}::${stableSerialize(row.values)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(row);
+  });
+  return deduped;
+}
+
+function buildBuilderChunkPrompt(
+  project: Project,
+  snapshot: ExecutionSnapshot,
+  chunkIndex: number,
+  chunkCount: number,
+  pdfChunk: PdfSnapshotInput[]
+): string {
+  return [
+    project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+    'You are Builder.',
+    `Extract structured invoice/document rows only from PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
+    'Return JSON only. No markdown fences or prose.',
+    'Contract:',
+    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"field":"value"}]}]}',
+    'Rules:',
+    '- Use only sourceAttachmentId/sourceTitle listed below.',
+    '- Keep source mapping exact per row.',
+    '- If a document has no rows, return an empty rows array for it.',
+    '- Do not include data from files outside this chunk.',
+    `Project prompt:\n${shorten(snapshot.projectPrompt, 1200)}`,
+    `Approved debate summary:\n${shorten(snapshot.approvedDebateSummary, 1400)}`,
+    `Chunk files:\n${pdfChunk.map((entry) => `- ${entry.attachmentId} | ${entry.title}`).join('\n')}`,
+  ].join('\n\n');
 }
 
 type DraftAttachmentInput =
@@ -3650,51 +3880,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }, executionTaskTimeoutMs);
 
       try {
-        const snapshotAttachmentContext: AttachmentContextSnapshot = {
-          projectAttachments: snapshot.projectAttachments,
-          messageAttachments: snapshot.messageAttachments,
-          textSections: [
-            ...snapshot.pdfTexts.map((entry) => ({
-              title: entry.title,
-              kind: 'pdf' as const,
-              source: entry.source,
-              text: entry.text,
-            })),
-            ...snapshot.zipSnapshots.map((entry) => ({
-              title: entry.title,
-              kind: 'zip' as const,
-              source: entry.source,
-              text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
-                .map((file) => `${file.path}\n${file.content}`)
-                .join('\n\n')}`,
-            })),
-            ...snapshot.siteSnapshots.map((entry) => ({
-              title: entry.title,
-              kind: 'url' as const,
-              source: entry.source,
-              text: [
-                entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
-                entry.summary ? `Summary: ${entry.summary}` : '',
-                entry.extractedText ?? '',
-              ]
-                .filter(Boolean)
-                .join('\n\n'),
-            })),
-          ],
-          images: snapshot.imageInputs.map((entry) => ({
-            url: entry.url,
-            title: entry.title,
-            source: entry.source,
-            attachmentId: entry.attachmentId,
-          })),
-          droppedImageAttachments: [],
-          includedAttachmentIds: [
-            ...snapshot.imageInputs.map((entry) => entry.attachmentId),
-            ...snapshot.pdfTexts.map((entry) => entry.attachmentId),
-            ...snapshot.zipSnapshots.map((entry) => entry.attachmentId),
-            ...snapshot.siteSnapshots.map((entry) => entry.attachmentId),
-          ],
-        };
+        const snapshotAttachmentContext = buildSnapshotAttachmentContext(snapshot);
 
         const updatedArtifacts = [...task.producesArtifacts];
 
@@ -3995,6 +4181,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
           const compactContext = buildExecutionAgentContext(task, snapshot);
           const promptSize = estimatePromptSize(prompt, compactContext);
+          const requiresStructuredOutput = artifactRequiresStructuredExecutionOutput(task, artifact);
+          const shouldChunkPdfExtraction = shouldChunkBuilderPdfExtraction(task, artifact.path, snapshot, project);
 
           dispatch({
             type: 'ADD_LOG',
@@ -4007,48 +4195,262 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             type: 'ADD_LOG',
             level: 'info',
             agent: task.agent,
-            message: `${task.agent}: calling OpenAI`,
+            message: shouldChunkPdfExtraction
+              ? `${task.agent}: calling OpenAI with PDF chunking enabled (${snapshot.pdfTexts.length} PDFs)`
+              : `${task.agent}: calling OpenAI`,
           });
 
           let response: AiRespondResult;
-          try {
-            response = await callAiRespond(
-              {
-                projectId,
-                language: project.language,
-                agentRole: task.agent,
-                model: task.model,
-                responseMode: artifactRequiresStructuredExecutionOutput(task, artifact)
-                  ? 'structured_execution_bundle'
-                  : 'default',
-                inputText: prompt,
-                context: {
-                  artifactPath: artifact.path,
-                  ...compactContext,
-                },
-              },
-              { agent: task.agent },
-              snapshotAttachmentContext,
-              { timeoutMs: executionTaskTimeoutMs }
-            );
-          } catch (error) {
-            const detail = formatAiExecutionError(error);
-            const infra = error instanceof AiRequestError ? error : null;
-            failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail.message}`, {
-              artifactPath: artifact.path,
-              rawBodySnippet: infra?.rawBodySnippet ?? null,
+          if (shouldChunkPdfExtraction) {
+            const pdfChunks = chunkArray(snapshot.pdfTexts, BUILDER_MAX_PDF_FILES_PER_CHUNK);
+            const extractedRowsAcrossChunks: BuilderExtractionRow[] = [];
+            const completedChunkSummaries: Array<{ chunk: number; files: string[]; rows: number }> = [];
+
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: task.agent,
+              message:
+                `${task.agent}: chunking ${snapshot.pdfTexts.length} PDF(s) into ${pdfChunks.length} chunk(s)` +
+                ` (max ${BUILDER_MAX_PDF_FILES_PER_CHUNK} files/chunk).`,
             });
-            if (infra?.kind === 'infrastructure') {
+
+            const persistPartialChunkDebug = (chunkNumber: number, chunkFiles: string[], reason: string) => {
+              const debugPayload = {
+                status: 'partial_chunk_failure',
+                failedChunk: chunkNumber,
+                failedFiles: chunkFiles,
+                reason,
+                completedChunks: completedChunkSummaries,
+                extractedRowsSoFar: extractedRowsAcrossChunks.length,
+                dedupedRowsSoFar: mergeExtractionRows(extractedRowsAcrossChunks).length,
+              };
+              const debugContent = JSON.stringify(debugPayload, null, 2);
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: debugContent,
+                rawContent: debugContent,
+                executionOutput: null,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+              dispatch({
+                type: 'UPDATE_TASK',
+                projectId,
+                taskId,
+                patch: { producesArtifacts: updatedArtifacts },
+              });
+            };
+
+            for (let chunkIndex = 0; chunkIndex < pdfChunks.length; chunkIndex += 1) {
+              const pdfChunk = pdfChunks[chunkIndex];
+              const chunkFiles = pdfChunk.map((entry) => `${entry.title} (${entry.attachmentId})`);
+
               dispatch({
                 type: 'ADD_LOG',
-                level: 'error',
+                level: 'info',
                 agent: task.agent,
                 message:
-                  `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
-                  `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
+                  `${task.agent}: processing chunk ${chunkIndex + 1}/${pdfChunks.length} ` +
+                  `with ${pdfChunk.length} file(s): ${chunkFiles.join(', ')}`,
               });
+
+              const chunkPrompt = buildBuilderChunkPrompt(project, snapshot, chunkIndex, pdfChunks.length, pdfChunk);
+              const chunkAttachmentContext = buildSnapshotAttachmentContext(
+                snapshot,
+                new Set(pdfChunk.map((entry) => entry.attachmentId))
+              );
+
+              let chunkResponse: AiRespondResult;
+              try {
+                chunkResponse = await callAiRespond(
+                  {
+                    projectId,
+                    language: project.language,
+                    agentRole: task.agent,
+                    model: task.model,
+                    responseMode: 'default',
+                    inputText: chunkPrompt,
+                    context: {
+                      artifactPath: artifact.path,
+                      snapshotId: snapshot.id,
+                      cycleNumber: snapshot.cycleNumber,
+                      extractionChunk: {
+                        chunkNumber: chunkIndex + 1,
+                        chunkCount: pdfChunks.length,
+                        files: pdfChunk.map((entry) => ({
+                          attachmentId: entry.attachmentId,
+                          title: entry.title,
+                        })),
+                      },
+                    },
+                  },
+                  { agent: task.agent },
+                  chunkAttachmentContext,
+                  { timeoutMs: executionTaskTimeoutMs }
+                );
+              } catch (error) {
+                const detail = formatAiExecutionError(error);
+                const infra = error instanceof AiRequestError ? error : null;
+                const chunkLabel = `chunk ${chunkIndex + 1}/${pdfChunks.length}`;
+                persistPartialChunkDebug(chunkIndex + 1, chunkFiles, detail.message);
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: OpenAI call failed for ${artifact.path} (${chunkLabel}) files=[${chunkFiles.join(', ')}]: ${detail.message}`,
+                  {
+                    artifactPath: artifact.path,
+                    rawBodySnippet: infra?.rawBodySnippet ?? null,
+                  }
+                );
+                return;
+              }
+
+              try {
+                const chunkRows = parseBuilderChunkRows(chunkResponse.text, pdfChunk);
+                extractedRowsAcrossChunks.push(...chunkRows);
+                completedChunkSummaries.push({
+                  chunk: chunkIndex + 1,
+                  files: chunkFiles,
+                  rows: chunkRows.length,
+                });
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'success',
+                  agent: task.agent,
+                  message:
+                    `${task.agent}: chunk ${chunkIndex + 1}/${pdfChunks.length} extracted ` +
+                    `${chunkRows.length} row(s).`,
+                });
+              } catch (error) {
+                const parseDetail = error instanceof Error ? error.message : 'Unknown chunk parse failure';
+                persistPartialChunkDebug(chunkIndex + 1, chunkFiles, parseDetail);
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: chunk parse failed for ${artifact.path} (chunk ${chunkIndex + 1}/${pdfChunks.length}) ` +
+                    `files=[${chunkFiles.join(', ')}]: ${parseDetail}`
+                );
+                return;
+              }
             }
-            return;
+
+            const mergedRows = mergeExtractionRows(extractedRowsAcrossChunks);
+            const rowsForFinalPrompt = mergedRows
+              .slice(0, BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT)
+              .map((row) => ({
+                sourceAttachmentId: row.sourceAttachmentId,
+                sourceTitle: row.sourceTitle,
+                values: normalizeRowValues(row.values),
+              }));
+            const droppedRows = Math.max(0, mergedRows.length - rowsForFinalPrompt.length);
+
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: task.agent,
+              message:
+                `${task.agent}: merged chunk rows ${mergedRows.length} total` +
+                `${droppedRows > 0 ? ` (trimmed ${droppedRows} row(s) for final prompt)` : ''}.`,
+            });
+
+            const finalPrompt = [
+              prompt,
+              'Chunk extraction merge data (use as canonical extracted records, keep source traceability):',
+              JSON.stringify(
+                {
+                  chunking: {
+                    chunkCount: pdfChunks.length,
+                    maxFilesPerChunk: BUILDER_MAX_PDF_FILES_PER_CHUNK,
+                    completedChunks: completedChunkSummaries,
+                  },
+                  mergedRowsCount: mergedRows.length,
+                  rows: rowsForFinalPrompt,
+                },
+                null,
+                2
+              ),
+            ].join('\n\n');
+
+            try {
+              response = await callAiRespond(
+                {
+                  projectId,
+                  language: project.language,
+                  agentRole: task.agent,
+                  model: task.model,
+                  responseMode: requiresStructuredOutput ? 'structured_execution_bundle' : 'default',
+                  inputText: finalPrompt,
+                  context: {
+                    artifactPath: artifact.path,
+                    ...compactContext,
+                    chunking: {
+                      chunkCount: pdfChunks.length,
+                      maxFilesPerChunk: BUILDER_MAX_PDF_FILES_PER_CHUNK,
+                      mergedRowsCount: mergedRows.length,
+                      mergedRowsTrimmed: droppedRows,
+                    },
+                  },
+                },
+                { agent: task.agent },
+                buildSnapshotAttachmentContext(snapshot, new Set<string>()),
+                { timeoutMs: executionTaskTimeoutMs }
+              );
+            } catch (error) {
+              const detail = formatAiExecutionError(error);
+              const infra = error instanceof AiRequestError ? error : null;
+              failLiveTask(task.agent, `${task.agent}: final merged OpenAI call failed for ${artifact.path}: ${detail.message}`, {
+                artifactPath: artifact.path,
+                rawBodySnippet: infra?.rawBodySnippet ?? null,
+              });
+              if (infra?.kind === 'infrastructure') {
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'error',
+                  agent: task.agent,
+                  message:
+                    `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
+                    `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
+                });
+              }
+              return;
+            }
+          } else {
+            try {
+              response = await callAiRespond(
+                {
+                  projectId,
+                  language: project.language,
+                  agentRole: task.agent,
+                  model: task.model,
+                  responseMode: requiresStructuredOutput ? 'structured_execution_bundle' : 'default',
+                  inputText: prompt,
+                  context: {
+                    artifactPath: artifact.path,
+                    ...compactContext,
+                  },
+                },
+                { agent: task.agent },
+                snapshotAttachmentContext,
+                { timeoutMs: executionTaskTimeoutMs }
+              );
+            } catch (error) {
+              const detail = formatAiExecutionError(error);
+              const infra = error instanceof AiRequestError ? error : null;
+              failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail.message}`, {
+                artifactPath: artifact.path,
+                rawBodySnippet: infra?.rawBodySnippet ?? null,
+              });
+              if (infra?.kind === 'infrastructure') {
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'error',
+                  agent: task.agent,
+                  message:
+                    `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
+                    `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
+                });
+              }
+              return;
+            }
           }
 
           dispatch({
