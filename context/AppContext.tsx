@@ -365,7 +365,7 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 
 function shouldChunkBuilderPdfExtraction(task: Task, artifactPath: string, snapshot: ExecutionSnapshot, project: Project): boolean {
   if (task.agent !== 'Builder') return false;
-  if (artifactPath !== 'generated-files.json') return false;
+  if (artifactPath !== 'extracted-rows.json') return false;
   if (snapshot.pdfTexts.length <= resolveBuilderPdfChunkSize(project, snapshot)) return false;
 
   const intent = [project.outputType, project.description, project.latestRevisionFeedback ?? '', task.title, task.description]
@@ -453,6 +453,47 @@ function mergeChunkPassRows(
   });
 
   return orderedKeys.map((key) => byKey.get(key)).filter((row): row is BuilderExtractionRow => Boolean(row));
+}
+
+function shouldUseStructuredOnlyStage(artifactPath: string): boolean {
+  return [
+    'normalized-rows.json',
+    'validated-rows.json',
+    'summary-metadata.json',
+    'generated-files.json',
+    'final-summary.md',
+  ].includes(artifactPath);
+}
+
+function getLatestArtifactContent(tasks: Task[], artifactPath: string): string | null {
+  for (const task of [...tasks].reverse()) {
+    const artifact = task.producesArtifacts.find((entry) => entry.path === artifactPath);
+    if (!artifact) continue;
+    if (artifact.rawContent?.trim()) return artifact.rawContent;
+    if (artifact.content?.trim()) return artifact.content;
+  }
+  return null;
+}
+
+function tryExtractRowsCount(raw: string | null): number | null {
+  if (!raw) return null;
+  try {
+    const parsed = parseJsonObjectFromModelText(raw);
+    const root = asRecord(parsed);
+    if (!root) return null;
+    if (Array.isArray(root.rows)) return root.rows.length;
+    if (Array.isArray(root.documents)) {
+      return root.documents.reduce((acc, document) => {
+        const doc = asRecord(document);
+        if (!doc) return acc;
+        const rows = Array.isArray(doc.rows) ? doc.rows.length : 0;
+        return acc + rows;
+      }, 0);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function buildSnapshotAttachmentContext(
@@ -1513,27 +1554,75 @@ type DependencyFailureTrace = {
   chain: Task[];
 };
 
-function getRequiredUpstreamArtifacts(task: Task): Array<{ agent: AgentName; path: string; requiresExecutionOutput?: boolean }> {
-  if (task.agent === 'Reviewer') {
+function getPrimaryArtifactPath(task: Task): string | null {
+  return task.producesArtifacts[0]?.path ?? null;
+}
+
+function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; requiresExecutionOutput?: boolean }> {
+  const primaryArtifact = getPrimaryArtifactPath(task);
+  if (!primaryArtifact) return [];
+
+  const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
+  const isCodePipelineTask = /CodePlanner|AppArchitect|FileBuilder|QA|BundleExporter/i.test(task.title);
+
+  if (primaryArtifact === 'normalized-rows.json') {
+    return [{ path: 'extracted-rows.json' }];
+  }
+  if (primaryArtifact === 'validated-rows.json') {
+    return [{ path: 'normalized-rows.json' }];
+  }
+  if (primaryArtifact === 'summary-metadata.json') {
+    return [{ path: 'validated-rows.json' }];
+  }
+  if (primaryArtifact === 'generated-files.json') {
+    if (isDocumentPipelineTask) {
+      return [
+        { path: 'validated-rows.json' },
+        { path: 'summary-metadata.json' },
+      ];
+    }
+    if (isCodePipelineTask) {
+      return [
+        { path: 'execution-plan.md' },
+        { path: 'architecture-review.md' },
+      ];
+    }
+  }
+  if (primaryArtifact === 'review-notes.md') {
     return [
-      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
-      { agent: 'Builder', path: 'patch-plan.md' },
+      { path: 'generated-files.json', requiresExecutionOutput: true },
+      { path: 'patch-plan.md' },
     ];
   }
-  if (task.agent === 'Tester') {
+  if (primaryArtifact === 'bundle-export.md') {
     return [
-      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
-      { agent: 'Reviewer', path: 'review-notes.md' },
+      { path: 'generated-files.json', requiresExecutionOutput: true },
+      { path: 'review-notes.md' },
     ];
   }
-  if (task.agent === 'Integrator') {
+  if (primaryArtifact === 'final-summary.md') {
+    if (isDocumentPipelineTask) {
+      return [
+        { path: 'generated-files.json', requiresExecutionOutput: true },
+        { path: 'summary-metadata.json' },
+        { path: 'validated-rows.json' },
+      ];
+    }
     return [
-      { agent: 'Builder', path: 'generated-files.json', requiresExecutionOutput: true },
-      { agent: 'Reviewer', path: 'review-notes.md' },
-      { agent: 'Tester', path: 'test-checklist.md' },
+      { path: 'generated-files.json', requiresExecutionOutput: true },
+      { path: 'review-notes.md' },
+      { path: 'bundle-export.md' },
     ];
   }
+
   return [];
+}
+
+function findTaskProducingArtifact(project: Project, artifactPath: string): Task | null {
+  const byDependencyOrder = [...project.tasks].reverse().find((candidate) =>
+    candidate.producesArtifacts.some((artifact) => artifact.path === artifactPath)
+  );
+  return byDependencyOrder ?? null;
 }
 
 function validateTaskPrerequisites(project: Project, task: Task): TaskPrerequisiteValidationResult {
@@ -1575,13 +1664,13 @@ function validateTaskPrerequisites(project: Project, task: Task): TaskPrerequisi
 
   const requiredArtifacts = getRequiredUpstreamArtifacts(task);
   for (const requirement of requiredArtifacts) {
-    const sourceTask = project.tasks.find((candidate) => candidate.agent === requirement.agent);
+    const sourceTask = findTaskProducingArtifact(project, requirement.path);
     if (!sourceTask) {
       return {
         ok: false,
         reason: 'artifact-missing',
         artifactPath: requirement.path,
-        details: `Required upstream task (${requirement.agent}) is missing.`,
+        details: `Required upstream artifact source task is missing (${requirement.path}).`,
       };
     }
 
@@ -1663,6 +1752,40 @@ function isFailureTerminalStatus(status: Task['status']): boolean {
     status === 'canceled_due_to_failed_dependency' ||
     status === 'blocked_due_to_failed_dependency'
   );
+}
+
+type ExecutionPipelineKind = 'document' | 'code';
+
+function decideExecutionPipeline(project: Project): ExecutionPipelineKind {
+  const combinedText = [project.name, project.description, project.latestRevisionFeedback ?? '']
+    .join(' ')
+    .toLowerCase();
+
+  const documentSignals =
+    /\binvoice\b|\binvoices\b|\bpdf\b|\bcsv\b|\bxlsx\b|\bextract\b|\breport\b|\bsummary\b|\bfaktur\b|\buctenk\b|\bvyuctovan/i.test(
+      combinedText
+    );
+  const codeSignals =
+    /\bapp\b|\bweb\b|\bwebsite\b|\bgame\b|\bpong\b|\btodo\b|\bhtml\b|\bcss\b|\bjavascript\b|\bjs\b|\btypescript\b|\bcode\b|\bfrontend\b|\bui\b/.test(
+      combinedText
+    );
+
+  const attachments = project.attachments ?? [];
+  const pdfLikeAttachments = attachments.filter((attachment) => attachment.kind === 'pdf').length;
+  const zipCodeSignals = attachments.some((attachment) => {
+    if (attachment.kind !== 'zip') return false;
+    const tree = attachment.ingestion?.zipFileTree ?? [];
+    return tree.some((entry) => /\.(html|css|js|ts|tsx|jsx|json|md)$/i.test(entry));
+  });
+
+  if (project.outputType === 'document') return 'document';
+  if (project.outputType === 'app' || project.outputType === 'website') return 'code';
+
+  if (documentSignals && !codeSignals) return 'document';
+  if (codeSignals && !documentSignals) return 'code';
+  if (pdfLikeAttachments > 0 && !zipCodeSignals) return 'document';
+
+  return 'code';
 }
 
 function findDependencyFailureTrace(
@@ -3463,7 +3586,40 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const buildExecutionArtifactPrompt = useCallback(
     (task: Task, artifact: Task['producesArtifacts'][number], snapshot: ExecutionSnapshot, project: Project) => {
+      const findArtifactText = (artifactPath: string): string | null => {
+        for (const upstreamTask of [...project.tasks].reverse()) {
+          const found = upstreamTask.producesArtifacts.find((entry) => entry.path === artifactPath);
+          if (!found) continue;
+          if (found.rawContent?.trim()) return found.rawContent;
+          if (found.content?.trim()) return found.content;
+        }
+        return null;
+      };
+
+      const shortenArtifact = (artifactPath: string, maxChars: number): string =>
+        shorten(findArtifactText(artifactPath) ?? '{}', maxChars);
+
       if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
+        const isExporterStage = artifact.path === 'generated-files.json' && /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter|Integrator/i.test(task.title);
+        if (isExporterStage) {
+          return [
+            project.language === 'cz' ? 'Write summary and notes in Czech.' : 'Write summary and notes in English.',
+            'You are Exporter stage in a 6-stage execution pipeline.',
+            'Input data is already structured. Do not re-extract from PDFs. Do not infer missing source facts.',
+            'Return JSON only. Do not wrap in markdown fences.',
+            'JSON contract:',
+            '{"status":"success","summary":"short summary","files":[{"path":"invoice-rows.json","content":"{...}"},{"path":"invoice-summary.json","content":"{...}"},{"path":"index.html","content":"<!doctype html>..."}],"notes":["optional"],"removePaths":[]}',
+            'Allowed file extensions only: .html, .css, .js, .json, .md',
+            'Provide machine-usable outputs from structured rows and summary metadata (CSV/XLSX data should be represented in JSON/HTML support files if needed).',
+            'Do not add analysis prose outside summary/notes fields.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            'Validated rows artifact (canonical):',
+            shortenArtifact('validated-rows.json', 12000),
+            'Summary metadata artifact (canonical):',
+            shortenArtifact('summary-metadata.json', 8000),
+          ].join('\n\n');
+        }
+
         const websiteRequirement = taskRequiresHtmlEntry(task, project)
           ? 'Because this run is building a website/app/page, index.html is required.'
           : 'If you are building a website/page, include index.html.';
@@ -3495,6 +3651,59 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           `Site snapshots count: ${snapshot.siteSnapshots.length}`,
           `PDF snapshots count: ${snapshot.pdfTexts.length}`,
           `Image inputs count: ${snapshot.imageInputs.length}`,
+        ].join('\n\n');
+      }
+
+      if (artifact.path === 'extracted-rows.json') {
+        return [
+          project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+          'You are DocumentExtractor stage.',
+          'Extract required invoice fields only. No summaries, no analysis.',
+          'Return JSON only. No markdown fences or prose.',
+          'Contract:',
+          '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"...","billingPeriod":"...","dueDate":"...","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"variableSymbol":"..."}]}]}',
+          'Rules: keep source mapping exact; keep missing values null/empty; no fabricated values.',
+          `Project prompt:\n${shorten(snapshot.projectPrompt, 900)}`,
+        ].join('\n\n');
+      }
+
+      if (artifact.path === 'normalized-rows.json') {
+        return [
+          project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+          'You are Normalizer stage.',
+          'Normalize field names, signs, dates, amounts, currencies, and source mapping. Keep evidence traceability.',
+          'Return JSON only.',
+          'Contract:',
+          '{"rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"YYYY-MM-DD|null","billingPeriod":"...","dueDate":"YYYY-MM-DD|null","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"variableSymbol":"...","amountType":"overpayment|underpayment|unknown","normalizedSign":-1|0|1}],"filesProcessed":["..."]}',
+          'Input extracted rows (canonical):',
+          shortenArtifact('extracted-rows.json', 14000),
+        ].join('\n\n');
+      }
+
+      if (artifact.path === 'validated-rows.json') {
+        return [
+          project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+          'You are Validator stage.',
+          'Validate normalized rows: duplicates, missing fields, suspicious values, inconsistent formats.',
+          'Do not remove core evidence; annotate with warnings/quality flags.',
+          'Return JSON only.',
+          'Contract:',
+          '{"rows":[{"...":"...","validationWarnings":["..."],"qualityFlags":["..."]}],"warnings":["..."],"duplicateVariableSymbols":["..."]}',
+          'Input normalized rows (canonical):',
+          shortenArtifact('normalized-rows.json', 14000),
+        ].join('\n\n');
+      }
+
+      if (artifact.path === 'summary-metadata.json') {
+        return [
+          project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+          'You are Summarizer stage.',
+          'Build monthly/annual summaries and totals strictly from validated structured rows.',
+          'Do not re-read PDFs. Return JSON only.',
+          'Contract:',
+          '{"invoiceCount":0,"uniqueVariableSymbolCount":0,"duplicateVariableSymbolCount":0,"totalOverpayment":0,"totalUnderpayment":0,"netTotal":0,"monthlySummary":[{"month":"YYYY-MM","invoiceCount":0,"netTotal":0}],"annualSummary":[{"year":2026,"invoiceCount":0,"netTotal":0}],"warnings":["..."],"duplicateVariableSymbols":["..."],"filesProcessed":["..."],"filesFailed":["..."]}',
+          'Input validated rows (canonical):',
+          shortenArtifact('validated-rows.json', 14000),
         ].join('\n\n');
       }
 
@@ -4422,6 +4631,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const promptSize = estimatePromptSize(prompt, compactContext);
           const requiresStructuredOutput = artifactRequiresStructuredExecutionOutput(task, artifact);
           const shouldChunkPdfExtraction = shouldChunkBuilderPdfExtraction(task, artifact.path, snapshot, project);
+          const structuredOnlyStage = shouldUseStructuredOnlyStage(artifact.path);
+          const structuredAttachmentContext = buildSnapshotAttachmentContext(snapshot, new Set<string>());
+
+          if (structuredOnlyStage) {
+            const upstreamCountSource =
+              artifact.path === 'normalized-rows.json'
+                ? 'extracted-rows.json'
+                : artifact.path === 'validated-rows.json'
+                ? 'normalized-rows.json'
+                : artifact.path === 'summary-metadata.json'
+                ? 'validated-rows.json'
+                : 'validated-rows.json';
+            const upstreamRows = tryExtractRowsCount(getLatestArtifactContent(project.tasks, upstreamCountSource));
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              agent: task.agent,
+              message:
+                `${task.agent}: stage=${artifact.path} uses structured-data-only context (no PDF re-read)` +
+                `${typeof upstreamRows === 'number' ? `; inputRows=${upstreamRows}` : ''}.`,
+            });
+          }
 
           dispatch({
             type: 'ADD_LOG',
@@ -4700,73 +4931,96 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 `${droppedRows > 0 ? ` (trimmed ${droppedRows} row(s) for final prompt)` : ''}.`,
             });
 
-            const finalPrompt = [
-              prompt,
-              'Chunk extraction merge data (use as canonical extracted records, keep source traceability):',
-              JSON.stringify(
-                {
-                  chunking: {
-                    chunkCount: pdfChunks.length,
-                    maxFilesPerChunk,
-                    completedChunks: completedChunkSummaries,
-                    extractionPasses: enrichmentEnabled
-                      ? ['pass1_required_fields', 'pass2_optional_enrichment']
-                      : ['pass1_required_fields'],
-                  },
-                  mergedRowsCount: mergedRows.length,
-                  summary: mergedRowsSummary,
-                  rows: rowsForFinalPrompt,
-                },
-                null,
-                2
-              ),
-            ].join('\n\n');
-
-            try {
-              response = await callAiRespond(
-                {
-                  projectId,
-                  language: project.language,
-                  agentRole: task.agent,
-                  model: task.model,
-                  responseMode: requiresStructuredOutput ? 'structured_execution_bundle' : 'default',
-                  inputText: finalPrompt,
-                  context: {
-                    artifactPath: artifact.path,
-                    ...compactContext,
+            if (artifact.path === 'extracted-rows.json') {
+              response = {
+                text: JSON.stringify(
+                  {
                     chunking: {
                       chunkCount: pdfChunks.length,
                       maxFilesPerChunk,
-                      mergedRowsCount: mergedRows.length,
-                      mergedRowsTrimmed: droppedRows,
+                      completedChunks: completedChunkSummaries,
                       extractionPasses: enrichmentEnabled
                         ? ['pass1_required_fields', 'pass2_optional_enrichment']
                         : ['pass1_required_fields'],
                     },
+                    mergedRowsCount: mergedRows.length,
+                    summary: mergedRowsSummary,
+                    rows: rowsForFinalPrompt,
                   },
-                },
-                { agent: task.agent },
-                buildSnapshotAttachmentContext(snapshot, new Set<string>()),
-                { timeoutMs: executionTaskTimeoutMs }
-              );
-            } catch (error) {
-              const detail = formatAiExecutionError(error);
-              const infra = error instanceof AiRequestError ? error : null;
-              failLiveTask(task.agent, `${task.agent}: final merged OpenAI call failed for ${artifact.path}: ${detail.message}`, {
-                artifactPath: artifact.path,
-                rawBodySnippet: infra?.rawBodySnippet ?? null,
-              });
-              if (infra?.kind === 'infrastructure') {
-                dispatch({
-                  type: 'ADD_LOG',
-                  level: 'error',
-                  agent: task.agent,
-                  message:
-                    `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
-                    `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
+                  null,
+                  2
+                ),
+                meta: null,
+              };
+            } else {
+              const finalPrompt = [
+                prompt,
+                'Chunk extraction merge data (use as canonical extracted records, keep source traceability):',
+                JSON.stringify(
+                  {
+                    chunking: {
+                      chunkCount: pdfChunks.length,
+                      maxFilesPerChunk,
+                      completedChunks: completedChunkSummaries,
+                      extractionPasses: enrichmentEnabled
+                        ? ['pass1_required_fields', 'pass2_optional_enrichment']
+                        : ['pass1_required_fields'],
+                    },
+                    mergedRowsCount: mergedRows.length,
+                    summary: mergedRowsSummary,
+                    rows: rowsForFinalPrompt,
+                  },
+                  null,
+                  2
+                ),
+              ].join('\n\n');
+
+              try {
+                response = await callAiRespond(
+                  {
+                    projectId,
+                    language: project.language,
+                    agentRole: task.agent,
+                    model: task.model,
+                    responseMode: requiresStructuredOutput ? 'structured_execution_bundle' : 'default',
+                    inputText: finalPrompt,
+                    context: {
+                      artifactPath: artifact.path,
+                      ...compactContext,
+                      chunking: {
+                        chunkCount: pdfChunks.length,
+                        maxFilesPerChunk,
+                        mergedRowsCount: mergedRows.length,
+                        mergedRowsTrimmed: droppedRows,
+                        extractionPasses: enrichmentEnabled
+                          ? ['pass1_required_fields', 'pass2_optional_enrichment']
+                          : ['pass1_required_fields'],
+                      },
+                    },
+                  },
+                  { agent: task.agent },
+                  structuredAttachmentContext,
+                  { timeoutMs: executionTaskTimeoutMs }
+                );
+              } catch (error) {
+                const detail = formatAiExecutionError(error);
+                const infra = error instanceof AiRequestError ? error : null;
+                failLiveTask(task.agent, `${task.agent}: final merged OpenAI call failed for ${artifact.path}: ${detail.message}`, {
+                  artifactPath: artifact.path,
+                  rawBodySnippet: infra?.rawBodySnippet ?? null,
                 });
+                if (infra?.kind === 'infrastructure') {
+                  dispatch({
+                    type: 'ADD_LOG',
+                    level: 'error',
+                    agent: task.agent,
+                    message:
+                      `${task.agent} failed because AI endpoint returned non-JSON/HTML or gateway failure` +
+                      `${infra.statusCode ? ` (HTTP ${infra.statusCode})` : ''}.`,
+                  });
+                }
+                return;
               }
-              return;
             }
           } else {
             try {
@@ -4784,7 +5038,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   },
                 },
                 { agent: task.agent },
-                snapshotAttachmentContext,
+                structuredOnlyStage ? structuredAttachmentContext : snapshotAttachmentContext,
                 { timeoutMs: executionTaskTimeoutMs }
               );
             } catch (error) {
@@ -5314,92 +5568,174 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const maxRetries = project.simulationMode ? 2 : 1;
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
       const taskModel = resolveOpenAiModel(project.model);
+      const pipeline = decideExecutionPipeline(project);
 
-      const planner = createTask({
-        title: 'Planner: Execution plan',
-        description: 'Generate a prioritized plan with milestones, dependencies, and implementation order.',
-        agent: 'Planner',
+      if (pipeline === 'code') {
+        const codePlanner = createTask({
+          title: 'CodePlanner: Execution plan',
+          description: 'Generate prioritized implementation plan for requested app/web/game/code output.',
+          agent: 'Planner',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [],
+          status: 'queued',
+          producesArtifacts: [{ path: 'execution-plan.md', label: 'Execution Plan', kind: 'doc' }],
+        });
+
+        const appArchitect = createTask({
+          title: 'AppArchitect: Architecture review',
+          description: 'Define file-level architecture and implementation boundaries for generated app/game output.',
+          agent: 'Architect',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [codePlanner.id],
+          status: statusFor([codePlanner.id]),
+          producesArtifacts: [{ path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' }],
+        });
+
+        const fileBuilder = createTask({
+          title: 'FileBuilder: Generate runnable files',
+          description: 'Generate runnable static files (index.html + optional style.css/script.js) and patch plan.',
+          agent: 'Builder',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [appArchitect.id],
+          status: statusFor([appArchitect.id]),
+          producesArtifacts: [
+            { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
+            { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
+          ],
+        });
+
+        const qaReviewer = createTask({
+          title: 'QA: Quality and risk review',
+          description: 'Review generated files for requirement coverage, quality risks, and functional gaps.',
+          agent: 'Reviewer',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [fileBuilder.id],
+          status: statusFor([fileBuilder.id]),
+          producesArtifacts: [{ path: 'review-notes.md', label: 'Review Notes', kind: 'report' }],
+          retryCount: 0,
+          maxRetries,
+        });
+
+        const bundleExporter = createTask({
+          title: 'BundleExporter: Packaging notes',
+          description: 'Prepare bundle/export packaging notes from generated files and QA feedback.',
+          agent: 'Tester',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [qaReviewer.id],
+          status: statusFor([qaReviewer.id]),
+          producesArtifacts: [{ path: 'bundle-export.md', label: 'Bundle Export', kind: 'report' }],
+          retryCount: 0,
+          maxRetries,
+        });
+
+        const integrator = createTask({
+          title: 'Integrator: Final combined result',
+          description: 'Assemble final result from generated files, QA notes, and packaging guidance.',
+          agent: 'Integrator',
+          provider: 'openai',
+          model: taskModel,
+          dependsOn: [bundleExporter.id],
+          status: statusFor([bundleExporter.id]),
+          producesArtifacts: [{ path: 'final-summary.md', label: 'Final Summary', kind: 'doc' }],
+        });
+
+        return {
+          tasks: [codePlanner, appArchitect, fileBuilder, qaReviewer, bundleExporter, integrator],
+          concurrencyLimit: 2,
+          maxRetries,
+        };
+      }
+
+      const documentExtractor = createTask({
+        title: 'DocumentExtractor: Required field extraction',
+        description: 'Extract required invoice/document rows from attachments in small chunks with strict source mapping.',
+        agent: 'Builder',
         provider: 'openai',
         model: taskModel,
         dependsOn: [],
         status: 'queued',
         producesArtifacts: [
-          { path: 'execution-plan.md', label: 'Execution Plan', kind: 'doc' },
+          { path: 'extracted-rows.json', label: 'Extracted Rows', kind: 'json' },
         ],
       });
 
-      const architect = createTask({
-        title: 'Architect: Architecture review',
-        description: 'Review architecture impacts, module boundaries, and implementation constraints.',
+      const normalizer = createTask({
+        title: 'Normalizer: Dataset normalization',
+        description: 'Normalize extracted rows into a stable schema for downstream validation and summaries.',
         agent: 'Architect',
         provider: 'openai',
         model: taskModel,
-        dependsOn: [planner.id],
-        status: statusFor([planner.id]),
+        dependsOn: [documentExtractor.id],
+        status: statusFor([documentExtractor.id]),
         producesArtifacts: [
-          { path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' },
+          { path: 'normalized-rows.json', label: 'Normalized Rows', kind: 'json' },
         ],
       });
 
-      const builder = createTask({
-        title: 'Builder: Implementation proposal',
-        description: 'Draft concrete file-level change proposals and patch plan based on ingested inputs.',
+      const validator = createTask({
+        title: 'Validator: Quality checks',
+        description: 'Validate normalized rows for duplicates, missing fields, suspicious values, and consistency flags.',
+        agent: 'Reviewer',
+        provider: 'openai',
+        model: taskModel,
+        dependsOn: [normalizer.id],
+        status: statusFor([normalizer.id]),
+        producesArtifacts: [
+          { path: 'validated-rows.json', label: 'Validated Rows', kind: 'json' },
+        ],
+        retryCount: 0,
+        maxRetries,
+      });
+
+      const summarizer = createTask({
+        title: 'Summarizer: Monthly and annual summaries',
+        description: 'Build summary metadata and totals only from validated structured rows.',
+        agent: 'Tester',
+        provider: 'openai',
+        model: taskModel,
+        dependsOn: [validator.id],
+        status: statusFor([validator.id]),
+        producesArtifacts: [
+          { path: 'summary-metadata.json', label: 'Summary Metadata', kind: 'json' },
+        ],
+        retryCount: 0,
+        maxRetries,
+      });
+
+      const exporter = createTask({
+        title: 'Exporter: CSV/XLSX/JSON export bundle',
+        description: 'Generate machine-usable export bundle from validated rows and summary metadata without re-reading PDFs.',
         agent: 'Builder',
         provider: 'openai',
         model: taskModel,
-        dependsOn: [architect.id],
-        status: statusFor([architect.id]),
+        dependsOn: [summarizer.id],
+        status: statusFor([summarizer.id]),
         producesArtifacts: [
           { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
           { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
         ],
       });
 
-      const reviewer = createTask({
-        title: 'Reviewer: Quality and risk review',
-        description: 'Audit Builder outputs for quality, requirement coverage, and risks.',
-        agent: 'Reviewer',
-        provider: 'openai',
-        model: taskModel,
-        dependsOn: [builder.id],
-        status: statusFor([builder.id]),
-        producesArtifacts: [
-          { path: 'review-notes.md', label: 'Review Notes', kind: 'report' },
-        ],
-        retryCount: 0,
-        maxRetries,
-      });
-
-      const tester = createTask({
-        title: 'Tester: Test checklist and acceptance criteria',
-        description: 'Create functional, regression, and edge-case test checklist with acceptance criteria.',
-        agent: 'Tester',
-        provider: 'openai',
-        model: taskModel,
-        dependsOn: [reviewer.id],
-        status: statusFor([reviewer.id]),
-        producesArtifacts: [
-          { path: 'test-checklist.md', label: 'Test Checklist', kind: 'report' },
-        ],
-        retryCount: 0,
-        maxRetries,
-      });
-
       const integrator = createTask({
-        title: 'Integrator: Final merged recommendation',
-        description: 'Merge all execution outputs into a final ordered package and phased recommendation.',
+        title: 'Integrator: Final combined result',
+        description: 'Assemble final preview/output from staged structured artifacts and exporter bundle.',
         agent: 'Integrator',
         provider: 'openai',
         model: taskModel,
-        dependsOn: [tester.id],
-        status: statusFor([tester.id]),
+        dependsOn: [exporter.id],
+        status: statusFor([exporter.id]),
         producesArtifacts: [
           { path: 'final-summary.md', label: 'Final Summary', kind: 'doc' },
         ],
       });
 
       return {
-        tasks: [planner, architect, builder, reviewer, tester, integrator],
+        tasks: [documentExtractor, normalizer, validator, summarizer, exporter, integrator],
         concurrencyLimit: 2,
         maxRetries,
       };
@@ -5415,6 +5751,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       const taskGraph = generateExecutionTaskGraph(project);
+      const selectedPipeline = decideExecutionPipeline(project);
 
       const normalizedTaskGraph: TaskGraph = {
         ...taskGraph,
@@ -5434,6 +5771,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         type: 'ADD_LOG',
         level: 'info',
         message: 'Execution phase started; remaining tasks will auto-continue through Integrator.',
+      });
+      dispatch({
+        type: 'ADD_LOG',
+        level: 'info',
+        message: `Execution pipeline selected: ${selectedPipeline}`,
       });
       dispatch({
         type: 'ADD_LOG',
