@@ -15,7 +15,6 @@ import { doc, setDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import {
   AttachmentIngestion,
-  AIProvider,
   AppLanguage,
   Agent,
   AgentName,
@@ -26,7 +25,6 @@ import {
   ProjectAttachmentKind,
   ProjectUsage,
   OrchestratorState,
-  OpenAIModel,
   OutputType,
   Project,
   ProjectStatus,
@@ -367,8 +365,6 @@ type Action =
       name: string;
       description: string;
       language: AppLanguage;
-      provider: AIProvider;
-      model: OpenAIModel;
       outputType: OutputType;
       simulationMode: boolean;
       debateRounds: number;
@@ -495,9 +491,7 @@ function appReducer(state: AppState, action: Action): AppState {
         action.debateRounds,
         action.debateMode,
         action.maxWordsPerAgent,
-        action.projectId,
-        action.provider,
-        action.model
+        action.projectId
       );
       return {
         ...state,
@@ -910,7 +904,6 @@ interface AppContextValue {
     name: string,
     description: string,
     projectLanguage: AppLanguage,
-    model: OpenAIModel,
     outputType: OutputType,
     simulationMode: boolean,
     debateRounds: number,
@@ -925,7 +918,6 @@ interface AppContextValue {
   requestApproval: () => void;
   approvePlan: () => void;
   rejectPlan: (feedback: string, attachmentIds?: string[]) => void;
-  requestRevisionFromComplete: (feedback: string, attachmentIds?: string[]) => void;
   updateAgentStatus: (agent: AgentName, status: AgentStatus, lastOutput?: string) => void;
   addUserMessage: (content: string, attachmentIds?: string[]) => void;
   attachToProject: (projectId: string, attachment: DraftAttachmentInput) => Promise<ProjectAttachment>;
@@ -1445,47 +1437,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [buildAttachmentContext, resolveAiRespondEndpoint, translateProject, translateProjectWithVars]
   );
 
-  const materializePlannerGraph = useCallback(
-    (
-      rawGraph: z.infer<typeof plannerTaskGraphSchema>,
-      provider: AIProvider = 'openai',
-      model: OpenAIModel = 'gpt-4.1-mini'
-    ): TaskGraph => {
-      const idMap = new Map<string, string>();
-      rawGraph.tasks.forEach((task) => {
-        idMap.set(task.id, generateId());
-      });
+  const materializePlannerGraph = useCallback((rawGraph: z.infer<typeof plannerTaskGraphSchema>): TaskGraph => {
+    const idMap = new Map<string, string>();
+    rawGraph.tasks.forEach((task) => {
+      idMap.set(task.id, generateId());
+    });
 
-      const now = new Date();
-      const tasks: Task[] = rawGraph.tasks.map((task) => {
-        const dependsOn = task.dependsOn
-          .map((dependencyId) => idMap.get(dependencyId))
-          .filter((dependencyId): dependencyId is string => Boolean(dependencyId));
-        return {
-          id: idMap.get(task.id) as string,
-          title: task.title,
-          description: task.description,
-          agent: task.agent,
-          provider,
-          model,
-          status: dependsOn.length === 0 ? 'queued' : 'blocked',
-          dependsOn,
-          producesArtifacts: task.artifacts,
-          createdAt: now,
-          updatedAt: now,
-          retryCount: 0,
-          maxRetries: rawGraph.maxRetries,
-        };
-      });
-
+    const now = new Date();
+    const tasks: Task[] = rawGraph.tasks.map((task) => {
+      const dependsOn = task.dependsOn
+        .map((dependencyId) => idMap.get(dependencyId))
+        .filter((dependencyId): dependencyId is string => Boolean(dependencyId));
       return {
-        tasks,
-        concurrencyLimit: rawGraph.concurrencyLimit,
+        id: idMap.get(task.id) as string,
+        title: task.title,
+        description: task.description,
+        agent: task.agent,
+        status: dependsOn.length === 0 ? 'queued' : 'blocked',
+        dependsOn,
+        producesArtifacts: task.artifacts,
+        createdAt: now,
+        updatedAt: now,
+        retryCount: 0,
         maxRetries: rawGraph.maxRetries,
       };
-    },
-    []
-  );
+    });
+
+    return {
+      tasks,
+      concurrencyLimit: rawGraph.concurrencyLimit,
+      maxRetries: rawGraph.maxRetries,
+    };
+  }, []);
 
   const buildPlannerPrompt = useCallback((project: Project, strictJsonOnly: boolean) => {
     const instructions = [
@@ -1533,7 +1516,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       name: string,
       description: string,
       projectLanguage: AppLanguage,
-      model: OpenAIModel,
       outputType: OutputType,
       simulationMode: boolean,
       debateRounds: number,
@@ -1551,9 +1533,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         debateRounds,
         debateMode,
         maxWordsPerAgent,
-        projectId,
-        'openai',
-        model
+        projectId
       );
 
       dispatch({
@@ -1562,8 +1542,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         name,
         description,
         language: projectLanguage,
-        provider: 'openai',
-        model,
         outputType,
         simulationMode,
         debateRounds,
@@ -2192,7 +2170,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }, { agent: 'Planner' });
 
         const parsed = plannerTaskGraphSchema.parse(JSON.parse(plannerResponse.text));
-        return materializePlannerGraph(parsed, project.provider, project.model);
+        return materializePlannerGraph(parsed);
       };
 
       try {
@@ -3426,13 +3404,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [runAutoDebate, translateProjectWithVars]
   );
 
-  const requestRevisionFromComplete = useCallback(
-    (feedback: string, attachmentIds?: string[]) => {
-      rejectPlan(feedback, attachmentIds);
-    },
-    [rejectPlan]
-  );
-
   const reset = useCallback(() => {
     schedulerPausedRef.current = {};
     setPausedSchedulers({});
@@ -3454,8 +3425,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       name: demoProject.name,
       description: demoProject.description,
       language,
-      provider: demoProject.provider,
-      model: demoProject.model,
       outputType: demoProject.outputType,
       simulationMode: demoProject.simulationMode,
       debateRounds: demoProject.debateRounds,
@@ -3563,7 +3532,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     requestApproval,
     approvePlan,
     rejectPlan,
-    requestRevisionFromComplete,
     updateAgentStatus: updateAgentStatusFn,
     addUserMessage,
     attachToProject,
