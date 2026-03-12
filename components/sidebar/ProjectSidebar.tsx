@@ -175,105 +175,109 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
   return (
     <form
       onSubmit={handleSubmit}
-      className={`${isMobile ? 'mx-5 mb-6 rounded-[1.75rem] p-5 pb-8' : 'mx-3 mb-3 max-h-[calc(100vh-220px)] rounded-lg p-3'} ${isMobile ? '' : 'overflow-y-auto'} overflow-x-hidden border border-gray-700 bg-gray-900`}
+      className={`${isMobile ? 'mx-5 mb-6 flex min-h-0 flex-1 flex-col rounded-[1.75rem] p-5' : 'mx-3 mb-3 max-h-[calc(100vh-220px)] rounded-lg p-3'} ${isMobile ? '' : 'overflow-y-auto'} overflow-x-hidden border border-gray-700 bg-gray-900`}
     >
-      <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
-      <input
-        type="text"
-        placeholder={t('projectForm.name')}
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        autoFocus
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      />
-      <textarea
-        placeholder={t('projectForm.prompt')}
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        rows={isMobile ? 5 : 3}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full resize-none border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      />
-      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.language')}</label>
-      <select
-        value={projectLanguage}
-        onChange={(e) => setProjectLanguage(e.target.value as AppLanguage)}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      >
-        <option value="en">{t('lang.en')}</option>
-        <option value="cz">{t('lang.cz')}</option>
-      </select>
-      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.outputType')}</label>
-      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>OpenAI model</label>
-      <select
-        value={selectedModel}
-        onChange={(e) => {
-          setSelectedModel(resolveOpenAiModel(e.target.value));
-          setModelTouched(true);
-        }}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      >
-        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-        <option value="gpt-5.4">gpt-5.4</option>
-      </select>
-      <p className={`${isMobile ? 'mb-4 text-sm' : 'mb-2 text-[10px]'} text-gray-500`}>
-        Light tasks default to the cheaper model. Switch to gpt-5.4 for heavier runs.
-      </p>
       <div
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3 text-sm' : 'mb-2 rounded px-2 py-1.5 text-[10px]'} border ${
-          selectedModel === 'gpt-5.4'
-            ? 'border-amber-700/60 bg-amber-950/30 text-amber-200'
-            : 'border-emerald-800/50 bg-emerald-950/20 text-emerald-200'
-        }`}
+        className={isMobile ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1' : ''}
+        style={isMobile ? { WebkitOverflowScrolling: 'touch' } : undefined}
       >
-        {selectedModel === 'gpt-5.4' ? 'Cost note: ' : 'Model note: '}
-        {modelCostHint(selectedModel)}
-      </div>
-      <select
-        value={outputType}
-        onChange={(e) => setOutputType(e.target.value as OutputType)}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      >
-        <option value="app">{t('outputType.app')}</option>
-        <option value="website">{t('outputType.website')}</option>
-        <option value="document">{t('outputType.document')}</option>
-        <option value="plan">{t('outputType.plan')}</option>
-        <option value="other">{t('outputType.other')}</option>
-      </select>
-      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateRounds')}</label>
-      <select
-        value={debateRounds}
-        onChange={(e) => setDebateRounds(Number(e.target.value))}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      >
-        <option value={1}>1</option>
-        <option value={2}>2</option>
-        <option value={3}>3</option>
-      </select>
-      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateMode')}</label>
-      <select
-        value={debateMode}
-        onChange={(e) => setDebateMode(e.target.value as DebateMode)}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      >
-        <option value="auto">{t('projectForm.debateModeAuto')}</option>
-        <option value="interactive">{t('projectForm.debateModeInteractive')}</option>
-      </select>
-      <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.maxWordsPerAgent')}</label>
-      <input
-        type="number"
-        min={140}
-        max={220}
-        step={10}
-        value={maxWordsPerAgent}
-        onChange={(e) => {
-          const next = Number(e.target.value);
-          if (Number.isNaN(next)) return;
-          setMaxWordsPerAgent(Math.max(140, Math.min(220, next)));
-        }}
-        className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
-      />
+        <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
+        <input
+          type="text"
+          placeholder={t('projectForm.name')}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        />
+        <textarea
+          placeholder={t('projectForm.prompt')}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={isMobile ? 5 : 3}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full resize-none border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        />
+        <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.language')}</label>
+        <select
+          value={projectLanguage}
+          onChange={(e) => setProjectLanguage(e.target.value as AppLanguage)}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        >
+          <option value="en">{t('lang.en')}</option>
+          <option value="cz">{t('lang.cz')}</option>
+        </select>
+        <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.outputType')}</label>
+        <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>OpenAI model</label>
+        <select
+          value={selectedModel}
+          onChange={(e) => {
+            setSelectedModel(resolveOpenAiModel(e.target.value));
+            setModelTouched(true);
+          }}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        >
+          <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+          <option value="gpt-5.4">gpt-5.4</option>
+        </select>
+        <p className={`${isMobile ? 'mb-4 text-sm' : 'mb-2 text-[10px]'} text-gray-500`}>
+          Light tasks default to the cheaper model. Switch to gpt-5.4 for heavier runs.
+        </p>
+        <div
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3 text-sm' : 'mb-2 rounded px-2 py-1.5 text-[10px]'} border ${
+            selectedModel === 'gpt-5.4'
+              ? 'border-amber-700/60 bg-amber-950/30 text-amber-200'
+              : 'border-emerald-800/50 bg-emerald-950/20 text-emerald-200'
+          }`}
+        >
+          {selectedModel === 'gpt-5.4' ? 'Cost note: ' : 'Model note: '}
+          {modelCostHint(selectedModel)}
+        </div>
+        <select
+          value={outputType}
+          onChange={(e) => setOutputType(e.target.value as OutputType)}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        >
+          <option value="app">{t('outputType.app')}</option>
+          <option value="website">{t('outputType.website')}</option>
+          <option value="document">{t('outputType.document')}</option>
+          <option value="plan">{t('outputType.plan')}</option>
+          <option value="other">{t('outputType.other')}</option>
+        </select>
+        <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateRounds')}</label>
+        <select
+          value={debateRounds}
+          onChange={(e) => setDebateRounds(Number(e.target.value))}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        >
+          <option value={1}>1</option>
+          <option value={2}>2</option>
+          <option value={3}>3</option>
+        </select>
+        <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.debateMode')}</label>
+        <select
+          value={debateMode}
+          onChange={(e) => setDebateMode(e.target.value as DebateMode)}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        >
+          <option value="auto">{t('projectForm.debateModeAuto')}</option>
+          <option value="interactive">{t('projectForm.debateModeInteractive')}</option>
+        </select>
+        <label className={`${isMobile ? 'mb-2 text-sm' : 'mb-1 text-[10px]'} block font-medium text-gray-300`}>{t('projectForm.maxWordsPerAgent')}</label>
+        <input
+          type="number"
+          min={140}
+          max={220}
+          step={10}
+          value={maxWordsPerAgent}
+          onChange={(e) => {
+            const next = Number(e.target.value);
+            if (Number.isNaN(next)) return;
+            setMaxWordsPerAgent(Math.max(140, Math.min(220, next)));
+          }}
+          className={`${isMobile ? 'mb-4 rounded-[1.25rem] px-4 py-3.5 text-base' : 'mb-2 rounded px-2 py-1.5 text-xs'} w-full border border-gray-600 bg-gray-800 text-gray-100 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30`}
+        />
 
-      <div className={`${isMobile ? 'mb-4 rounded-[1.25rem] p-4' : 'mb-2 rounded p-2'} border border-gray-700 bg-gray-950/40`}>
+        <div className={`${isMobile ? 'mb-4 rounded-[1.25rem] p-4' : 'mb-2 rounded p-2'} border border-gray-700 bg-gray-950/40`}>
         <div className={`flex items-center ${isMobile ? 'gap-4' : 'gap-2'}`}>
           <p className={`${isMobile ? 'text-sm' : 'text-[10px]'} font-medium text-gray-300`}>{t('projectForm.attachments')}</p>
           <div ref={attachmentMenuRef} className="relative ml-auto">
@@ -347,9 +351,10 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
         <input ref={photoInputRef} type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" className="hidden" onChange={(event) => onFilePicked(event, 'image')} />
         <input ref={pdfInputRef} type="file" accept=".pdf,application/pdf" className="hidden" onChange={(event) => onFilePicked(event, 'pdf')} />
         <input ref={zipInputRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" className="hidden" onChange={(event) => onFilePicked(event, 'zip')} />
+        </div>
       </div>
 
-      <div className={`flex ${isMobile ? 'gap-4' : 'gap-2'}`} style={isMobile ? { paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' } : undefined}>
+      <div className={`flex ${isMobile ? 'mt-4 flex-shrink-0 gap-4' : 'gap-2'}`} style={isMobile ? { paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' } : undefined}>
         <button
           type="submit"
           disabled={!name.trim() || !description.trim()}
@@ -565,7 +570,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
 
       {showForm ? (
         <div
-          className={`min-h-0 flex-1 ${isMobile ? 'overflow-y-auto overscroll-contain' : ''}`}
+          className={`min-h-0 flex-1 ${isMobile ? 'overflow-hidden' : ''}`}
           style={isMobile ? { paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' } : undefined}
         >
           <NewProjectForm
