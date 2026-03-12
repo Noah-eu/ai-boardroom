@@ -40,6 +40,14 @@ type IngestPayload = {
   }>;
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
+  zipPdfFiles?: Array<{
+    path: string;
+    status: 'ingested' | 'failed' | 'text_unavailable';
+    pageCount?: number;
+    extractedText?: string;
+    excerpt?: string;
+    error?: string;
+  }>;
   error?: string;
   crawlEvents?: string[];
 };
@@ -447,6 +455,10 @@ function isKeyTextFile(path: string): boolean {
   ].some((ext) => lower.endsWith(ext));
 }
 
+function isPdfZipEntry(path: string): boolean {
+  return path.toLowerCase().endsWith('.pdf');
+}
+
 async function ingestZip(downloadUrl: string): Promise<IngestPayload> {
   const response = await fetch(downloadUrl);
   if (!response.ok) {
@@ -455,31 +467,74 @@ async function ingestZip(downloadUrl: string): Promise<IngestPayload> {
 
   const arrayBuffer = await response.arrayBuffer();
   const zip = await JSZip.loadAsync(arrayBuffer);
-  const entries = Object.values(zip.files).sort((a, b) => a.name.localeCompare(b.name));
+  const entries = Object.values(zip.files);
   const fileTree = entries.map((entry) => entry.name);
 
   const keyFiles: Array<{ path: string; content: string }> = [];
+  const zipPdfFiles: NonNullable<IngestPayload['zipPdfFiles']> = [];
+
   for (const entry of entries) {
     if (entry.dir) continue;
-    if (!isKeyTextFile(entry.name)) continue;
-    if (keyFiles.length >= 8) break;
 
-    try {
-      const content = await entry.async('text');
-      keyFiles.push({
-        path: entry.name,
-        content: trimText(content, 4000),
-      });
-    } catch {
-      // Ignore binary-like or unreadable entries.
+    if (isPdfZipEntry(entry.name)) {
+      try {
+        const pdfBuffer = await entry.async('nodebuffer');
+        const parsed = await extractPdfText(pdfBuffer);
+        const cleanText = trimText(parsed.text, 24_000);
+
+        if (!cleanText || cleanText.length < 10) {
+          zipPdfFiles.push({
+            path: entry.name,
+            status: 'text_unavailable',
+            pageCount: parsed.pageCount,
+            error: 'No readable text extracted from PDF content.',
+          });
+        } else {
+          zipPdfFiles.push({
+            path: entry.name,
+            status: 'ingested',
+            pageCount: parsed.pageCount,
+            extractedText: cleanText,
+            excerpt: excerpt(cleanText),
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown PDF extraction error';
+        zipPdfFiles.push({
+          path: entry.name,
+          status: 'failed',
+          error: message,
+        });
+      }
+      continue;
+    }
+
+    if (isKeyTextFile(entry.name) && keyFiles.length < 8) {
+      try {
+        const content = await entry.async('text');
+        keyFiles.push({
+          path: entry.name,
+          content: trimText(content, 4000),
+        });
+      } catch {
+        // Ignore binary-like or unreadable entries.
+      }
     }
   }
 
+  const zipPdfSuccessCount = zipPdfFiles.filter((file) => file.status === 'ingested').length;
+  const zipPdfFailedCount = zipPdfFiles.length - zipPdfSuccessCount;
+  const zipSummary =
+    zipPdfFiles.length > 0
+      ? `ZIP unpacked and indexed. PDF files: ${zipPdfFiles.length}, extracted: ${zipPdfSuccessCount}, unavailable/failed: ${zipPdfFailedCount}.`
+      : 'ZIP unpacked and indexed.';
+
   return {
     status: 'indexed',
-    summary: 'ZIP unpacked and indexed.',
+    summary: zipSummary,
     zipFileTree: fileTree,
     zipKeyFiles: keyFiles,
+    zipPdfFiles,
     excerpt: excerpt(fileTree.slice(0, 12).join(' | '), 320),
   };
 }

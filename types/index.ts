@@ -246,6 +246,14 @@ export interface AttachmentIngestion {
   }>;
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
+  zipPdfFiles?: Array<{
+    path: string;
+    status: 'ingested' | 'failed' | 'text_unavailable';
+    pageCount?: number;
+    extractedText?: string;
+    excerpt?: string;
+    error?: string;
+  }>;
   error?: string;
   includedInContext?: boolean;
   linkedToAi?: boolean;
@@ -379,6 +387,13 @@ export interface ExecutionSnapshot {
     source: 'project' | 'message';
     fileTree: string[];
     keyFiles: Array<{ path: string; content: string }>;
+    pdfFiles: Array<{
+      path: string;
+      status: 'ingested' | 'failed' | 'text_unavailable';
+      pageCount?: number;
+      extractedText?: string;
+      error?: string;
+    }>;
   }>;
   siteSnapshots: Array<{
     attachmentId: string;

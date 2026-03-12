@@ -518,9 +518,17 @@ function buildSnapshotAttachmentContext(
     title: entry.title,
     kind: 'zip' as const,
     source: entry.source,
-    text: `File tree:\n${entry.fileTree.join('\n')}\n\nKey files:\n${entry.keyFiles
-      .map((file) => `${file.path}\n${file.content}`)
-      .join('\n\n')}`,
+    text: [
+      `File tree:\n${entry.fileTree.join('\n')}`,
+      `Key files:\n${entry.keyFiles.map((file) => `${file.path}\n${file.content}`).join('\n\n')}`,
+      entry.pdfFiles?.length
+        ? `PDF extraction:\n${entry.pdfFiles
+            .map((file) => `- ${file.path}: ${file.status}${file.error ? ` (${file.error})` : ''}`)
+            .join('\n')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
   }));
 
   const siteSections = snapshot.siteSnapshots.map((entry) => ({
@@ -3036,6 +3044,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 .map((file) => `${file.path}\n${file.content}`)
                 .join('\n\n')}`
             : '',
+          ingestion.zipPdfFiles?.length
+            ? `PDF extraction:\n${ingestion.zipPdfFiles
+                .map((file) => `- ${file.path}: ${file.status}${file.error ? ` (${file.error})` : ''}`)
+                .join('\n')}`
+            : '',
         ]
           .filter(Boolean)
           .join('\n\n');
@@ -3083,6 +3096,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const siteSnapshots: ExecutionSnapshot['siteSnapshots'] = [];
     const missingInputNotes: string[] = [];
 
+    const buildZipInnerPdfAttachmentId = (zipAttachmentId: string, innerPath: string): string => {
+      return `${zipAttachmentId}::${innerPath.toLowerCase()}`;
+    };
+
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
@@ -3117,6 +3134,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       if (attachment.kind === 'zip') {
         if (ingestion?.zipFileTree?.length) {
+          const zipPdfFiles = (ingestion.zipPdfFiles ?? []).map((file) => ({
+            path: file.path,
+            status: file.status,
+            pageCount: file.pageCount,
+            extractedText: file.extractedText ? shorten(file.extractedText, 24_000) : undefined,
+            error: file.error,
+          }));
+
+          zipPdfFiles.forEach((innerPdf) => {
+            if (innerPdf.status === 'ingested' && innerPdf.extractedText?.trim()) {
+              pdfTexts.push({
+                attachmentId: buildZipInnerPdfAttachmentId(attachment.id, innerPdf.path),
+                title: `${attachment.title} :: ${innerPdf.path}`,
+                source,
+                text: innerPdf.extractedText,
+              });
+            } else {
+              missingInputNotes.push(
+                `ZIP PDF text unavailable: ${attachment.title} -> ${innerPdf.path}` +
+                  (innerPdf.error ? ` (${innerPdf.error})` : '')
+              );
+            }
+          });
+
           zipSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -3126,6 +3167,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               path: file.path,
               content: shorten(file.content, 3_500),
             })),
+            pdfFiles: zipPdfFiles,
           });
         } else {
           missingInputNotes.push(`ZIP tree missing or unreadable: ${attachment.title}`);
@@ -4087,6 +4129,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           keyFiles: entry.keyFiles.slice(0, 8).map((file) => ({
             path: file.path,
             excerpt: shorten(file.content, 800),
+          })),
+          pdfFiles: (entry.pdfFiles ?? []).slice(0, 20).map((file) => ({
+            path: file.path,
+            status: file.status,
+            error: file.error,
+            excerpt: shorten(file.extractedText, 800),
           })),
         })),
         siteSummary: snapshot.siteSnapshots.map((entry) => ({
