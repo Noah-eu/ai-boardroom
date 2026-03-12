@@ -90,6 +90,16 @@ export type InvoiceAmountType = 'overpayment' | 'underpayment' | 'unknown';
 
 export interface InvoiceSummaryRow {
   sourceFileName: string | null;
+  invoiceNumber: string | null;
+  accommodationId: string | null;
+  currency: string | null;
+  amountInInvoiceCurrency: number | null;
+  amountCzk: number | null;
+  commission: number | null;
+  paymentServiceFee: number | null;
+  roomSales: number | null;
+  supplierVatId: string | null;
+  customerVatId: string | null;
   variableSymbol: string | null;
   amount: number | null;
   amountType: InvoiceAmountType;
