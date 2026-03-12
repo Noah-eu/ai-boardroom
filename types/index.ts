@@ -1,6 +1,49 @@
 export type AppLanguage = 'en' | 'cz';
 export type OutputType = 'app' | 'website' | 'document' | 'plan' | 'other';
 export type DebateMode = 'auto' | 'interactive';
+export const ALLOWED_OPENAI_MODELS = ['gpt-4.1-mini', 'gpt-5.4'] as const;
+export type OpenAIModel = typeof ALLOWED_OPENAI_MODELS[number];
+export type AIProvider = 'openai';
+export type OpenAITextVerbosity = 'low' | 'medium' | 'high';
+
+export function isAllowedOpenAiModel(value: string): value is OpenAIModel {
+  return (ALLOWED_OPENAI_MODELS as readonly string[]).includes(value);
+}
+
+export function resolveOpenAiModel(
+  value?: string | null,
+  fallback: OpenAIModel = 'gpt-4.1-mini'
+): OpenAIModel {
+  if (typeof value === 'string' && isAllowedOpenAiModel(value)) {
+    return value;
+  }
+  return fallback;
+}
+
+export function resolveReasoningConfig(
+  model?: string | null
+): { effort: 'low' } | undefined {
+  if (model !== 'gpt-5.4') {
+    return undefined;
+  }
+
+  return { effort: 'low' };
+}
+
+export function resolveTextVerbosity(
+  model?: string | null,
+  preferred: OpenAITextVerbosity = 'low'
+): OpenAITextVerbosity | undefined {
+  if (model === 'gpt-4.1-mini') {
+    return 'medium';
+  }
+
+  if (model === 'gpt-5.4') {
+    return preferred;
+  }
+
+  return undefined;
+}
 
 // Agent types
 export type AgentName =
@@ -30,19 +73,69 @@ export interface Agent {
 // Task types
 export type ArtifactKind = 'doc' | 'json' | 'report' | 'zip' | 'image';
 
+export interface ExecutionOutputFile {
+  path: string;
+  content: string;
+}
+
+export interface ExecutionOutputBundle {
+  status: 'success' | 'failed';
+  summary: string;
+  files: ExecutionOutputFile[];
+  notes: string[];
+  removePaths?: string[];
+}
+
+export type RevisionExecutionStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'completed_with_fallback'
+  | 'failed';
+
+export interface ProjectRevisionCycle {
+  cycleNumber: number;
+  userPrompt: string;
+  requestedAt: Date;
+  debateSummary?: string;
+  approved: boolean;
+  approvedAt?: Date;
+  executionSnapshotId?: string;
+  executionStatus: RevisionExecutionStatus;
+  baselineUpdated: boolean;
+  completedAt?: Date;
+  finalSummary?: string;
+  generatedFilesCount?: number;
+}
+
 export interface TaskArtifact {
   path: string;
   label: string;
   kind: ArtifactKind;
+  content?: string;
+  rawContent?: string;
+  executionOutput?: ExecutionOutputBundle | null;
+  producedBy?: AgentName;
+  generatedAt?: Date;
 }
 
-export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'blocked';
+export type TaskStatus =
+  | 'queued'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'blocked'
+  | 'blocked_due_to_failed_dependency'
+  | 'canceled_due_to_failed_dependency'
+  | 'completed_with_fallback';
 
 export interface Task {
   id: string;
   title: string;
   description: string;
   agent: AgentName;
+  provider: AIProvider;
+  model: OpenAIModel;
   status: TaskStatus;
   dependsOn: string[];
   producesArtifacts: TaskArtifact[];
@@ -91,6 +184,19 @@ export interface AttachmentIngestion {
   excerpt?: string;
   pageTitle?: string;
   sourceUrl?: string;
+  urlPageCount?: number;
+  urlCrawlDepth?: number;
+  urlCrawlMaxPages?: number;
+  urlPages?: Array<{
+    url: string;
+    title: string;
+    metaDescription?: string;
+    excerpt: string;
+    summary: string;
+    extractedText: string;
+    depth: number;
+    rendered?: boolean;
+  }>;
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
   error?: string;
@@ -171,12 +277,16 @@ export interface Project {
   name: string;
   description: string;
   language: AppLanguage;
+  provider: AIProvider;
+  model: OpenAIModel;
   simulationMode: boolean;
   debateRounds: number;
   debateMode: DebateMode;
   maxWordsPerAgent: number;
   latestRevisionFeedback: string | null;
   revisionRound: number;
+  currentCycleNumber: number;
+  revisionHistory: ProjectRevisionCycle[];
   outputType: OutputType;
   status: ProjectStatus;
   createdAt: Date;
@@ -185,7 +295,54 @@ export interface Project {
   tasks: Task[];
   messages: Message[];
   attachments: ProjectAttachment[];
+  executionSnapshot?: ExecutionSnapshot | null;
+  latestStableBundle: ExecutionOutputBundle | null;
+  latestStableFiles: ExecutionOutputFile[];
+  latestStableUpdatedAt: Date | null;
   usage: ProjectUsage;
+}
+
+export interface ExecutionSnapshot {
+  id: string;
+  createdAt: Date;
+  cycleNumber: number;
+  revisionPrompt: string | null;
+  projectPrompt: string;
+  approvedDebateSummary: string;
+  latestStableSummary: string | null;
+  latestStableFiles: ExecutionOutputFile[];
+  projectAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
+  messageAttachments: Array<{ id: string; title: string; kind: ProjectAttachmentKind; status: string }>;
+  imageInputs: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    url: string;
+    description?: string;
+  }>;
+  pdfTexts: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    text: string;
+  }>;
+  zipSnapshots: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    fileTree: string[];
+    keyFiles: Array<{ path: string; content: string }>;
+  }>;
+  siteSnapshots: Array<{
+    attachmentId: string;
+    title: string;
+    source: 'project' | 'message';
+    pageTitle?: string;
+    summary?: string;
+    extractedText?: string;
+    pages?: Array<{ url: string; title: string; summary?: string; excerpt?: string }>;
+  }>;
+  missingInputNotes: string[];
 }
 
 // Orchestrator types
