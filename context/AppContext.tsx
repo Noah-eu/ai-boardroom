@@ -82,7 +82,7 @@ const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
 const MAX_AI_ATTACHMENT_SECTIONS = 6;
 const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
-const BUILDER_MAX_PDF_FILES_PER_CHUNK = 5;
+const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
 const REAL_PLANNER_BUILD_MARKER =
@@ -366,7 +366,7 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 function shouldChunkBuilderPdfExtraction(task: Task, artifactPath: string, snapshot: ExecutionSnapshot, project: Project): boolean {
   if (task.agent !== 'Builder') return false;
   if (artifactPath !== 'generated-files.json') return false;
-  if (snapshot.pdfTexts.length <= BUILDER_MAX_PDF_FILES_PER_CHUNK) return false;
+  if (snapshot.pdfTexts.length <= resolveBuilderPdfChunkSize(project, snapshot)) return false;
 
   const intent = [project.outputType, project.description, project.latestRevisionFeedback ?? '', task.title, task.description]
     .join(' ')
@@ -385,6 +385,74 @@ function shouldChunkBuilderPdfExtraction(task: Task, artifactPath: string, snaps
   ];
 
   return project.outputType === 'document' || extractionSignals.some((pattern) => pattern.test(intent));
+}
+
+function resolveBuilderPdfChunkSize(project: Project, snapshot: ExecutionSnapshot): number {
+  const intent = [project.outputType, project.description, project.latestRevisionFeedback ?? '']
+    .join(' ')
+    .toLowerCase();
+  const extractionHeavy =
+    project.outputType === 'document' ||
+    /\binvoice\b|\binvoices\b|\bextract\b|\bcsv\b|\bfaktur\b/.test(intent);
+  if (!extractionHeavy) {
+    return BUILDER_MAX_PDF_FILES_PER_CHUNK;
+  }
+  return snapshot.pdfTexts.length >= 12 ? 2 : 3;
+}
+
+function shouldRunBuilderChunkEnrichment(project: Project, task: Task): boolean {
+  const intent = [project.description, project.latestRevisionFeedback ?? '', task.title, task.description]
+    .join(' ')
+    .toLowerCase();
+  return /\bsupplier\b|\baddress\b|\bwarning\b|\bconfidence\b|\bmetadata\b|\bdodavatel\b|\badresa\b/.test(intent);
+}
+
+function buildExtractionRowMergeKey(row: BuilderExtractionRow): string {
+  const invoiceNumber =
+    toStringValue(row.values.invoiceNumber) ??
+    toStringValue(row.values.documentNumber) ??
+    '';
+  const issueDate = toStringValue(row.values.issueDate) ?? '';
+  const variableSymbol = toStringValue(row.values.variableSymbol) ?? '';
+  const currency = toStringValue(row.values.currency) ?? '';
+  const amount =
+    toStringValue(row.values.amountInInvoiceCurrency) ??
+    toStringValue(row.values.amount) ??
+    '';
+  return `${row.sourceAttachmentId}::${invoiceNumber}::${issueDate}::${variableSymbol}::${currency}::${amount}`;
+}
+
+function mergeChunkPassRows(
+  pass1Rows: BuilderExtractionRow[],
+  pass2Rows: BuilderExtractionRow[]
+): BuilderExtractionRow[] {
+  const byKey = new Map<string, BuilderExtractionRow>();
+  const orderedKeys: string[] = [];
+
+  pass1Rows.forEach((row) => {
+    const key = buildExtractionRowMergeKey(row);
+    if (!byKey.has(key)) {
+      orderedKeys.push(key);
+      byKey.set(key, {
+        sourceAttachmentId: row.sourceAttachmentId,
+        sourceTitle: row.sourceTitle,
+        values: { ...row.values },
+      });
+      return;
+    }
+    const existing = byKey.get(key);
+    if (!existing) return;
+    existing.values = { ...existing.values, ...row.values };
+  });
+
+  pass2Rows.forEach((row) => {
+    const key = buildExtractionRowMergeKey(row);
+    const existing = byKey.get(key);
+    if (!existing) return;
+    existing.values = { ...existing.values, ...row.values };
+  });
+
+  return orderedKeys.map((key) => byKey.get(key)).filter((row): row is BuilderExtractionRow => Boolean(row));
 }
 
 function buildSnapshotAttachmentContext(
@@ -676,7 +744,7 @@ function mergeExtractionRows(rows: BuilderExtractionRow[]): BuilderExtractionRow
   return deduped;
 }
 
-function buildBuilderChunkPrompt(
+function buildBuilderChunkPass1Prompt(
   project: Project,
   snapshot: ExecutionSnapshot,
   chunkIndex: number,
@@ -686,21 +754,62 @@ function buildBuilderChunkPrompt(
   return [
     project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
     'You are Builder.',
-    `Extract structured invoice/document rows only from PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
+    `Pass 1/2: Extract required invoice fields only from PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
     'Return JSON only. No markdown fences or prose.',
     'Contract:',
-    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","variableSymbol":"...","amount":0,"amountType":"overpayment|underpayment|unknown","normalizedSign":-1|0|1,"billingPeriod":"...","issueDate":"...","dueDate":"...","supplierName":"...","supplyPoint":"...","note":"...","extractionWarning":"...","confidence":0.0}]}]}',
+    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"sourceFileName":"...","invoiceNumber":"...","issueDate":"...","billingPeriod":"...","dueDate":"...","accommodationId":"...","currency":"...","amountInInvoiceCurrency":0,"amountCzk":0,"commission":0,"paymentServiceFee":0,"roomSales":0,"variableSymbol":"..."}]}]}',
     'Rules:',
     '- Use only sourceAttachmentId/sourceTitle listed below.',
     '- Keep source mapping exact per row.',
     '- If a document has no rows, return an empty rows array for it.',
     '- Do not include data from files outside this chunk.',
+    '- Pass 1 required fields only; no summaries, no analysis, no prose.',
     '- Keep missing fields null/empty; never fabricate values.',
-    '- For amountType use only: overpayment, underpayment, unknown.',
-    '- normalizedSign should be -1 for underpayment/debit, 1 for overpayment/credit, 0 when neutral/unknown.',
-    `Project prompt:\n${shorten(snapshot.projectPrompt, 1200)}`,
-    `Approved debate summary:\n${shorten(snapshot.approvedDebateSummary, 1400)}`,
+    `Project prompt:\n${shorten(snapshot.projectPrompt, 600)}`,
     `Chunk files:\n${pdfChunk.map((entry) => `- ${entry.attachmentId} | ${entry.title}`).join('\n')}`,
+  ].join('\n\n');
+}
+
+function buildBuilderChunkPass2Prompt(
+  project: Project,
+  snapshot: ExecutionSnapshot,
+  chunkIndex: number,
+  chunkCount: number,
+  pdfChunk: PdfSnapshotInput[],
+  pass1Rows: BuilderExtractionRow[]
+): string {
+  return [
+    project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+    'You are Builder.',
+    `Pass 2/2: Optional enrichment only for PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
+    'Return JSON only. No markdown fences or prose.',
+    'Contract:',
+    '{"documents":[{"sourceAttachmentId":"...","sourceTitle":"...","rows":[{"invoiceNumber":"...","issueDate":"...","variableSymbol":"...","currency":"...","amountInInvoiceCurrency":0,"supplierName":"...","supplyPoint":"...","note":"...","extractionWarning":"...","confidence":0.0}]}]}',
+    'Rules:',
+    '- Use only sourceAttachmentId/sourceTitle listed below.',
+    '- Keep source mapping exact per row.',
+    '- Enrich only optional fields (supplierName, supplyPoint/address, note, extractionWarning, confidence).',
+    '- Keep pass-1 identifier fields in each row so rows can be merged.',
+    '- If optional fields are not found, keep them null/empty.',
+    '- Do not add summaries or analytics.',
+    `Project prompt:\n${shorten(snapshot.projectPrompt, 450)}`,
+    `Chunk files:\n${pdfChunk.map((entry) => `- ${entry.attachmentId} | ${entry.title}`).join('\n')}`,
+    'Pass-1 extracted rows for this chunk (canonical base):',
+    JSON.stringify(
+      pass1Rows.map((row) => ({
+        sourceAttachmentId: row.sourceAttachmentId,
+        sourceTitle: row.sourceTitle,
+        values: {
+          invoiceNumber: row.values.invoiceNumber ?? null,
+          issueDate: row.values.issueDate ?? null,
+          variableSymbol: row.values.variableSymbol ?? null,
+          currency: row.values.currency ?? null,
+          amountInInvoiceCurrency: row.values.amountInInvoiceCurrency ?? row.values.amount ?? null,
+        },
+      })),
+      null,
+      2
+    ),
   ].join('\n\n');
 }
 
@@ -4332,9 +4441,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           let response: AiRespondResult;
           if (shouldChunkPdfExtraction) {
-            const pdfChunks = chunkArray(snapshot.pdfTexts, BUILDER_MAX_PDF_FILES_PER_CHUNK);
+            const maxFilesPerChunk = resolveBuilderPdfChunkSize(project, snapshot);
+            const pdfChunks = chunkArray(snapshot.pdfTexts, maxFilesPerChunk);
             const extractedRowsAcrossChunks: BuilderExtractionRow[] = [];
-            const completedChunkSummaries: Array<{ chunk: number; files: string[]; rows: number }> = [];
+            const completedChunkSummaries: Array<{
+              pass: 'pass1' | 'pass2';
+              chunk: number;
+              files: string[];
+              rows: number;
+            }> = [];
+            const enrichmentEnabled = shouldRunBuilderChunkEnrichment(project, task);
 
             dispatch({
               type: 'ADD_LOG',
@@ -4342,12 +4458,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               agent: task.agent,
               message:
                 `${task.agent}: chunking ${snapshot.pdfTexts.length} PDF(s) into ${pdfChunks.length} chunk(s)` +
-                ` (max ${BUILDER_MAX_PDF_FILES_PER_CHUNK} files/chunk).`,
+                ` (max ${maxFilesPerChunk} files/chunk).`,
             });
 
-            const persistPartialChunkDebug = (chunkNumber: number, chunkFiles: string[], reason: string) => {
+            const persistPartialChunkDebug = (
+              pass: 'pass1' | 'pass2',
+              chunkNumber: number,
+              chunkFiles: string[],
+              reason: string
+            ) => {
               const debugPayload = {
                 status: 'partial_chunk_failure',
+                failedPass: pass,
                 failedChunk: chunkNumber,
                 failedFiles: chunkFiles,
                 reason,
@@ -4381,31 +4503,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 level: 'info',
                 agent: task.agent,
                 message:
-                  `${task.agent}: processing chunk ${chunkIndex + 1}/${pdfChunks.length} ` +
+                  `${task.agent}: pass1 processing chunk ${chunkIndex + 1}/${pdfChunks.length} ` +
                   `with ${pdfChunk.length} file(s): ${chunkFiles.join(', ')}`,
               });
 
-              const chunkPrompt = buildBuilderChunkPrompt(project, snapshot, chunkIndex, pdfChunks.length, pdfChunk);
+              const pass1ChunkPrompt = buildBuilderChunkPass1Prompt(
+                project,
+                snapshot,
+                chunkIndex,
+                pdfChunks.length,
+                pdfChunk
+              );
               const chunkAttachmentContext = buildSnapshotAttachmentContext(
                 snapshot,
                 new Set(pdfChunk.map((entry) => entry.attachmentId))
               );
 
-              let chunkResponse: AiRespondResult;
+              let pass1ChunkResponse: AiRespondResult;
               try {
-                chunkResponse = await callAiRespond(
+                pass1ChunkResponse = await callAiRespond(
                   {
                     projectId,
                     language: project.language,
                     agentRole: task.agent,
                     model: task.model,
                     responseMode: 'default',
-                    inputText: chunkPrompt,
+                    inputText: pass1ChunkPrompt,
                     context: {
                       artifactPath: artifact.path,
                       snapshotId: snapshot.id,
                       cycleNumber: snapshot.cycleNumber,
                       extractionChunk: {
+                        pass: 'pass1',
                         chunkNumber: chunkIndex + 1,
                         chunkCount: pdfChunks.length,
                         files: pdfChunk.map((entry) => ({
@@ -4423,10 +4552,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 const detail = formatAiExecutionError(error);
                 const infra = error instanceof AiRequestError ? error : null;
                 const chunkLabel = `chunk ${chunkIndex + 1}/${pdfChunks.length}`;
-                persistPartialChunkDebug(chunkIndex + 1, chunkFiles, detail.message);
+                persistPartialChunkDebug('pass1', chunkIndex + 1, chunkFiles, detail.message);
                 failLiveTask(
                   task.agent,
-                  `${task.agent}: OpenAI call failed for ${artifact.path} (${chunkLabel}) files=[${chunkFiles.join(', ')}]: ${detail.message}`,
+                  `${task.agent}: pass1 OpenAI call failed for ${artifact.path} (${chunkLabel}) files=[${chunkFiles.join(', ')}]: ${detail.message}`,
                   {
                     artifactPath: artifact.path,
                     rawBodySnippet: infra?.rawBodySnippet ?? null,
@@ -4435,32 +4564,120 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 return;
               }
 
+              let pass1RowsForChunk: BuilderExtractionRow[] = [];
               try {
-                const chunkRows = parseBuilderChunkRows(chunkResponse.text, pdfChunk);
-                extractedRowsAcrossChunks.push(...chunkRows);
+                pass1RowsForChunk = parseBuilderChunkRows(pass1ChunkResponse.text, pdfChunk);
                 completedChunkSummaries.push({
+                  pass: 'pass1',
                   chunk: chunkIndex + 1,
                   files: chunkFiles,
-                  rows: chunkRows.length,
-                });
-                dispatch({
-                  type: 'ADD_LOG',
-                  level: 'success',
-                  agent: task.agent,
-                  message:
-                    `${task.agent}: chunk ${chunkIndex + 1}/${pdfChunks.length} extracted ` +
-                    `${chunkRows.length} row(s).`,
+                  rows: pass1RowsForChunk.length,
                 });
               } catch (error) {
                 const parseDetail = error instanceof Error ? error.message : 'Unknown chunk parse failure';
-                persistPartialChunkDebug(chunkIndex + 1, chunkFiles, parseDetail);
+                persistPartialChunkDebug('pass1', chunkIndex + 1, chunkFiles, parseDetail);
                 failLiveTask(
                   task.agent,
-                  `${task.agent}: chunk parse failed for ${artifact.path} (chunk ${chunkIndex + 1}/${pdfChunks.length}) ` +
+                  `${task.agent}: pass1 chunk parse failed for ${artifact.path} (chunk ${chunkIndex + 1}/${pdfChunks.length}) ` +
                     `files=[${chunkFiles.join(', ')}]: ${parseDetail}`
                 );
                 return;
               }
+
+              let mergedChunkRows = pass1RowsForChunk;
+              if (enrichmentEnabled && pass1RowsForChunk.length > 0) {
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'info',
+                  agent: task.agent,
+                  message:
+                    `${task.agent}: pass2 enrichment chunk ${chunkIndex + 1}/${pdfChunks.length} ` +
+                    `files=[${chunkFiles.join(', ')}]`,
+                });
+
+                const pass2ChunkPrompt = buildBuilderChunkPass2Prompt(
+                  project,
+                  snapshot,
+                  chunkIndex,
+                  pdfChunks.length,
+                  pdfChunk,
+                  pass1RowsForChunk
+                );
+
+                let pass2ChunkResponse: AiRespondResult;
+                try {
+                  pass2ChunkResponse = await callAiRespond(
+                    {
+                      projectId,
+                      language: project.language,
+                      agentRole: task.agent,
+                      model: task.model,
+                      responseMode: 'default',
+                      inputText: pass2ChunkPrompt,
+                      context: {
+                        artifactPath: artifact.path,
+                        snapshotId: snapshot.id,
+                        cycleNumber: snapshot.cycleNumber,
+                        extractionChunk: {
+                          pass: 'pass2',
+                          chunkNumber: chunkIndex + 1,
+                          chunkCount: pdfChunks.length,
+                          files: pdfChunk.map((entry) => ({
+                            attachmentId: entry.attachmentId,
+                            title: entry.title,
+                          })),
+                        },
+                      },
+                    },
+                    { agent: task.agent },
+                    chunkAttachmentContext,
+                    { timeoutMs: executionTaskTimeoutMs }
+                  );
+                } catch (error) {
+                  const detail = formatAiExecutionError(error);
+                  const infra = error instanceof AiRequestError ? error : null;
+                  persistPartialChunkDebug('pass2', chunkIndex + 1, chunkFiles, detail.message);
+                  failLiveTask(
+                    task.agent,
+                    `${task.agent}: pass2 OpenAI call failed for ${artifact.path} (chunk ${chunkIndex + 1}/${pdfChunks.length}) files=[${chunkFiles.join(', ')}]: ${detail.message}`,
+                    {
+                      artifactPath: artifact.path,
+                      rawBodySnippet: infra?.rawBodySnippet ?? null,
+                    }
+                  );
+                  return;
+                }
+
+                try {
+                  const pass2RowsForChunk = parseBuilderChunkRows(pass2ChunkResponse.text, pdfChunk);
+                  completedChunkSummaries.push({
+                    pass: 'pass2',
+                    chunk: chunkIndex + 1,
+                    files: chunkFiles,
+                    rows: pass2RowsForChunk.length,
+                  });
+                  mergedChunkRows = mergeChunkPassRows(pass1RowsForChunk, pass2RowsForChunk);
+                } catch (error) {
+                  const parseDetail = error instanceof Error ? error.message : 'Unknown chunk parse failure';
+                  persistPartialChunkDebug('pass2', chunkIndex + 1, chunkFiles, parseDetail);
+                  failLiveTask(
+                    task.agent,
+                    `${task.agent}: pass2 chunk parse failed for ${artifact.path} (chunk ${chunkIndex + 1}/${pdfChunks.length}) files=[${chunkFiles.join(', ')}]: ${parseDetail}`
+                  );
+                  return;
+                }
+              }
+
+              extractedRowsAcrossChunks.push(...mergedChunkRows);
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: task.agent,
+                message:
+                  `${task.agent}: chunk ${chunkIndex + 1}/${pdfChunks.length} extracted ` +
+                  `${mergedChunkRows.length} row(s)` +
+                  `${enrichmentEnabled ? ' (pass1 + optional pass2).' : ' (pass1 only).'}`,
+              });
             }
 
             const mergedRows = mergeExtractionRows(extractedRowsAcrossChunks);
@@ -4490,8 +4707,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 {
                   chunking: {
                     chunkCount: pdfChunks.length,
-                    maxFilesPerChunk: BUILDER_MAX_PDF_FILES_PER_CHUNK,
+                    maxFilesPerChunk,
                     completedChunks: completedChunkSummaries,
+                    extractionPasses: enrichmentEnabled
+                      ? ['pass1_required_fields', 'pass2_optional_enrichment']
+                      : ['pass1_required_fields'],
                   },
                   mergedRowsCount: mergedRows.length,
                   summary: mergedRowsSummary,
@@ -4516,9 +4736,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     ...compactContext,
                     chunking: {
                       chunkCount: pdfChunks.length,
-                      maxFilesPerChunk: BUILDER_MAX_PDF_FILES_PER_CHUNK,
+                      maxFilesPerChunk,
                       mergedRowsCount: mergedRows.length,
                       mergedRowsTrimmed: droppedRows,
+                      extractionPasses: enrichmentEnabled
+                        ? ['pass1_required_fields', 'pass2_optional_enrichment']
+                        : ['pass1_required_fields'],
                     },
                   },
                 },
