@@ -1039,6 +1039,11 @@ type TaskPrerequisiteValidationResult =
       details: string;
     };
 
+type DependencyFailureTrace = {
+  rootFailedTask: Task;
+  chain: Task[];
+};
+
 function getRequiredUpstreamArtifacts(task: Task): Array<{ agent: AgentName; path: string; requiresExecutionOutput?: boolean }> {
   if (task.agent === 'Reviewer') {
     return [
@@ -1181,6 +1186,117 @@ function validateTaskPrerequisites(project: Project, task: Task): TaskPrerequisi
   }
 
   return { ok: true };
+}
+
+function isFailureTerminalStatus(status: Task['status']): boolean {
+  return (
+    status === 'failed' ||
+    status === 'canceled_due_to_failed_dependency' ||
+    status === 'blocked_due_to_failed_dependency'
+  );
+}
+
+function findDependencyFailureTrace(
+  project: Project,
+  task: Task,
+  visited = new Set<string>()
+): DependencyFailureTrace | null {
+  if (visited.has(task.id)) {
+    return null;
+  }
+  visited.add(task.id);
+
+  if (task.status === 'failed') {
+    return { rootFailedTask: task, chain: [task] };
+  }
+
+  for (const dependencyId of task.dependsOn) {
+    const dependencyTask = project.tasks.find((candidate) => candidate.id === dependencyId);
+    if (!dependencyTask) {
+      continue;
+    }
+
+    if (dependencyTask.status === 'failed') {
+      return {
+        rootFailedTask: dependencyTask,
+        chain: [task, dependencyTask],
+      };
+    }
+
+    if (
+      dependencyTask.status === 'blocked' ||
+      dependencyTask.status === 'canceled_due_to_failed_dependency' ||
+      dependencyTask.status === 'blocked_due_to_failed_dependency'
+    ) {
+      const nested = findDependencyFailureTrace(project, dependencyTask, visited);
+      if (nested) {
+        return {
+          rootFailedTask: nested.rootFailedTask,
+          chain: [task, ...nested.chain],
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function summarizeFailureType(errorMessage?: string): string | null {
+  if (!errorMessage) return null;
+  const normalized = errorMessage.replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
+}
+
+function formatDependencyFailureMessage(
+  task: Task,
+  dependencyTask: Task | undefined,
+  trace: DependencyFailureTrace | null,
+  artifactPath?: string,
+  action: 'blocked' | 'canceled' = 'canceled'
+): string {
+  const immediateTask = dependencyTask ?? trace?.chain[1] ?? trace?.rootFailedTask;
+  const rootTask = trace?.rootFailedTask ?? dependencyTask;
+  const failureType = summarizeFailureType(rootTask?.errorMessage);
+  const artifactInfo = artifactPath ? ` on ${artifactPath}` : '';
+  const failureInfo = failureType ? ` (${failureType})` : '';
+
+  if (immediateTask && rootTask && immediateTask.id !== rootTask.id) {
+    return `${task.title} ${action} because ${immediateTask.title} was blocked after ${rootTask.title} failed${artifactInfo}${failureInfo}.`;
+  }
+
+  if (rootTask) {
+    return `${task.title} ${action} because ${rootTask.title} failed${artifactInfo}${failureInfo}.`;
+  }
+
+  if (immediateTask) {
+    return `${task.title} ${action} because dependency ${immediateTask.title} failed${artifactInfo}.`;
+  }
+
+  return `${task.title} ${action} due to failed upstream dependency${artifactInfo}.`;
+}
+
+function buildWorkflowFailurePropagationSummary(tasks: Task[]): string | null {
+  const rootFailedTask = tasks.find((task) => task.status === 'failed');
+  const blockedDueToFailure = tasks.filter(
+    (task) => task.status === 'blocked_due_to_failed_dependency'
+  ).length;
+  const canceledDueToFailure = tasks.filter(
+    (task) => task.status === 'canceled_due_to_failed_dependency'
+  ).length;
+  const downstreamImpacted = blockedDueToFailure + canceledDueToFailure;
+
+  if (!rootFailedTask || downstreamImpacted === 0) {
+    return null;
+  }
+
+  const failureType = summarizeFailureType(rootFailedTask.errorMessage);
+  const failureDetails = failureType ? ` (${failureType})` : '';
+  return (
+    `Workflow ended due to upstream failure propagation: root cause ${rootFailedTask.title} failed` +
+    `${failureDetails}. Downstream impacted: ${downstreamImpacted} task(s)` +
+    ` (${blockedDueToFailure} blocked, ${canceledDueToFailure} canceled).`
+  );
 }
 
 function getLatestOrchestratorSummary(project: Project): string | null {
@@ -4153,7 +4269,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           const cycleNumber = refreshedProject.revisionRound + 1;
           const status = deriveRevisionExecutionStatus(refreshedProject.tasks);
-          const finalSummary = findIntegratorFinalSummary(refreshedProject.tasks) ?? undefined;
+          let finalSummary = findIntegratorFinalSummary(refreshedProject.tasks) ?? undefined;
 
           let baselineUpdated = false;
           let generatedFilesCount: number | undefined;
@@ -4181,6 +4297,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 level: 'success',
                 message: `Stable baseline updated for cycle ${cycleNumber} (${mergedFiles.length} files).`,
               });
+            }
+          }
+
+          if (status === 'failed') {
+            const propagationSummary = buildWorkflowFailurePropagationSummary(refreshedProject.tasks);
+            if (propagationSummary) {
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'warning',
+                message: propagationSummary,
+              });
+              if (!finalSummary) {
+                finalSummary = propagationSummary;
+              }
             }
           }
 
@@ -4220,22 +4350,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         const prerequisite = validateTaskPrerequisites(refreshedProject, task);
         if (!prerequisite.ok && prerequisite.reason === 'dependency-failed') {
-          const upstreamTask = prerequisite.dependencyTask?.title ?? 'unknown dependency';
-          const upstreamArtifact = prerequisite.artifactPath ? ` (${prerequisite.artifactPath})` : '';
+          const nextStatus: Task['status'] =
+            task.status === 'blocked'
+              ? 'blocked_due_to_failed_dependency'
+              : 'canceled_due_to_failed_dependency';
+          const trace = prerequisite.dependencyTask
+            ? findDependencyFailureTrace(refreshedProject, prerequisite.dependencyTask)
+            : findDependencyFailureTrace(refreshedProject, task);
+          const reason = formatDependencyFailureMessage(
+            task,
+            prerequisite.dependencyTask,
+            trace,
+            prerequisite.artifactPath,
+            nextStatus === 'blocked_due_to_failed_dependency' ? 'blocked' : 'canceled'
+          );
           dispatch({
             type: 'UPDATE_TASK',
             projectId,
             taskId: task.id,
             patch: {
-              status: 'canceled_due_to_failed_dependency',
-              errorMessage: `Canceled: failed dependency ${upstreamTask}${upstreamArtifact}`,
+              status: nextStatus,
+              errorMessage: reason,
             },
           });
           dispatch({
             type: 'ADD_LOG',
             level: 'warning',
             agent: task.agent,
-            message: `${task.agent} blocked because required upstream artifact failed: ${upstreamTask}${upstreamArtifact}`,
+            message: reason,
           });
         }
       }
@@ -4250,21 +4392,73 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const validatedBlockedTasks = postValidationProject.tasks.filter((task) => task.status === 'blocked');
 
       if (!schedulerPausedRef.current[projectId] && validatedRunningTasks.length === 0 && validatedReadyTasks.length === 0 && validatedBlockedTasks.length > 0) {
+        let propagatedBlockedTasks = 0;
+        for (const blockedTask of validatedBlockedTasks) {
+          const trace = findDependencyFailureTrace(postValidationProject, blockedTask);
+          if (!trace) {
+            continue;
+          }
+
+          const prerequisite = validateTaskPrerequisites(postValidationProject, blockedTask);
+          const reason = formatDependencyFailureMessage(
+            blockedTask,
+            prerequisite.ok ? undefined : prerequisite.dependencyTask,
+            trace,
+            prerequisite.ok ? undefined : prerequisite.artifactPath,
+            'blocked'
+          );
+          dispatch({
+            type: 'UPDATE_TASK',
+            projectId,
+            taskId: blockedTask.id,
+            patch: {
+              status: 'blocked_due_to_failed_dependency',
+              errorMessage: reason,
+            },
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            agent: blockedTask.agent,
+            message: reason,
+          });
+          propagatedBlockedTasks += 1;
+        }
+
+        if (propagatedBlockedTasks > 0) {
+          return 0;
+        }
+
         const blockedDetails: DeadlockTaskDetail[] = validatedBlockedTasks.map((task) => {
-          const unmetDependencies = task.dependsOn
+          const missingDependencies = task.dependsOn.filter(
+            (dependencyId) => !postValidationProject.tasks.some((candidate) => candidate.id === dependencyId)
+          );
+
+          const unresolvedDependencies = task.dependsOn
             .map((dependencyId) => postValidationProject.tasks.find((candidate) => candidate.id === dependencyId))
             .filter(
               (dependency): dependency is Task =>
                 Boolean(
                   dependency &&
                     dependency.status !== 'done' &&
-                    dependency.status !== 'failed' &&
                     dependency.status !== 'completed_with_fallback' &&
-                    dependency.status !== 'canceled_due_to_failed_dependency' &&
-                    dependency.status !== 'blocked_due_to_failed_dependency'
+                    !isFailureTerminalStatus(dependency.status)
                 )
             )
             .map((dependency) => `${dependency.title} [${dependency.status}]`);
+
+          const prerequisite = validateTaskPrerequisites(postValidationProject, task);
+          const unmetDependencies = [
+            ...missingDependencies.map((dependencyId) => `missing dependency id ${dependencyId}`),
+            ...unresolvedDependencies,
+          ];
+
+          if (!prerequisite.ok && prerequisite.reason !== 'dependency-failed') {
+            const referenceTask = prerequisite.dependencyTask?.title ?? 'graph reference';
+            const artifact = prerequisite.artifactPath ? ` (${prerequisite.artifactPath})` : '';
+            unmetDependencies.push(`${prerequisite.reason}: ${referenceTask}${artifact}`);
+          }
+
           return {
             taskId: task.id,
             taskTitle: task.title,
@@ -4273,7 +4467,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const deadlockMessage = blockedDetails
-          .map((detail) => `${detail.taskTitle} <= ${detail.unmetDependencies.join(', ') || 'unknown dependency'}`)
+          .map(
+            (detail) =>
+              `${detail.taskTitle} <= ${detail.unmetDependencies.join(', ') || 'dependency state unresolved'}`
+          )
           .join(' | ');
         const signature = `${projectId}:${deadlockMessage}`;
         if (deadlockSignatureRef.current[projectId] !== signature) {
