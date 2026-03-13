@@ -19,10 +19,10 @@ interface MobileSheetFrameProps {
 
 function MobileSheetFrame({ title, onClose, children }: MobileSheetFrameProps) {
   return (
-    <div className="fixed inset-0 z-50 flex bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-end bg-black/60 backdrop-blur-sm">
       <button type="button" aria-label={title} className="absolute inset-0" onClick={onClose} />
       <div
-        className="relative mt-auto flex max-h-[98dvh] w-full flex-col overflow-hidden rounded-t-[2.25rem] border border-gray-800 bg-gray-950 shadow-2xl"
+        className="relative flex h-[100dvh] max-h-[100dvh] min-h-0 w-full flex-col overflow-hidden rounded-t-[2.25rem] border border-gray-800 bg-gray-950 shadow-2xl"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <div
@@ -39,7 +39,7 @@ function MobileSheetFrame({ title, onClose, children }: MobileSheetFrameProps) {
             ×
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-hidden flex flex-col">{children}</div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
       </div>
     </div>
   );
@@ -63,7 +63,7 @@ export function MobileShell() {
   const phaseLabel = t(`phase.${state.currentPhase}` as const);
 
   return (
-    <div className="flex h-full flex-col bg-gray-950 lg:hidden">
+    <div className="flex h-full min-h-0 flex-col bg-gray-950 lg:hidden">
       <header className="sticky top-0 z-30 border-b border-gray-800 bg-gray-950/95 backdrop-blur">
         <div className="px-6 pb-6" style={{ paddingTop: 'max(1.25rem, env(safe-area-inset-top))' }}>
           <div className="flex items-center gap-4">

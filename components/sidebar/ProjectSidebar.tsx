@@ -177,7 +177,10 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
       onSubmit={handleSubmit}
       className={`${isMobile ? 'mx-5 mb-4 rounded-[1.75rem] p-5' : 'mx-3 my-3 rounded-lg p-3'} flex ${isMobile ? 'flex-1' : 'h-full'} min-h-0 flex-col overflow-hidden border border-gray-700 bg-gray-900`}
     >
-      <div className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden ${isMobile ? 'pb-6' : 'pr-1 pb-4'}`}>
+      <div
+        className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden ${isMobile ? 'touch-pan-y pb-6' : 'pr-1 pb-4'}`}
+        style={isMobile ? { WebkitOverflowScrolling: 'touch' } : undefined}
+      >
         <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
         <input
           type="text"
@@ -518,7 +521,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
   };
 
   return (
-    <div className={`h-full flex flex-col bg-gray-950 ${isMobile ? '' : 'border-r border-gray-800'}`}>
+    <div className={`flex h-full min-h-0 flex-col bg-gray-950 ${isMobile ? '' : 'border-r border-gray-800'}`}>
       {/* Header */}
       {!isMobile && (
       <div className="flex-shrink-0 px-4 py-4 border-b border-gray-800">
@@ -570,7 +573,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
 
       {showForm ? (
         <div
-          className={`min-h-0 flex-1 overflow-hidden flex flex-col ${isMobile ? 'overscroll-contain' : ''}`}
+          className={`flex min-h-0 flex-1 flex-col overflow-hidden ${isMobile ? 'overscroll-contain' : ''}`}
         >
           <NewProjectForm
             onSubmit={handleCreate}
@@ -584,7 +587,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
       ) : (
         <>
           {/* Project list */}
-          <div className="flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-y-auto">
             {state.projects.length === 0 ? (
               <div className="px-6 py-10 text-center">
                 <p className="mb-5 text-base text-gray-400">{t('sidebar.noProjects')}</p>
