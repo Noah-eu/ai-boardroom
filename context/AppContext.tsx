@@ -62,6 +62,13 @@ import {
   resolveDocumentColumnValue,
   type DocumentTableIntent,
 } from '@/lib/documentTableIntent';
+import {
+  buildDeterministicCodeFinalSummary,
+  buildDeterministicCodePackagingNotes,
+  classifyCodeGenerationMode,
+  getModeLabel,
+  stabilizeCodeExecutionBundle,
+} from '@/lib/codeBundleStabilizer';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -1371,6 +1378,12 @@ function taskRequiresHtmlEntry(task: Task, project: Project): boolean {
   return /\b(html|website|web app|webapp|landing page|homepage|page|site)\b/.test(combined);
 }
 
+function isCodeGeneratedFilesStage(project: Project, task: Task, artifactPath: string): boolean {
+  if (task.agent !== 'Builder' || artifactPath !== 'generated-files.json') return false;
+  if (isDocumentGeneratedFilesStage(project, task, artifactPath)) return false;
+  return decideExecutionPipeline(project) === 'code';
+}
+
 function parseExecutionOutputBundle(
   raw: string,
   task: Task,
@@ -1439,6 +1452,18 @@ function parseExecutionOutputBundle(
     return { bundle: null, error: 'Execution output returned failed status.' };
   }
 
+  if (isCodeGeneratedFilesStage(project, task, 'generated-files.json')) {
+    const stabilized = stabilizeCodeExecutionBundle({
+      bundle,
+      projectName: project.name,
+      projectDescription: project.description,
+      latestRevisionFeedback: project.latestRevisionFeedback,
+      outputType: project.outputType,
+      language: project.language,
+    });
+    return { bundle: stabilized.bundle, error: null };
+  }
+
   return { bundle, error: null };
 }
 
@@ -1446,8 +1471,16 @@ function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['p
   return task.agent === 'Builder' && artifact.path === 'generated-files.json';
 }
 
-function artifactCanBeGeneratedLocally(task: Task, artifact: Task['producesArtifacts'][number]): boolean {
-  return task.agent === 'Builder' && artifact.path === 'patch-plan.md';
+function artifactCanBeGeneratedLocally(
+  project: Project,
+  task: Task,
+  artifact: Task['producesArtifacts'][number]
+): boolean {
+  if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (decideExecutionPipeline(project) !== 'code') return false;
+  if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') return true;
+  if (task.agent === 'Integrator' && artifact.path === 'final-summary.md') return true;
+  return false;
 }
 
 function buildPatchPlanFromExecutionBundle(
@@ -4059,6 +4092,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const websiteRequirement = taskRequiresHtmlEntry(task, project)
           ? 'Because this run is building a website/app/page, index.html is required.'
           : 'If you are building a website/page, include index.html.';
+        const codeMode = classifyCodeGenerationMode({
+          name: project.name,
+          description: project.description,
+          latestRevisionFeedback: project.latestRevisionFeedback,
+          outputType: project.outputType,
+        });
 
         return [
           project.language === 'cz' ? 'Write summary and notes in Czech.' : 'Write summary and notes in English.',
@@ -4072,6 +4111,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           'files must be an array of objects with path and content. Return changed/new files only.',
           'removePaths is optional. Use it only for files that should be removed from baseline.',
           'Execution is successful only if at least one file is present.',
+          `Target generation mode: ${getModeLabel(codeMode)}.`,
+          'Bundle contract targets (include unless already present in unchanged baseline): README.md, run-instructions.md, deploy-instructions.md, app-manifest.json.',
+          'README.md should summarize setup and project purpose.',
+          'run-instructions.md should include concrete local run steps.',
+          'deploy-instructions.md should include practical deploy steps.',
+          'app-manifest.json should contain entryPoint and basic bundle metadata.',
           websiteRequirement,
           'Use only local generated files. Do not reference remote scripts, packages, build tools, or deployment steps.',
           `Project prompt:\n${snapshot.projectPrompt}`,
@@ -5076,29 +5121,105 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const artifact = updatedArtifacts[index];
           const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
-          if (artifactCanBeGeneratedLocally(task, artifact)) {
-            const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
-            const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
-            if (!executionBundle) {
-              failLiveTask(task.agent, `${task.agent}: patch-plan generation requires parsed generated-files.json output first.`);
+          if (artifactCanBeGeneratedLocally(project, task, artifact)) {
+            const builderBundle = findBuilderExecutionBundle(project.tasks);
+
+            if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') {
+              const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
+              const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
+              if (!executionBundle) {
+                failLiveTask(task.agent, `${task.agent}: patch-plan generation requires parsed generated-files.json output first.`);
+                return;
+              }
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: generating ${artifact.path} locally from structured bundle`,
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: buildPatchPlanFromExecutionBundle(executionBundle, project),
+                rawContent: '',
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+              continue;
+            }
+
+            if (!builderBundle) {
+              failLiveTask(task.agent, `${task.agent}: local packaging requires Builder generated-files execution bundle.`);
               return;
             }
 
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              agent: task.agent,
-              message: `${task.agent}: generating ${artifact.path} locally from structured bundle`,
+            const mode = classifyCodeGenerationMode({
+              name: project.name,
+              description: project.description,
+              latestRevisionFeedback: project.latestRevisionFeedback,
+              outputType: project.outputType,
+            });
+            const stabilized = stabilizeCodeExecutionBundle({
+              bundle: builderBundle,
+              projectName: project.name,
+              projectDescription: project.description,
+              latestRevisionFeedback: project.latestRevisionFeedback,
+              outputType: project.outputType,
+              language: project.language,
             });
 
-            updatedArtifacts[index] = {
-              ...artifact,
-              content: buildPatchPlanFromExecutionBundle(executionBundle, project),
-              rawContent: '',
-              producedBy: task.agent,
-              generatedAt: new Date(),
-            };
-            continue;
+            if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') {
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: generating deterministic packaging notes from Builder bundle`,
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: buildDeterministicCodePackagingNotes({
+                  bundle: stabilized.bundle,
+                  mode,
+                  entryPoint: stabilized.entryPoint,
+                }),
+                rawContent: '',
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+              continue;
+            }
+
+            if (task.agent === 'Integrator' && artifact.path === 'final-summary.md') {
+              const reviewNotes = getLatestArtifactContent(project.tasks, 'review-notes.md');
+              const packagingNotes = getLatestArtifactContent(project.tasks, 'bundle-export.md');
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: generating deterministic final summary from shared source bundle`,
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: buildDeterministicCodeFinalSummary({
+                  bundle: stabilized.bundle,
+                  mode,
+                  entryPoint: stabilized.entryPoint,
+                  reviewNotes,
+                  packagingNotes,
+                }),
+                rawContent: '',
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+              continue;
+            }
+
+            failLiveTask(task.agent, `${task.agent}: unsupported local artifact generation target ${artifact.path}.`);
+            return;
           }
 
           const isDeterministicDocumentExporterStage = isDocumentGeneratedFilesStage(
@@ -6101,11 +6222,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
       const taskModel = resolveOpenAiModel(project.model);
       const pipeline = decideExecutionPipeline(project);
+      const codeMode = classifyCodeGenerationMode({
+        name: project.name,
+        description: project.description,
+        latestRevisionFeedback: project.latestRevisionFeedback,
+        outputType: project.outputType,
+      });
+      const codeModeLabel = getModeLabel(codeMode);
 
       if (pipeline === 'code') {
         const codePlanner = createTask({
-          title: 'CodePlanner: Execution plan',
-          description: 'Generate prioritized implementation plan for requested app/web/game/code output.',
+          title: `CodePlanner: Execution plan (${codeModeLabel})`,
+          description: `Generate prioritized implementation plan for ${codeModeLabel} output with deterministic packaging contract coverage.`,
           agent: 'Planner',
           provider: 'openai',
           model: taskModel,
@@ -6115,8 +6243,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const appArchitect = createTask({
-          title: 'AppArchitect: Architecture review',
-          description: 'Define file-level architecture and implementation boundaries for generated app/game output.',
+          title: `AppArchitect: Architecture review (${codeModeLabel})`,
+          description: `Define file-level architecture, entry point, and deployability boundaries for ${codeModeLabel}.`,
           agent: 'Architect',
           provider: 'openai',
           model: taskModel,
@@ -6126,8 +6254,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const fileBuilder = createTask({
-          title: 'FileBuilder: Generate runnable files',
-          description: 'Generate runnable static files (index.html + optional style.css/script.js) and patch plan.',
+          title: `FileBuilder: Generate runnable files (${codeModeLabel})`,
+          description:
+            'Generate runnable files and structured bundle output with source files, README, run/deploy instructions, and manifest.',
           agent: 'Builder',
           provider: 'openai',
           model: taskModel,
@@ -6140,8 +6269,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const qaReviewer = createTask({
-          title: 'QA: Quality and risk review',
-          description: 'Review generated files for requirement coverage, quality risks, and functional gaps.',
+          title: `QA: Quality and risk review (${codeModeLabel})`,
+          description: 'Review generated source set for requirement coverage, structural contract completeness, and functional gaps.',
           agent: 'Reviewer',
           provider: 'openai',
           model: taskModel,
@@ -6153,8 +6282,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const bundleExporter = createTask({
-          title: 'BundleExporter: Packaging notes',
-          description: 'Prepare bundle/export packaging notes from generated files and QA feedback.',
+          title: `BundleExporter: Packaging notes (${codeModeLabel})`,
+          description: 'Prepare deterministic packaging notes from generated source set and QA feedback.',
           agent: 'Tester',
           provider: 'openai',
           model: taskModel,
@@ -6166,8 +6295,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         const integrator = createTask({
-          title: 'Integrator: Final combined result',
-          description: 'Assemble final result from generated files, QA notes, and packaging guidance.',
+          title: `Integrator: Final combined result (${codeModeLabel})`,
+          description: 'Assemble deterministic final result summary from shared generated source set and stage notes.',
           agent: 'Integrator',
           provider: 'openai',
           model: taskModel,
