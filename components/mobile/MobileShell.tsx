@@ -22,11 +22,11 @@ function MobileSheetFrame({ title, onClose, children }: MobileSheetFrameProps) {
     <div className="fixed inset-0 z-50 flex bg-black/60 backdrop-blur-sm">
       <button type="button" aria-label={title} className="absolute inset-0" onClick={onClose} />
       <div
-        className="relative mt-auto flex max-h-[98vh] w-full flex-col overflow-hidden rounded-t-[2.25rem] border border-gray-800 bg-gray-950 shadow-2xl"
+        className="relative mt-auto flex max-h-[98dvh] w-full flex-col overflow-hidden rounded-t-[2.25rem] border border-gray-800 bg-gray-950 shadow-2xl"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <div
-          className="flex items-center gap-5 border-b border-gray-800 px-6 pb-5 pt-6"
+          className="flex flex-shrink-0 items-center gap-5 border-b border-gray-800 px-6 pb-5 pt-6"
           style={{ paddingTop: 'max(1rem, env(safe-area-inset-top))' }}
         >
           <div className="h-2.5 w-14 rounded-full bg-gray-700" />
@@ -39,7 +39,7 @@ function MobileSheetFrame({ title, onClose, children }: MobileSheetFrameProps) {
             ×
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+        <div className="min-h-0 flex-1 overflow-hidden flex flex-col">{children}</div>
       </div>
     </div>
   );

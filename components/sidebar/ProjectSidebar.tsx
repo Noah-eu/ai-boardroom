@@ -175,7 +175,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
   return (
     <form
       onSubmit={handleSubmit}
-      className={`${isMobile ? 'mx-5 mb-6 rounded-[1.75rem] p-5' : 'mx-3 my-3 rounded-lg p-3'} flex h-full min-h-0 flex-col overflow-hidden border border-gray-700 bg-gray-900`}
+      className={`${isMobile ? 'mx-5 mb-4 rounded-[1.75rem] p-5' : 'mx-3 my-3 rounded-lg p-3'} flex ${isMobile ? 'flex-1' : 'h-full'} min-h-0 flex-col overflow-hidden border border-gray-700 bg-gray-900`}
     >
       <div className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden ${isMobile ? 'pb-6' : 'pr-1 pb-4'}`}>
         <p className={`${isMobile ? 'mb-4 text-base' : 'mb-2 text-xs'} font-semibold text-gray-100`}>{t('projectForm.title')}</p>
@@ -353,7 +353,7 @@ function NewProjectForm({ onSubmit, onCancel, t, defaultLanguage, defaultModel, 
 
       <div
         className={`flex flex-shrink-0 ${isMobile ? 'gap-4 pt-4' : 'gap-2 pt-2'}`}
-        style={isMobile ? { paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' } : undefined}
+        style={isMobile ? { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' } : undefined}
       >
         <button
           type="submit"
@@ -570,8 +570,7 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
 
       {showForm ? (
         <div
-          className={`min-h-0 flex-1 overflow-hidden ${isMobile ? 'overscroll-contain' : ''}`}
-          style={isMobile ? { paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' } : undefined}
+          className={`min-h-0 flex-1 overflow-hidden flex flex-col ${isMobile ? 'overscroll-contain' : ''}`}
         >
           <NewProjectForm
             onSubmit={handleCreate}
