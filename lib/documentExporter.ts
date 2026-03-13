@@ -6,10 +6,17 @@ import {
   InvoiceSummaryResult,
   InvoiceSummaryRow,
 } from '@/types';
+import {
+  deriveDocumentTableIntent,
+  resolveDocumentColumnValue,
+  type DocumentTableColumnSpec,
+} from './documentTableIntent';
 
 type JsonRecord = Record<string, unknown>;
 
 const XLSX_BASE64_PREFIX = 'base64:';
+
+type GenericTableRow = Record<string, string | number | null>;
 
 const INVOICE_EXPORT_COLUMNS: Array<{ key: keyof InvoiceSummaryRow; header: string }> = [
   { key: 'sourceFileName', header: 'sourceFileName' },
@@ -312,6 +319,112 @@ function toCsvCell(value: string | number | null): string {
   return raw;
 }
 
+function extractGenericRows(root: JsonRecord): JsonRecord[] {
+  const rowCandidate = [root.rows, root.invoices, root.records, root.items].find((value) => Array.isArray(value));
+  if (!Array.isArray(rowCandidate)) return [];
+  return rowCandidate.map((entry) => toRecord(entry)).filter((entry): entry is JsonRecord => Boolean(entry));
+}
+
+function buildGenericTableRows(sourceRows: JsonRecord[], columns: DocumentTableColumnSpec[]): GenericTableRow[] {
+  return sourceRows.map((row) => {
+    const record: GenericTableRow = {};
+    columns.forEach((column) => {
+      record[column.header] = resolveDocumentColumnValue(row, column);
+    });
+    return record;
+  });
+}
+
+function buildGenericTotalsRow(columns: DocumentTableColumnSpec[], rows: GenericTableRow[]): GenericTableRow {
+  const totals: GenericTableRow = {};
+  columns.forEach((column, index) => {
+    if (index === 0) {
+      totals[column.header] = 'TOTAL';
+      return;
+    }
+
+    if (!column.numeric) {
+      totals[column.header] = null;
+      return;
+    }
+
+    const sum = rows.reduce((acc, row) => {
+      const value = row[column.header];
+      if (typeof value !== 'number' || !Number.isFinite(value)) return acc;
+      return acc + value;
+    }, 0);
+    totals[column.header] = sum;
+  });
+  return totals;
+}
+
+function buildGenericRowsCsv(columns: DocumentTableColumnSpec[], rows: GenericTableRow[], includeTotalsRow: boolean): string {
+  const headers = columns.map((column) => column.header).join(',');
+  const dataRows = includeTotalsRow ? [...rows, buildGenericTotalsRow(columns, rows)] : rows;
+  const lines = dataRows.map((row) =>
+    columns
+      .map((column) => {
+        const value = row[column.header] ?? null;
+        return toCsvCell(typeof value === 'number' || typeof value === 'string' ? value : null);
+      })
+      .join(',')
+  );
+  return [headers, ...lines].join('\n');
+}
+
+function buildGenericXlsxBase64(columns: DocumentTableColumnSpec[], rows: GenericTableRow[], includeTotalsRow: boolean): string {
+  const dataRows = includeTotalsRow ? [...rows, buildGenericTotalsRow(columns, rows)] : rows;
+  const workbook = XLSX.utils.book_new();
+  const rowsSheet = XLSX.utils.json_to_sheet(dataRows, {
+    header: columns.map((column) => column.header),
+  });
+  XLSX.utils.book_append_sheet(workbook, rowsSheet, 'table_rows');
+  return XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' });
+}
+
+function buildGenericIndexHtml(
+  columns: DocumentTableColumnSpec[],
+  rows: GenericTableRow[],
+  includeTotalsRow: boolean,
+  language: AppLanguage
+): string {
+  const title = language === 'cz' ? 'Vlastni tabulkovy export' : 'Custom table export';
+  const renderedRows = includeTotalsRow ? [...rows, buildGenericTotalsRow(columns, rows)] : rows;
+  const bodyRows = renderedRows
+    .map((row) => {
+      const cells = columns
+        .map((column) => `<td>${escapeHtml(String(row[column.header] ?? ''))}</td>`)
+        .join('');
+      return `<tr>${cells}</tr>`;
+    })
+    .join('');
+  const headCells = columns.map((column) => `<th>${escapeHtml(column.header)}</th>`).join('');
+
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '  <meta charset="utf-8" />',
+    '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
+    `  <title>${escapeHtml(title)}</title>`,
+    '  <style>',
+    '    body { font-family: "Segoe UI", sans-serif; margin: 24px; color: #0f172a; }',
+    '    table { width: 100%; border-collapse: collapse; font-size: 13px; }',
+    '    th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; vertical-align: top; }',
+    '    th { background: #f1f5f9; }',
+    '  </style>',
+    '</head>',
+    '<body>',
+    `  <h1>${escapeHtml(title)}</h1>`,
+    '  <table>',
+    `    <thead><tr>${headCells}</tr></thead>`,
+    `    <tbody>${bodyRows || `<tr><td colspan="${columns.length}">No rows available.</td></tr>`}</tbody>`,
+    '  </table>',
+    '</body>',
+    '</html>',
+  ].join('\n');
+}
+
 export function buildInvoiceRowsCsv(result: InvoiceSummaryResult): string {
   const headers = INVOICE_EXPORT_COLUMNS.map((column) => column.header).join(',');
   const lines = result.rows.map((row) =>
@@ -482,10 +595,67 @@ export function buildDeterministicDocumentExecutionBundle(params: {
   validatedRowsRaw: string | null | undefined;
   summaryMetadataRaw: string | null | undefined;
   language: AppLanguage;
+  requestedOutputPrompt?: string | null;
 }): {
   bundle: ExecutionOutputBundle;
   invoiceSummary: InvoiceSummaryResult;
 } {
+  const exportIntent = deriveDocumentTableIntent(params.requestedOutputPrompt, { defaultMode: 'booking' });
+
+  if (exportIntent.mode === 'generic' && exportIntent.columns.length > 0) {
+    const validatedParsed = parseJsonCandidate(params.validatedRowsRaw);
+    const validatedRoot = toRecord(validatedParsed) ?? { rows: [] };
+    const sourceRows = extractGenericRows(validatedRoot);
+    const genericRows = buildGenericTableRows(sourceRows, exportIntent.columns);
+    const csv = buildGenericRowsCsv(exportIntent.columns, genericRows, exportIntent.includeTotalsRow);
+    const xlsxBase64 = buildGenericXlsxBase64(exportIntent.columns, genericRows, exportIntent.includeTotalsRow);
+    const indexHtml = buildGenericIndexHtml(
+      exportIntent.columns,
+      genericRows,
+      exportIntent.includeTotalsRow,
+      params.language
+    );
+    const summaryPayload = {
+      invoiceCount: genericRows.length,
+      uniqueVariableSymbolCount: 0,
+      duplicateVariableSymbolCount: 0,
+      totalOverpayment: 0,
+      totalUnderpayment: 0,
+      netTotal: 0,
+      vatNote: null,
+      warnings: [],
+      duplicateVariableSymbols: [],
+      filesProcessed: sourceRows
+        .map((row) => toStringOrNull(row.sourceFileName) ?? toStringOrNull(row.sourceTitle))
+        .filter((value): value is string => Boolean(value)),
+      filesFailed: [],
+    };
+
+    const bundle: ExecutionOutputBundle = {
+      status: 'success',
+      summary:
+        `Deterministic custom table export generated (${genericRows.length} row(s), ` +
+        `${exportIntent.columns.length} column(s)${exportIntent.includeTotalsRow ? ', totals row included' : ''}).`,
+      files: [
+        { path: 'index.html', content: indexHtml },
+        { path: 'requested-table.csv', content: csv },
+        { path: 'requested-table.xlsx', content: `${XLSX_BASE64_PREFIX}${xlsxBase64}` },
+        { path: 'validated-rows.json', content: JSON.stringify(validatedRoot, null, 2) },
+        { path: 'summary-metadata.json', content: JSON.stringify(summaryPayload, null, 2) },
+      ],
+      notes: ['Exporter bundle generated deterministically from structured artifacts only.'],
+      removePaths: [],
+    };
+
+    return {
+      bundle,
+      invoiceSummary: {
+        rows: [],
+        summary: summaryPayload,
+      },
+    };
+  }
+
   const parsed = parseInvoiceSummaryResultFromArtifacts(params.validatedRowsRaw, params.summaryMetadataRaw);
   const summaryPayload = parsed.result.summary;
 

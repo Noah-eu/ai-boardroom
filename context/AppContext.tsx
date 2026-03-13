@@ -56,6 +56,12 @@ import {
 import { createTask, patchTask } from '@/tasks';
 import { Language, TranslationKey, translate, translateWithVars } from '@/i18n';
 import { buildDeterministicDocumentExecutionBundle } from '@/lib/documentExporter';
+import {
+  deriveDocumentTableIntent,
+  isDocumentColumnValueMissing,
+  resolveDocumentColumnValue,
+  type DocumentTableIntent,
+} from '@/lib/documentTableIntent';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -639,6 +645,27 @@ const REQUIRED_INVOICE_FIELDS_FOR_QUALITY: Array<{ key: string; label: string }>
   { key: 'roomSales', label: 'roomSales' },
 ];
 
+const DEFAULT_GENERIC_EXTRACTION_COLUMNS: DocumentTableIntent['columns'] = [
+  {
+    key: 'invoiceNumber',
+    header: 'invoiceNumber',
+    numeric: false,
+    candidates: ['invoiceNumber', 'documentNumber', 'number'],
+  },
+  {
+    key: 'variableSymbol',
+    header: 'variableSymbol',
+    numeric: false,
+    candidates: ['variableSymbol', 'varSymbol', 'vs'],
+  },
+  {
+    key: 'amountDueInclVat',
+    header: 'amount due incl. VAT',
+    numeric: true,
+    candidates: ['amountDueInclVat', 'amountInInvoiceCurrency', 'amount', 'total', 'balance'],
+  },
+];
+
 function normalizeBookingDate(value: string | null): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -808,25 +835,38 @@ function extractBookingInvoiceRowFromPdf(entry: PdfSnapshotInput): BuilderExtrac
   };
 }
 
-function annotateInvoiceRowQuality(row: BuilderExtractionRow): BuilderExtractionRow {
-  const missingFields = REQUIRED_INVOICE_FIELDS_FOR_QUALITY.filter(({ key }) => {
-    const value = row.values[key];
-    if (typeof value === 'number') return !Number.isFinite(value);
-    if (typeof value === 'string') return value.trim().length === 0;
-    return value === null || value === undefined;
-  }).map(({ label }) => label);
+function annotateInvoiceRowQuality(row: BuilderExtractionRow, intent: DocumentTableIntent): BuilderExtractionRow {
+  const missingFields =
+    intent.mode === 'booking'
+      ? REQUIRED_INVOICE_FIELDS_FOR_QUALITY.filter(({ key }) => {
+          const value = row.values[key];
+          if (typeof value === 'number') return !Number.isFinite(value);
+          if (typeof value === 'string') return value.trim().length === 0;
+          return value === null || value === undefined;
+        }).map(({ label }) => label)
+      : intent.columns
+          .filter((column) => {
+            const resolved = resolveDocumentColumnValue(row.values, column);
+            return isDocumentColumnValueMissing(resolved);
+          })
+          .map((column) => column.header);
 
   const existingWarning = toStringValue(row.values.extractionWarning) ?? null;
   let qualityWarning: string | null = null;
   let extractionStatus = 'ok';
 
-  if (missingFields.length === REQUIRED_INVOICE_FIELDS_FOR_QUALITY.length) {
+  if (missingFields.length > 0 && missingFields.length === (intent.mode === 'booking' ? REQUIRED_INVOICE_FIELDS_FOR_QUALITY.length : intent.columns.length)) {
     extractionStatus = 'extraction_failed';
     qualityWarning =
-      'Extraction failed: no required invoice/accounting fields were extracted for this source file.';
+      intent.mode === 'booking'
+        ? 'Extraction failed: no required invoice/accounting fields were extracted for this source file.'
+        : `Extraction failed: required output columns missing (${missingFields.join(', ')}).`;
   } else if (missingFields.length > 0) {
     extractionStatus = 'fields_missing';
-    qualityWarning = `Missing required fields: ${missingFields.join(', ')}`;
+    qualityWarning =
+      intent.mode === 'booking'
+        ? `Missing required fields: ${missingFields.join(', ')}`
+        : `Missing required output columns: ${missingFields.join(', ')}`;
   }
 
   const combinedWarning = [existingWarning, qualityWarning].filter(Boolean).join(' | ');
@@ -842,7 +882,8 @@ function annotateInvoiceRowQuality(row: BuilderExtractionRow): BuilderExtraction
 
 function mergeBookingFallbackRows(
   existingRows: BuilderExtractionRow[],
-  pdfChunk: PdfSnapshotInput[]
+  pdfChunk: PdfSnapshotInput[],
+  intent: DocumentTableIntent
 ): BuilderExtractionRow[] {
   const mergedRows: BuilderExtractionRow[] = existingRows.map((row): BuilderExtractionRow => ({
     ...row,
@@ -852,41 +893,43 @@ function mergeBookingFallbackRows(
     },
   }));
 
-  pdfChunk.forEach((entry) => {
-    const fallbackRow = extractBookingInvoiceRowFromPdf(entry);
-    if (!fallbackRow) return;
+  if (intent.mode === 'booking') {
+    pdfChunk.forEach((entry) => {
+      const fallbackRow = extractBookingInvoiceRowFromPdf(entry);
+      if (!fallbackRow) return;
 
-    const existingIndex = mergedRows.findIndex((row) => row.sourceAttachmentId === entry.attachmentId);
-    if (existingIndex === -1) {
-      mergedRows.push(fallbackRow);
-      return;
-    }
-
-    const current = mergedRows[existingIndex];
-    const mergedValues: Record<string, unknown> = { ...current.values };
-    Object.entries(fallbackRow.values).forEach(([key, value]) => {
-      const currentValue = mergedValues[key];
-      const isCurrentMissing =
-        currentValue === null ||
-        currentValue === undefined ||
-        (typeof currentValue === 'string' && currentValue.trim() === '');
-      const isIncomingPresent =
-        value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '');
-      if (isCurrentMissing && isIncomingPresent) {
-        mergedValues[key] = value;
+      const existingIndex = mergedRows.findIndex((row) => row.sourceAttachmentId === entry.attachmentId);
+      if (existingIndex === -1) {
+        mergedRows.push(fallbackRow);
+        return;
       }
+
+      const current = mergedRows[existingIndex];
+      const mergedValues: Record<string, unknown> = { ...current.values };
+      Object.entries(fallbackRow.values).forEach(([key, value]) => {
+        const currentValue = mergedValues[key];
+        const isCurrentMissing =
+          currentValue === null ||
+          currentValue === undefined ||
+          (typeof currentValue === 'string' && currentValue.trim() === '');
+        const isIncomingPresent =
+          value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '');
+        if (isCurrentMissing && isIncomingPresent) {
+          mergedValues[key] = value;
+        }
+      });
+
+      mergedRows[existingIndex] = {
+        ...current,
+        values: mergedValues,
+      };
     });
+  }
 
-    mergedRows[existingIndex] = {
-      ...current,
-      values: mergedValues,
-    };
-  });
-
-  return mergedRows.map((row) => annotateInvoiceRowQuality(row));
+  return mergedRows.map((row) => annotateInvoiceRowQuality(row, intent));
 }
 
-function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
+function buildMergedRowsSummary(rows: BuilderExtractionRow[], intent: DocumentTableIntent): {
   invoiceCount: number;
   uniqueVariableSymbolCount: number;
   duplicateVariableSymbolCount: number;
@@ -969,7 +1012,11 @@ function buildMergedRowsSummary(rows: BuilderExtractionRow[]): {
   if (rows.length === 0) {
     warnings.push('Extraction failed: no structured rows were extracted from the provided PDF files.');
   } else if (failedRows === rows.length) {
-    warnings.push('Extraction failed: all extracted rows are missing required invoice/accounting fields.');
+    warnings.push(
+      intent.mode === 'booking'
+        ? 'Extraction failed: all extracted rows are missing required invoice/accounting fields.'
+        : 'Extraction failed: all extracted rows are missing required fields for requested output.'
+    );
   }
 
   const vatNote =
@@ -1073,8 +1120,50 @@ function buildBuilderChunkPass1Prompt(
   snapshot: ExecutionSnapshot,
   chunkIndex: number,
   chunkCount: number,
-  pdfChunk: PdfSnapshotInput[]
+  pdfChunk: PdfSnapshotInput[],
+  intent: DocumentTableIntent
 ): string {
+  const genericColumns = intent.columns.length > 0 ? intent.columns : DEFAULT_GENERIC_EXTRACTION_COLUMNS;
+
+  if (intent.mode === 'generic') {
+    const genericRowContract = genericColumns.reduce<Record<string, string | number | null>>((acc, column) => {
+      acc[column.key] = column.numeric ? 0 : '...';
+      return acc;
+    }, { sourceFileName: '...', extractionWarning: '...' });
+
+    return [
+      project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+      'You are Builder.',
+      `Pass 1/2: Extract only fields required for custom table output from PDF chunk ${chunkIndex + 1}/${chunkCount}.`,
+      'Return JSON only. No markdown fences or prose.',
+      'Contract:',
+      JSON.stringify(
+        {
+          documents: [
+            {
+              sourceAttachmentId: '...',
+              sourceTitle: '...',
+              rows: [genericRowContract],
+            },
+          ],
+        },
+        null,
+        0
+      ),
+      'Requested output columns (keep exactly this meaning):',
+      genericColumns.map((column) => `- ${column.header} -> ${column.key}`).join('\n'),
+      'Rules:',
+      '- Use only sourceAttachmentId/sourceTitle listed below.',
+      '- Keep source mapping exact per row.',
+      '- If a document has no rows, return an empty rows array for it.',
+      '- Do not include data from files outside this chunk.',
+      '- Keep missing fields null/empty; never fabricate values.',
+      '- Preserve one row per extracted invoice/record where possible.',
+      `Project prompt:\n${shorten(snapshot.projectPrompt, 600)}`,
+      `Chunk files:\n${pdfChunk.map((entry) => `- ${entry.attachmentId} | ${entry.title}`).join('\n')}`,
+    ].join('\n\n');
+  }
+
   return [
     project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
     'You are Builder.',
@@ -1912,6 +2001,22 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
   }
 
   return [];
+}
+
+function isDocumentGeneratedFilesStage(
+  project: Project,
+  task: Task,
+  artifactPath: string
+): boolean {
+  if (task.agent !== 'Builder' || artifactPath !== 'generated-files.json') return false;
+
+  const requiredPaths = getRequiredUpstreamArtifacts(task).map((entry) => entry.path);
+  if (requiredPaths.includes('validated-rows.json') && requiredPaths.includes('summary-metadata.json')) {
+    return true;
+  }
+
+  // Fallback safety for migrated/legacy task graphs where dependencies might be incomplete.
+  return decideExecutionPipeline(project) === 'document';
 }
 
 function findTaskProducingArtifact(project: Project, artifactPath: string): Task | null {
@@ -3928,9 +4033,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const shortenArtifact = (artifactPath: string, maxChars: number): string =>
         shorten(findArtifactText(artifactPath) ?? '{}', maxChars);
+      const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
       if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
-        const isExporterStage = artifact.path === 'generated-files.json' && /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter|Integrator/i.test(task.title);
+        const isExporterStage = isDocumentGeneratedFilesStage(project, task, artifact.path);
         if (isExporterStage) {
           return [
             project.language === 'cz' ? 'Write summary and notes in Czech.' : 'Write summary and notes in English.',
@@ -3985,6 +4091,43 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (artifact.path === 'extracted-rows.json') {
+        if (extractionIntent.mode === 'generic') {
+          const genericColumns =
+            extractionIntent.columns.length > 0 ? extractionIntent.columns : DEFAULT_GENERIC_EXTRACTION_COLUMNS;
+          const contractRow = genericColumns.reduce<Record<string, string | number | null>>(
+            (acc, column) => {
+              acc[column.key] = column.numeric ? 0 : '...';
+              return acc;
+            },
+            { sourceFileName: '...', extractionWarning: '...' }
+          );
+
+          return [
+            project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
+            'You are DocumentExtractor stage.',
+            'Extract only fields needed for requested custom table output. No summaries, no analysis.',
+            'Return JSON only. No markdown fences or prose.',
+            'Contract:',
+            JSON.stringify(
+              {
+                documents: [
+                  {
+                    sourceAttachmentId: '...',
+                    sourceTitle: '...',
+                    rows: [contractRow],
+                  },
+                ],
+              },
+              null,
+              0
+            ),
+            'Requested output columns (keep meaning and order):',
+            genericColumns.map((column) => `- ${column.header} -> ${column.key}`).join('\n'),
+            'Rules: keep source mapping exact; keep missing values null/empty; no fabricated values.',
+            `Project prompt:\n${shorten(snapshot.projectPrompt, 900)}`,
+          ].join('\n\n');
+        }
+
         return [
           project.language === 'cz' ? 'Write JSON keys and values in English.' : 'Write JSON in English.',
           'You are DocumentExtractor stage.',
@@ -4931,6 +5074,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
 
           const artifact = updatedArtifacts[index];
+          const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
           if (artifactCanBeGeneratedLocally(task, artifact)) {
             const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
@@ -4957,10 +5101,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             continue;
           }
 
-          const isDeterministicDocumentExporterStage =
-            project.outputType === 'document' &&
-            artifact.path === 'generated-files.json' &&
-            /Exporter/i.test(task.title);
+          const isDeterministicDocumentExporterStage = isDocumentGeneratedFilesStage(
+            project,
+            task,
+            artifact.path
+          );
 
           if (isDeterministicDocumentExporterStage) {
             dispatch({
@@ -4977,6 +5122,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               validatedRowsRaw,
               summaryMetadataRaw,
               language: project.language,
+              requestedOutputPrompt: snapshot.projectPrompt,
             });
 
             updatedArtifacts[index] = {
@@ -5123,7 +5269,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 snapshot,
                 chunkIndex,
                 pdfChunks.length,
-                pdfChunk
+                pdfChunk,
+                extractionIntent
               );
               const chunkAttachmentContext = buildSnapshotAttachmentContext(
                 snapshot,
@@ -5178,7 +5325,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               let pass1RowsForChunk: BuilderExtractionRow[] = [];
               try {
                 pass1RowsForChunk = parseBuilderChunkRows(pass1ChunkResponse.text, pdfChunk);
-                pass1RowsForChunk = mergeBookingFallbackRows(pass1RowsForChunk, pdfChunk);
+                pass1RowsForChunk = mergeBookingFallbackRows(pass1RowsForChunk, pdfChunk, extractionIntent);
                 completedChunkSummaries.push({
                   pass: 'pass1',
                   chunk: chunkIndex + 1,
@@ -5270,7 +5417,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   });
                   mergedChunkRows = mergeBookingFallbackRows(
                     mergeChunkPassRows(pass1RowsForChunk, pass2RowsForChunk),
-                    pdfChunk
+                    pdfChunk,
+                    extractionIntent
                   );
                 } catch (error) {
                   const parseDetail = error instanceof Error ? error.message : 'Unknown chunk parse failure';
@@ -5296,7 +5444,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             }
 
             const mergedRows = mergeExtractionRows(extractedRowsAcrossChunks);
-            const mergedRowsSummary = buildMergedRowsSummary(mergedRows);
+            const mergedRowsSummary = buildMergedRowsSummary(mergedRows, extractionIntent);
             const rowsForFinalPrompt = mergedRows
               .slice(0, BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT)
               .map((row) => ({

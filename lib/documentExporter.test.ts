@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildDeterministicDocumentExecutionBundle,
+  decodeBase64BundleFileContent,
   parseInvoiceSummaryResultFromArtifacts,
 } from './documentExporter';
+import * as XLSX from 'xlsx';
 
 describe('documentExporter', () => {
   it('builds deterministic export bundle from Booking-like validated rows', () => {
@@ -93,5 +95,47 @@ describe('documentExporter', () => {
     expect(exportBundle.bundle.notes.join(' ')).toContain('fallback');
     const html = exportBundle.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
     expect(html).toContain('No rows available');
+  });
+
+  it('builds generic requested table export with totals row', () => {
+    const validated = JSON.stringify({
+      rows: [
+        {
+          sourceFileName: 'invoice-1.pdf',
+          variableSymbol: '2026001',
+          amountInInvoiceCurrency: 1200,
+          overpaymentInclVat: 200,
+        },
+        {
+          sourceFileName: 'invoice-2.pdf',
+          variableSymbol: '2026002',
+          amountInInvoiceCurrency: 1800,
+          overpaymentInclVat: 50,
+        },
+      ],
+    });
+
+    const exportBundle = buildDeterministicDocumentExecutionBundle({
+      validatedRowsRaw: validated,
+      summaryMetadataRaw: JSON.stringify({}),
+      language: 'en',
+      requestedOutputPrompt: `Create XLSX table from attached PDFs. Make 3 columns:
+    - variable symbol
+    - amount due incl. VAT
+    - overpayment incl. VAT
+    Add a total at the bottom.`,
+    });
+
+    const csv = exportBundle.bundle.files.find((file) => file.path === 'requested-table.csv')?.content ?? '';
+    expect(csv.split('\n')[0]).toBe('variable symbol,amount due incl. VAT,overpayment incl. VAT');
+    expect(csv).toContain('TOTAL,3000,250');
+
+    const xlsxFile = exportBundle.bundle.files.find((file) => file.path === 'requested-table.xlsx');
+    expect(xlsxFile).toBeTruthy();
+    const workbook = XLSX.read(decodeBase64BundleFileContent(xlsxFile?.content ?? ''), { type: 'base64' });
+    const sheet = workbook.Sheets.table_rows;
+    const matrix = XLSX.utils.sheet_to_json<(string | number | null)[]>(sheet, { header: 1 });
+    expect(matrix[0]).toEqual(['variable symbol', 'amount due incl. VAT', 'overpayment incl. VAT']);
+    expect(matrix[matrix.length - 1]).toEqual(['TOTAL', 3000, 250]);
   });
 });
