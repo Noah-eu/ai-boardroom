@@ -14,6 +14,11 @@ describe('documentTableIntent Czech aliases', () => {
       'amountDueInclVat',
       'overpaymentInclVat',
     ]);
+    expect(intent.columns.map((column) => column.header)).toEqual([
+      'Variabilni symbol',
+      'K uhrade s DPH',
+      'Preplatek s DPH',
+    ]);
   });
 
   it('maps phrase castka k uhrade s DPH to amountDueInclVat', () => {
@@ -59,5 +64,19 @@ describe('documentTableIntent Czech aliases', () => {
   it('falls back to unknown column key when phrase is not recognized', () => {
     const intent = deriveDocumentTableIntent('Sloupce: castka idealni, variabilni symbol');
     expect(intent.columns.map((column) => column.key)).toEqual(['castkaIdealni', 'variableSymbol']);
+  });
+
+  it('ignores trailing total fragment in one-line prompt', () => {
+    const intent = deriveDocumentTableIntent(
+      'Create XLSX from attached PDFs with 3 columns: variable symbol, amount due incl. VAT, overpayment incl. VAT, and total at the bottom'
+    );
+
+    expect(intent.mode).toBe('generic');
+    expect(intent.includeTotalsRow).toBe(true);
+    expect(intent.columns.map((column) => column.key)).toEqual([
+      'variableSymbol',
+      'amountDueInclVat',
+      'overpaymentInclVat',
+    ]);
   });
 });

@@ -322,7 +322,22 @@ function toCsvCell(value: string | number | null): string {
 function extractGenericRows(root: JsonRecord): JsonRecord[] {
   const rowCandidate = [root.rows, root.invoices, root.records, root.items].find((value) => Array.isArray(value));
   if (!Array.isArray(rowCandidate)) return [];
-  return rowCandidate.map((entry) => toRecord(entry)).filter((entry): entry is JsonRecord => Boolean(entry));
+  return rowCandidate
+    .map((entry) => toRecord(entry))
+    .filter((entry): entry is JsonRecord => Boolean(entry))
+    .map((row) => {
+      const nestedValues = toRecord(row.values);
+      if (!nestedValues) return row;
+      return {
+        ...nestedValues,
+        sourceAttachmentId: toStringOrNull(row.sourceAttachmentId) ?? toStringOrNull(nestedValues.sourceAttachmentId),
+        sourceTitle: toStringOrNull(row.sourceTitle) ?? toStringOrNull(nestedValues.sourceTitle),
+        sourceFileName:
+          toStringOrNull(nestedValues.sourceFileName) ??
+          toStringOrNull(row.sourceTitle) ??
+          toStringOrNull(row.sourceFileName),
+      };
+    });
 }
 
 function buildGenericTableRows(sourceRows: JsonRecord[], columns: DocumentTableColumnSpec[]): GenericTableRow[] {

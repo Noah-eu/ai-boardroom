@@ -24,6 +24,7 @@ interface ColumnAlias {
   key: string;
   numeric: boolean;
   candidates: string[];
+  canonicalHeader: string;
   patterns: RegExp[];
 }
 
@@ -32,6 +33,7 @@ const COLUMN_ALIASES: ColumnAlias[] = [
     key: 'variableSymbol',
     numeric: false,
     candidates: ['variableSymbol', 'varSymbol', 'vs', 'variable'],
+    canonicalHeader: 'Variabilni symbol',
     patterns: [/\bvariable\s*symbol\b/, /\bvariabilni\s*symbol\b/, /\bvariabiln[ií]\s*symbol\b/, /\bvs\b/],
   },
   {
@@ -50,6 +52,7 @@ const COLUMN_ALIASES: ColumnAlias[] = [
       'balance',
       'total',
     ],
+    canonicalHeader: 'K uhrade s DPH',
     patterns: [
       /\bamount\s*due\b.*\bvat\b/,
       /\bdue\s*amount\b.*\bvat\b/,
@@ -72,6 +75,7 @@ const COLUMN_ALIASES: ColumnAlias[] = [
     key: 'overpaymentInclVat',
     numeric: true,
     candidates: ['overpaymentInclVat', 'overpayment', 'totalOverpayment', 'amount', 'balance'],
+    canonicalHeader: 'Preplatek s DPH',
     patterns: [
       /\boverpayment\b.*\bvat\b/,
       /\boverpayment\b/,
@@ -84,24 +88,28 @@ const COLUMN_ALIASES: ColumnAlias[] = [
     key: 'invoiceNumber',
     numeric: false,
     candidates: ['invoiceNumber', 'documentNumber', 'number'],
+    canonicalHeader: 'Cislo faktury',
     patterns: [/\binvoice\s*number\b/, /\bcislo\s*faktury\b/, /\bčislo\s*faktury\b/, /\bfaktura\b/],
   },
   {
     key: 'issueDate',
     numeric: false,
     candidates: ['issueDate', 'dateIssued'],
+    canonicalHeader: 'Datum vystaveni',
     patterns: [/\bissue\s*date\b/, /\bdatum\s*vystaveni\b/, /\bdatum\b/],
   },
   {
     key: 'dueDate',
     numeric: false,
     candidates: ['dueDate', 'maturityDate'],
+    canonicalHeader: 'Datum splatnosti',
     patterns: [/\bdue\s*date\b/, /\bdatum\s*splatnosti\b/, /\bsplatnost\b/],
   },
   {
     key: 'currency',
     numeric: false,
     candidates: ['currency'],
+    canonicalHeader: 'Mena',
     patterns: [/\bcurrency\b/, /\bmena\b/, /\bm[eě]na\b/],
   },
 ];
@@ -221,10 +229,14 @@ function parseInlineColumns(prompt: string): string[] {
 }
 
 function cleanColumnLabel(label: string): string {
-  return label
+  const cleaned = label
     .replace(/\b(dole\s*sou[cč]et|sou[cč]et\s*dole|add\s+a\s+total.*|total\s+at\s+the\s+bottom)\b.*$/i, '')
+    .replace(/^\s*(and|a|plus|soucet|total)\s+/i, '')
+    .replace(/["'`]+/g, '')
     .replace(/[.;:]$/, '')
     .trim();
+  if (/^(and|a|plus|soucet|total)$/i.test(cleaned)) return '';
+  return cleaned;
 }
 
 function parseRequestedColumns(prompt: string): DocumentTableColumnSpec[] {
@@ -243,7 +255,7 @@ function parseRequestedColumns(prompt: string): DocumentTableColumnSpec[] {
 
     return {
       key: alias.key,
-      header: label,
+      header: alias.canonicalHeader,
       numeric: alias.numeric,
       candidates: alias.candidates,
     };

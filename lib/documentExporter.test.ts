@@ -127,7 +127,7 @@ describe('documentExporter', () => {
     });
 
     const csv = exportBundle.bundle.files.find((file) => file.path === 'requested-table.csv')?.content ?? '';
-    expect(csv.split('\n')[0]).toBe('variable symbol,amount due incl. VAT,overpayment incl. VAT');
+    expect(csv.split('\n')[0]).toBe('Variabilni symbol,K uhrade s DPH,Preplatek s DPH');
     expect(csv).toContain('TOTAL,3000,250');
 
     const xlsxFile = exportBundle.bundle.files.find((file) => file.path === 'requested-table.xlsx');
@@ -135,7 +135,49 @@ describe('documentExporter', () => {
     const workbook = XLSX.read(decodeBase64BundleFileContent(xlsxFile?.content ?? ''), { type: 'base64' });
     const sheet = workbook.Sheets.table_rows;
     const matrix = XLSX.utils.sheet_to_json<(string | number | null)[]>(sheet, { header: 1 });
-    expect(matrix[0]).toEqual(['variable symbol', 'amount due incl. VAT', 'overpayment incl. VAT']);
+    expect(matrix[0]).toEqual(['Variabilni symbol', 'K uhrade s DPH', 'Preplatek s DPH']);
     expect(matrix[matrix.length - 1]).toEqual(['TOTAL', 3000, 250]);
+  });
+
+  it('maps nested values rows into generic CSV/XLSX export', () => {
+    const validated = JSON.stringify({
+      rows: [
+        {
+          sourceAttachmentId: 'att-1',
+          sourceTitle: 'invoice-1.pdf',
+          values: {
+            variableSymbol: '3001001',
+            amountDueInclVat: 1200,
+            overpaymentInclVat: 200,
+            extractionStatus: 'ok',
+          },
+        },
+        {
+          sourceAttachmentId: 'att-2',
+          sourceTitle: 'invoice-2.pdf',
+          values: {
+            variableSymbol: '3001002',
+            amountDueInclVat: 1800,
+            overpaymentInclVat: 50,
+            extractionStatus: 'ok',
+          },
+        },
+      ],
+    });
+
+    const exportBundle = buildDeterministicDocumentExecutionBundle({
+      validatedRowsRaw: validated,
+      summaryMetadataRaw: JSON.stringify({}),
+      language: 'cz',
+      requestedOutputPrompt:
+        'Create XLSX from attached PDFs with 3 columns: variable symbol, amount due incl. VAT, overpayment incl. VAT, and total at the bottom',
+    });
+
+    const csv = exportBundle.bundle.files.find((file) => file.path === 'requested-table.csv')?.content ?? '';
+    const rows = csv.split('\n');
+    expect(rows[0]).toBe('Variabilni symbol,K uhrade s DPH,Preplatek s DPH');
+    expect(rows[1]).toBe('3001001,1200,200');
+    expect(rows[2]).toBe('3001002,1800,50');
+    expect(rows[3]).toBe('TOTAL,3000,250');
   });
 });
