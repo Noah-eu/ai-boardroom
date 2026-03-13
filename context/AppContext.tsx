@@ -554,6 +554,7 @@ function buildSnapshotAttachmentContext(
     text: [
       entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
       entry.summary ? `Summary: ${entry.summary}` : '',
+      entry.structuredData ? `Structured snapshot:\n${JSON.stringify(entry.structuredData, null, 2)}` : '',
       entry.extractedText ?? '',
     ]
       .filter(Boolean)
@@ -1404,13 +1405,28 @@ function resolvePrimaryWebsiteSourceUrl(project: Project, snapshot: ExecutionSna
     return fromSnapshotPages;
   }
 
+  const fromStructured = snapshot.siteSnapshots
+    .map((entry) => entry.structuredData?.sourceUrl?.trim())
+    .find((url): url is string => Boolean(url));
+  if (fromStructured) {
+    return fromStructured;
+  }
+
   return null;
 }
 
 function buildWebsiteAttachmentHints(snapshot: ExecutionSnapshot): string {
+  const structuredSnapshots = snapshot.siteSnapshots
+    .map((entry) => entry.structuredData)
+    .filter((entry): entry is NonNullable<ExecutionSnapshot['siteSnapshots'][number]['structuredData']> => Boolean(entry));
+
   const urls = snapshot.siteSnapshots
     .flatMap((entry) => entry.pages ?? [])
     .map((page) => page.url?.trim())
+    .filter((url): url is string => Boolean(url));
+
+  const structuredUrls = structuredSnapshots
+    .map((entry) => entry.sourceUrl?.trim())
     .filter((url): url is string => Boolean(url));
 
   const emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
@@ -1429,13 +1445,40 @@ function buildWebsiteAttachmentHints(snapshot: ExecutionSnapshot): string {
   const emailLines = sources.filter((line) => emailRegex.test(line)).slice(0, 5);
   const priceLines = sources.filter((line) => priceRegex.test(line)).slice(0, 8);
 
-  const uniqueUrls = Array.from(new Set(urls)).slice(0, 6);
+  const structuredEmails = structuredSnapshots.flatMap((entry) => entry.contactFields.emails).slice(0, 10);
+  const structuredPhones = structuredSnapshots.flatMap((entry) => entry.contactFields.phones).slice(0, 10);
+  const structuredAddresses = structuredSnapshots.flatMap((entry) => entry.contactFields.addresses).slice(0, 6);
+  const structuredPrices = structuredSnapshots.flatMap((entry) => entry.pricingFields).slice(0, 10);
+  const structuredCtas = structuredSnapshots.flatMap((entry) => entry.ctaTexts).slice(0, 10);
+  const structuredMissing = Array.from(new Set(structuredSnapshots.flatMap((entry) => entry.missingFields))).slice(0, 10);
+
+  const uniqueUrls = Array.from(new Set([...structuredUrls, ...urls])).slice(0, 8);
 
   return [
     'Approved late-added inputs from attachments (use when relevant):',
     uniqueUrls.length ? `- Source URLs:\n${uniqueUrls.map((url) => `  - ${url}`).join('\n')}` : '- Source URLs: none detected',
-    emailLines.length ? `- Emails:\n${emailLines.map((line) => `  - ${shorten(line, 160)}`).join('\n')}` : '- Emails: none detected',
-    priceLines.length ? `- Prices/tariffs:\n${priceLines.map((line) => `  - ${shorten(line, 180)}`).join('\n')}` : '- Prices/tariffs: none detected',
+    structuredEmails.length
+      ? `- Emails:\n${structuredEmails.map((line) => `  - ${shorten(line, 160)}`).join('\n')}`
+      : emailLines.length
+      ? `- Emails:\n${emailLines.map((line) => `  - ${shorten(line, 160)}`).join('\n')}`
+      : '- Emails: none detected',
+    structuredPhones.length
+      ? `- Phones:\n${structuredPhones.map((line) => `  - ${shorten(line, 120)}`).join('\n')}`
+      : '- Phones: none detected',
+    structuredAddresses.length
+      ? `- Addresses:\n${structuredAddresses.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : '- Addresses: none detected',
+    structuredPrices.length
+      ? `- Prices/tariffs:\n${structuredPrices.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : priceLines.length
+      ? `- Prices/tariffs:\n${priceLines.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : '- Prices/tariffs: none detected',
+    structuredCtas.length
+      ? `- CTA texts:\n${structuredCtas.map((line) => `  - ${shorten(line, 120)}`).join('\n')}`
+      : '- CTA texts: none detected',
+    structuredMissing.length
+      ? `- Missing fields reported by ingestion:\n${structuredMissing.map((line) => `  - ${line}`).join('\n')}`
+      : '- Missing fields reported by ingestion: none',
   ].join('\n');
 }
 
@@ -3259,6 +3302,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           text: ingestion.extractedText,
         });
         included = true;
+        if (attachment.kind === 'url' && ingestion.urlStructuredData) {
+          textSections.push({
+            title: `${attachment.title} (structured snapshot)`,
+            kind: attachment.kind,
+            source,
+            text: JSON.stringify(ingestion.urlStructuredData, null, 2),
+          });
+        }
+      } else if (attachment.kind === 'url' && ingestion?.urlStructuredData) {
+        textSections.push({
+          title: `${attachment.title} (structured snapshot)`,
+          kind: attachment.kind,
+          source,
+          text: JSON.stringify(ingestion.urlStructuredData, null, 2),
+        });
+        included = true;
       } else if (attachment.kind === 'zip' && ingestion?.zipFileTree) {
         const zipSummary = [
           `File tree:\n${ingestion.zipFileTree.slice(0, 80).join('\n')}`,
@@ -3398,7 +3457,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
+        if (ingestion?.extractedText || ingestion?.urlPages?.length || ingestion?.urlStructuredData) {
           siteSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -3412,6 +3471,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               summary: page.summary,
               excerpt: shorten(page.excerpt, 700),
             })),
+            structuredData: ingestion?.urlStructuredData,
           });
         } else {
           missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
@@ -4480,6 +4540,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           pageTitle: entry.pageTitle,
           summary: shorten(entry.summary, 600),
           extractedExcerpt: shorten(entry.extractedText, 1_000),
+          structured: entry.structuredData
+            ? {
+                sourceUrl: entry.structuredData.sourceUrl,
+                missingFields: entry.structuredData.missingFields,
+                warnings: entry.structuredData.extractionWarnings,
+                contacts: {
+                  emails: entry.structuredData.contactFields.emails.slice(0, 8),
+                  phones: entry.structuredData.contactFields.phones.slice(0, 8),
+                  addresses: entry.structuredData.contactFields.addresses.slice(0, 5),
+                },
+                pricing: entry.structuredData.pricingFields.slice(0, 10),
+                ctas: entry.structuredData.ctaTexts.slice(0, 10),
+              }
+            : null,
           pages: (entry.pages ?? []).slice(0, 5).map((page) => ({
             title: page.title,
             url: page.url,
@@ -6943,12 +7017,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
+        const projectContext = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        const isWebsiteProject = projectContext?.outputType === 'website';
+
         if (attachment.kind === 'url') {
           dispatch({
             type: 'ADD_LOG',
             level: 'info',
             message: `URL fetch started: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
           });
+          if (isWebsiteProject) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: 'Website source ingestion: running structured URL extraction before debate/execution.',
+            });
+          }
         }
 
         const response = await fetch('/api/attachments/ingest', {
@@ -6962,8 +7046,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             mimeType: attachment.mimeType,
             ...(attachment.kind === 'url'
               ? {
-                  maxPages: 5,
-                  maxDepth: 1,
+                  maxPages: isWebsiteProject ? 8 : 5,
+                  maxDepth: isWebsiteProject ? 2 : 1,
                 }
               : {}),
           }),
