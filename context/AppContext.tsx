@@ -70,6 +70,11 @@ import {
   stabilizeCodeExecutionBundle,
   validateWebsiteBundleSourceFiles,
 } from '@/lib/codeBundleStabilizer';
+import {
+  buildDeterministicWebsiteArtifacts,
+  deriveVerifiedWebsiteContent,
+  hasSufficientVerifiedWebsiteContent,
+} from '@/lib/deterministicWebsiteBuilder';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -1581,6 +1586,9 @@ function artifactCanBeGeneratedLocally(
   artifact: Task['producesArtifacts'][number]
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (task.agent === 'Builder' && isSegmentedWebsiteSourceArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
+    return true;
+  }
   if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
     return true;
   }
@@ -5346,6 +5354,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           if (artifactCanBeGeneratedLocally(project, task, artifact)) {
             const builderBundle = findBuilderExecutionBundle(project.tasks);
+
+            if (
+              task.agent === 'Builder' &&
+              shouldUseSegmentedWebsiteBuild(project) &&
+              isSegmentedWebsiteSourceArtifactPath(artifact.path)
+            ) {
+              const verifiedContent = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+              if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: verified source content is insufficient for deterministic website generation.`
+                );
+                return;
+              }
+
+              const websiteArtifacts = buildDeterministicWebsiteArtifacts({
+                projectName: project.name,
+                projectDescription: project.description,
+                verified: verifiedContent,
+              });
+
+              const selectedContent =
+                artifact.path === 'index.html'
+                  ? websiteArtifacts.indexHtml
+                  : artifact.path === 'styles.css'
+                  ? websiteArtifacts.stylesCss
+                  : websiteArtifacts.scriptJs;
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: selectedContent,
+                rawContent: selectedContent,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: deterministic website file generated locally (${artifact.path}) from verified structured content.`,
+              });
+              continue;
+            }
 
             if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') {
               const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
