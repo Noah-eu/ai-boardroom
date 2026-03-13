@@ -3277,6 +3277,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const fallbackSourceUrl =
+        attachment.kind === 'url'
+          ? (attachment.sourceUrl ?? attachment.downloadUrl ?? ingestion?.sourceUrl)?.trim()
+          : '';
       let included = false;
 
       const hasValidImageUrl = attachment.kind === 'image' ? resolveAttachmentImageUrl(attachment) : null;
@@ -3299,6 +3303,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'image' && hasValidImageUrl) {
+        included = true;
+      }
+
+      if (attachment.kind === 'url' && fallbackSourceUrl) {
+        textSections.push({
+          title: `${attachment.title} (source URL)`,
+          kind: attachment.kind,
+          source,
+          text: [`Primary source URL: ${fallbackSourceUrl}`, ingestion?.summary ? `Ingestion status: ${ingestion.summary}` : '']
+            .filter(Boolean)
+            .join('\n'),
+        });
         included = true;
       }
 
@@ -3465,20 +3481,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length || ingestion?.urlStructuredData) {
+        const fallbackSourceUrl = (attachment.sourceUrl ?? attachment.downloadUrl ?? ingestion?.sourceUrl)?.trim();
+        if (ingestion?.extractedText || ingestion?.urlPages?.length || ingestion?.urlStructuredData || fallbackSourceUrl) {
+          const fallbackPages = fallbackSourceUrl
+            ? [
+                {
+                  url: fallbackSourceUrl,
+                  title: 'Attached source URL',
+                  summary: 'Source URL attached; crawl content may still be processing.',
+                  excerpt: 'Source URL attached; crawl content may still be processing.',
+                },
+              ]
+            : undefined;
+          const fallbackText = fallbackSourceUrl
+            ? `Primary source URL: ${fallbackSourceUrl}`
+            : undefined;
           siteSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
             source,
             pageTitle: ingestion?.pageTitle,
-            summary: ingestion?.summary,
-            extractedText: shorten(ingestion?.extractedText, 24_000),
+            summary: ingestion?.summary ?? (fallbackSourceUrl ? `Attached source URL: ${fallbackSourceUrl}` : undefined),
+            extractedText: ingestion?.extractedText?.trim()
+              ? shorten(ingestion.extractedText, 24_000)
+              : fallbackText,
             pages: ingestion?.urlPages?.slice(0, 10).map((page) => ({
               url: page.url,
               title: page.title,
               summary: page.summary,
               excerpt: shorten(page.excerpt, 700),
-            })),
+            })) ?? fallbackPages,
             structuredData: ingestion?.urlStructuredData,
           });
         } else {
