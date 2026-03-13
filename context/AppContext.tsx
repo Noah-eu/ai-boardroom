@@ -68,6 +68,7 @@ import {
   classifyCodeGenerationMode,
   getModeLabel,
   stabilizeCodeExecutionBundle,
+  validateWebsiteBundleSourceFiles,
 } from '@/lib/codeBundleStabilizer';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
@@ -1385,6 +1386,57 @@ function isSegmentedWebsiteSourceArtifactPath(artifactPath: string): boolean {
 
 function shouldUseSegmentedWebsiteBuild(project: Project): boolean {
   return decideExecutionPipeline(project) === 'code' && project.outputType === 'website';
+}
+
+function resolvePrimaryWebsiteSourceUrl(project: Project, snapshot: ExecutionSnapshot): string | null {
+  const fromProjectAttachment = project.attachments
+    .find((attachment) => attachment.kind === 'url' && typeof attachment.sourceUrl === 'string' && attachment.sourceUrl.trim())
+    ?.sourceUrl;
+  if (fromProjectAttachment?.trim()) {
+    return fromProjectAttachment.trim();
+  }
+
+  const fromSnapshotPages = snapshot.siteSnapshots
+    .flatMap((entry) => entry.pages ?? [])
+    .map((page) => page.url?.trim())
+    .find((url) => Boolean(url));
+  if (fromSnapshotPages) {
+    return fromSnapshotPages;
+  }
+
+  return null;
+}
+
+function buildWebsiteAttachmentHints(snapshot: ExecutionSnapshot): string {
+  const urls = snapshot.siteSnapshots
+    .flatMap((entry) => entry.pages ?? [])
+    .map((page) => page.url?.trim())
+    .filter((url): url is string => Boolean(url));
+
+  const emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+  const priceRegex = /(?:\b\d+[\s.,]?\d*\s?(?:CZK|EUR|USD|Kc|Kč|€|\$)\b|\b(?:price|cen[a-y]|tariff|fee)\b[^\n]{0,60})/i;
+
+  const sources = [
+    ...snapshot.siteSnapshots.map((entry) => entry.extractedText ?? ''),
+    ...snapshot.pdfTexts.map((entry) => entry.text ?? ''),
+  ]
+    .join('\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 400);
+
+  const emailLines = sources.filter((line) => emailRegex.test(line)).slice(0, 5);
+  const priceLines = sources.filter((line) => priceRegex.test(line)).slice(0, 8);
+
+  const uniqueUrls = Array.from(new Set(urls)).slice(0, 6);
+
+  return [
+    'Approved late-added inputs from attachments (use when relevant):',
+    uniqueUrls.length ? `- Source URLs:\n${uniqueUrls.map((url) => `  - ${url}`).join('\n')}` : '- Source URLs: none detected',
+    emailLines.length ? `- Emails:\n${emailLines.map((line) => `  - ${shorten(line, 160)}`).join('\n')}` : '- Emails: none detected',
+    priceLines.length ? `- Prices/tariffs:\n${priceLines.map((line) => `  - ${shorten(line, 180)}`).join('\n')}` : '- Prices/tariffs: none detected',
+  ].join('\n');
 }
 
 function isCodeGeneratedFilesStage(project: Project, task: Task, artifactPath: string): boolean {
@@ -4106,6 +4158,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         );
         const executionPlanExcerpt = shortenArtifact('execution-plan.md', 2200);
         const architectureExcerpt = shortenArtifact('architecture-review.md', 2200);
+        const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
+        const attachmentHints = buildWebsiteAttachmentHints(snapshot);
         const indexHtml = shorten(findArtifactText('index.html') ?? baselineByPath?.content ?? '', 5000);
         const stylesCss = shorten(findArtifactText('styles.css') ?? '', 5000);
 
@@ -4117,6 +4171,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             'Keep output focused and runnable as static website source.',
             `Project prompt:\n${snapshot.projectPrompt}`,
             snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+            attachmentHints,
             'Execution plan excerpt:',
             executionPlanExcerpt,
             'Architecture review excerpt:',
@@ -4133,6 +4189,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             'Prefer maintainable selectors and avoid unused boilerplate.',
             `Project prompt:\n${snapshot.projectPrompt}`,
             snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+            attachmentHints,
             'Execution plan excerpt:',
             executionPlanExcerpt,
             'Architecture review excerpt:',
@@ -4148,6 +4206,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           'If JavaScript is needed, keep it framework-free and compatible with the current HTML/CSS.',
           `Project prompt:\n${snapshot.projectPrompt}`,
           snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+          sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+          attachmentHints,
           'Execution plan excerpt:',
           executionPlanExcerpt,
           'Architecture review excerpt:',
@@ -5242,6 +5302,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               const indexHtml = getLatestArtifactContent(project.tasks, 'index.html');
               const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css');
               const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js');
+              const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
 
               if (!indexHtml?.trim()) {
                 failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty index.html.`);
@@ -5256,14 +5317,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 scriptJsRaw?.trim() && scriptJsRaw.trim() !== SEGMENTED_WEBSITE_NO_SCRIPT_MARKER
               );
 
-              const seedBundle: ExecutionOutputBundle = {
-                status: 'success',
-                summary: 'Segmented website artifacts assembled into deterministic bundle.',
+              const sourceValidation = validateWebsiteBundleSourceFiles({
                 files: [
                   { path: 'index.html', content: indexHtml },
                   { path: 'styles.css', content: stylesCss },
                   ...(includeScript ? [{ path: 'script.js', content: scriptJsRaw as string }] : []),
                 ],
+                sourceUrl,
+              });
+
+              if (!sourceValidation.ok) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: segmented website artifacts failed integrity validation: ${sourceValidation.errors.join(' | ')}`
+                );
+                return;
+              }
+
+              const seedBundle: ExecutionOutputBundle = {
+                status: 'success',
+                summary: 'Segmented website artifacts assembled into deterministic bundle.',
+                files: sourceValidation.files,
                 notes: [
                   'generated-files.json assembled locally from segmented website artifacts (index/styles/script).',
                   includeScript ? 'script.js included.' : 'script.js omitted (no script needed).',
@@ -5278,6 +5352,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 latestRevisionFeedback: project.latestRevisionFeedback,
                 outputType: project.outputType,
                 language: project.language,
+                sourceUrl,
               });
 
               updatedArtifacts[index] = {
