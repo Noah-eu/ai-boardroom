@@ -60,12 +60,12 @@ describe('deterministicWebsiteBuilder', () => {
       verified,
       copySections: {
         hero: {
-          title: 'Nová úvodní sekce',
-          subtitle: 'Personalizovaný úvodní text',
-          cta: 'Objednat termín',
+          title: 'Therapist Studio - uvodni sekce',
+          subtitle: 'Individual sessions for adults - uvodni text',
+          cta: 'Book appointment now',
         },
         about: {
-          body: 'Upravený text O mně.',
+          body: 'Individual sessions for adults v overenem bezpecnem prostredi.',
         },
       },
       portraitImage: {
@@ -76,10 +76,10 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(artifacts.indexHtml).toContain('</html>');
     expect(artifacts.indexHtml).toContain('Úvod');
-    expect(artifacts.indexHtml).toContain('Nová úvodní sekce');
-    expect(artifacts.indexHtml).toContain('Personalizovaný úvodní text');
-    expect(artifacts.indexHtml).toContain('Objednat termín');
-    expect(artifacts.indexHtml).toContain('Upravený text O mně.');
+    expect(artifacts.indexHtml).toContain('Therapist Studio - uvodni sekce');
+    expect(artifacts.indexHtml).toContain('Individual sessions for adults - uvodni text');
+    expect(artifacts.indexHtml).toContain('Book appointment now');
+    expect(artifacts.indexHtml).toContain('Individual sessions for adults v overenem bezpecnem prostredi.');
     expect(artifacts.indexHtml).toContain('O mně');
     expect(artifacts.indexHtml).toContain('Přístup a vzdělávání');
     expect(artifacts.indexHtml).toContain('Témata');
@@ -662,5 +662,94 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(errors.join(' | ')).toContain('internal marker: project prompt:');
     expect(errors.join(' | ')).toContain('unresolved template tokens');
+  });
+
+  it('prevents cross-domain contamination from stale copy overrides between runs', () => {
+    const psychologistVerified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Calm Mind Studio',
+      projectPrompt: [
+        'About: Poskytuji individualni terapii se zamerenim na uzkost a dlouhodoby stres.',
+        'Approach: Kombinuji stabilizacni techniky a dlouhodoby terapeuticky plan.',
+        'Services: Individualni terapie, Krizova podpora',
+      ].join('\n'),
+    });
+
+    const psychologistSections = buildDeterministicWebsiteCopySections({
+      projectName: 'Calm Mind Studio',
+      verified: psychologistVerified,
+    });
+
+    const hotelVerified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Alpine Harbor Hotel',
+      projectPrompt: [
+        'Hero: Alpine Harbor Hotel',
+        'Services: Ubytovani, Wellness, Restaurace',
+        'Pricing: Od 3200 Kc / noc',
+        'Contact: reception@alpineharbor.example, +420 777 555 111',
+      ].join('\n'),
+    });
+
+    const hotelArtifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Alpine Harbor Hotel',
+      projectDescription: 'Public website',
+      verified: hotelVerified,
+      copySections: {
+        about: psychologistSections.about,
+        approach: psychologistSections.approach,
+      },
+    });
+
+    expect(hotelArtifacts.indexHtml).toContain('Alpine Harbor Hotel');
+    expect(hotelArtifacts.indexHtml.toLowerCase()).not.toContain('terapi');
+    expect(hotelArtifacts.indexHtml.toLowerCase()).not.toContain('terapeut');
+    expect(hotelArtifacts.indexHtml.toLowerCase()).not.toContain('uzkost');
+  });
+
+  it('uses domain-neutral fallback copy when about and approach facts are missing', () => {
+    const hotelVerified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Harbor View Hotel',
+      projectPrompt: [
+        'Hero: Harbor View Hotel',
+        'Contact: reception@harborview.example',
+      ].join('\n'),
+    });
+
+    const sections = buildDeterministicWebsiteCopySections({
+      projectName: 'Harbor View Hotel',
+      verified: hotelVerified,
+    });
+
+    const mergedCopy = `${sections.about.body} ${sections.approach.body}`.toLowerCase();
+    expect(mergedCopy).toContain('overeni aktualnich podkladu');
+    expect(mergedCopy).toContain('potvrzeni overenych podkladu');
+    expect(mergedCopy).not.toContain('terapi');
+    expect(mergedCopy).not.toContain('personal growth');
+  });
+
+  it('keeps website content model isolated across sequential runs', () => {
+    const runA = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Psychology Room',
+      projectPrompt: 'About: Terapie pro uzkost a stres. Services: Individualni terapie.',
+    });
+    const runAArtifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Psychology Room',
+      projectDescription: 'Public website',
+      verified: runA,
+    });
+
+    const runB = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Mountain Lake Hotel',
+      projectPrompt: 'Services: Ubytovani, Snidane, Wellness. Pricing: Od 2800 Kc / noc.',
+    });
+    const runBArtifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Mountain Lake Hotel',
+      projectDescription: 'Public website',
+      verified: runB,
+    });
+
+    expect(runAArtifacts.indexHtml.toLowerCase()).toContain('terapi');
+    expect(runBArtifacts.indexHtml).toContain('Mountain Lake Hotel');
+    expect(runBArtifacts.indexHtml.toLowerCase()).not.toContain('psychology room');
+    expect(runBArtifacts.indexHtml.toLowerCase()).not.toContain('terapi');
   });
 });

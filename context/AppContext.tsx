@@ -518,10 +518,19 @@ function shouldUseStructuredOnlyStage(artifactPath: string): boolean {
   ].includes(artifactPath);
 }
 
-function getLatestArtifactContent(tasks: Task[], artifactPath: string): string | null {
+type ArtifactLookupScope = {
+  minGeneratedAtMs?: number;
+};
+
+function getLatestArtifactContent(tasks: Task[], artifactPath: string, scope?: ArtifactLookupScope): string | null {
   for (const task of [...tasks].reverse()) {
     const artifact = task.producesArtifacts.find((entry) => entry.path === artifactPath);
     if (!artifact) continue;
+    if (scope?.minGeneratedAtMs) {
+      if (!artifact.generatedAt) continue;
+      const generatedAt = new Date(artifact.generatedAt).getTime();
+      if (generatedAt < scope.minGeneratedAtMs) continue;
+    }
     if (artifact.rawContent?.trim()) return artifact.rawContent;
     if (artifact.content?.trim()) return artifact.content;
   }
@@ -1437,6 +1446,8 @@ type SegmentedWebsiteContentModel = {
   schemaVersion: 1;
   type: 'ai-boardroom-segmented-website-content-model';
   generatedAt: string;
+  snapshotId: string;
+  cycleNumber: number;
   language: AppLanguage;
   sourceMode: 'ingestion' | 'prompt-only' | 'hybrid';
   verified: VerifiedWebsiteContent;
@@ -1475,6 +1486,8 @@ function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: Ex
     schemaVersion: 1,
     type: 'ai-boardroom-segmented-website-content-model',
     generatedAt: new Date().toISOString(),
+    snapshotId: snapshot.id,
+    cycleNumber: snapshot.cycleNumber,
     language: project.language,
     sourceMode,
     verified,
@@ -1486,8 +1499,17 @@ function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: Ex
   };
 }
 
-function resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks: Task[]): SegmentedWebsiteContentModel | null {
-  const raw = getLatestArtifactContent(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH);
+function resolveSegmentedWebsiteContentModelFromTaskArtifacts(
+  tasks: Task[],
+  scope?: {
+    snapshotId?: string;
+    cycleNumber?: number;
+    minGeneratedAtMs?: number;
+  }
+): SegmentedWebsiteContentModel | null {
+  const raw = getLatestArtifactContent(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, {
+    minGeneratedAtMs: scope?.minGeneratedAtMs,
+  });
   if (!raw?.trim()) return null;
 
   try {
@@ -1495,14 +1517,23 @@ function resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks: Task[]): Se
     if (!parsed || typeof parsed !== 'object') return null;
     if (parsed.type !== 'ai-boardroom-segmented-website-content-model') return null;
     if (!parsed.verified || !parsed.copySections) return null;
+    if (scope?.snapshotId && parsed.snapshotId !== scope.snapshotId) return null;
+    if (scope?.cycleNumber && parsed.cycleNumber !== scope.cycleNumber) return null;
     return parsed as SegmentedWebsiteContentModel;
   } catch {
     return null;
   }
 }
 
-function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<WebsiteCopySections> {
-  const model = resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks);
+function resolveWebsiteCopySectionsFromTaskArtifacts(
+  tasks: Task[],
+  scope?: {
+    snapshotId?: string;
+    cycleNumber?: number;
+    minGeneratedAtMs?: number;
+  }
+): Partial<WebsiteCopySections> {
+  const model = resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks, scope);
   if (model?.copySections) {
     return model.copySections;
   }
@@ -1510,7 +1541,9 @@ function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<Web
   const output: Partial<WebsiteCopySections> = {};
 
   SEGMENTED_WEBSITE_COPY_ARTIFACTS.forEach((entry) => {
-    const raw = getLatestArtifactContent(tasks, entry.path);
+    const raw = getLatestArtifactContent(tasks, entry.path, {
+      minGeneratedAtMs: scope?.minGeneratedAtMs,
+    });
     if (!raw?.trim()) return;
     try {
       const parsed = JSON.parse(raw);
@@ -5881,8 +5914,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               (isSegmentedWebsiteCopyArtifactPath(artifact.path) ||
                 isSegmentedWebsiteSourceArtifactPath(artifact.path))
             ) {
+              const websiteArtifactScope = {
+                snapshotId: snapshot.id,
+                cycleNumber: snapshot.cycleNumber,
+                minGeneratedAtMs: new Date(snapshot.createdAt).getTime(),
+              };
               const websiteModel =
-                resolveSegmentedWebsiteContentModelFromTaskArtifacts(project.tasks) ??
+                resolveSegmentedWebsiteContentModelFromTaskArtifacts(project.tasks, websiteArtifactScope) ??
                 buildSegmentedWebsiteContentModelPayload(project, snapshot);
               const verifiedContent = websiteModel?.verified ?? deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
               if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
@@ -5931,7 +5969,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 continue;
               }
 
-              const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(project.tasks);
+              const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(
+                project.tasks,
+                websiteArtifactScope
+              );
 
               const websiteArtifacts = buildDeterministicWebsiteArtifacts({
                 projectName: project.name,
@@ -6003,9 +6044,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               artifact.path === 'generated-files.json' &&
               shouldUseSegmentedWebsiteBuild(project, snapshot)
             ) {
-              const indexHtml = getLatestArtifactContent(project.tasks, 'index.html');
-              const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css');
-              const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js');
+              const websiteArtifactScope = {
+                minGeneratedAtMs: new Date(snapshot.createdAt).getTime(),
+              };
+              const indexHtml = getLatestArtifactContent(project.tasks, 'index.html', websiteArtifactScope);
+              const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css', websiteArtifactScope);
+              const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js', websiteArtifactScope);
               const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
 
               if (!indexHtml?.trim()) {

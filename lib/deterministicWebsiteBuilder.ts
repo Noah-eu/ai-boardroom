@@ -148,6 +148,90 @@ const GENERIC_PRICING_PLACEHOLDER_PATTERNS = [
   /\bdle\s+domluvy\b/i,
 ];
 
+const PROVENANCE_STOPWORDS = new Set([
+  'a',
+  'and',
+  'the',
+  'for',
+  'with',
+  'from',
+  'that',
+  'this',
+  'will',
+  'are',
+  'you',
+  'your',
+  'our',
+  'about',
+  'to',
+  'na',
+  'pro',
+  've',
+  'po',
+  'jsou',
+  'bude',
+  'budou',
+  'vase',
+  'nase',
+  'zde',
+  'vice',
+]);
+
+const NEUTRAL_FALLBACK_COPY = {
+  cz: {
+    heroSubtitle: 'Overene informace o tomto webu budou doplneny po finalizaci podkladu.',
+    about: 'Informace o projektu budou doplneny po overeni aktualnich podkladu.',
+    approach: 'Postup realizace bude upresnen po potvrzeni overenych podkladu.',
+  },
+  en: {
+    heroSubtitle: 'Verified website information will be added after the current source review is complete.',
+    about: 'Project details will be added after current source verification is complete.',
+    approach: 'Implementation details will be added after the verified source review is complete.',
+  },
+} as const;
+
+function tokenizeForProvenance(value: string): string[] {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4 && !PROVENANCE_STOPWORDS.has(token));
+}
+
+function hasProvenanceOverlap(candidate: string, facts: string[]): boolean {
+  const candidateTokens = uniq(tokenizeForProvenance(candidate), 40);
+  if (candidateTokens.length === 0) return false;
+
+  const factTokens = new Set<string>();
+  facts.forEach((fact) => {
+    tokenizeForProvenance(fact).forEach((token) => factTokens.add(token));
+  });
+
+  if (factTokens.size === 0) return false;
+
+  let overlap = 0;
+  for (const token of candidateTokens) {
+    if (factTokens.has(token)) {
+      overlap += 1;
+    }
+  }
+
+  return overlap >= 2 || (candidateTokens.length <= 3 && overlap >= 1);
+}
+
+function isNeutralFallbackText(value: string, language: AppLanguage): boolean {
+  const normalized = normalizeWhitespace(value).toLowerCase();
+  const fallback = NEUTRAL_FALLBACK_COPY[language === 'en' ? 'en' : 'cz'];
+  return (
+    normalized === normalizeWhitespace(fallback.heroSubtitle).toLowerCase() ||
+    normalized === normalizeWhitespace(fallback.about).toLowerCase() ||
+    normalized === normalizeWhitespace(fallback.approach).toLowerCase()
+  );
+}
+
 const CONTENT_BEARING_TEXT_HINT = /\b(od|from|podpora|support|konzult|session|sezen|terapi|counsel|care|approach|metoda|experience|specializ|zam[eě]r|pracuji|offer|provide)\b/i;
 const GENERIC_WEBSITE_TITLE_PATTERN = /^(website|web\s*site|site|landing\s*page|home\s*page|homepage|company\s*website)$/i;
 
@@ -678,6 +762,26 @@ function buildPublicWebsiteViewModel(params: {
     ...verifiedServices,
   ]);
 
+  const provenanceFacts = uniq(
+    [
+      title,
+      ...sanitizedHeadings,
+      ...bodyFacts,
+      ...verifiedServices,
+      ...verifiedPricing,
+      ...sanitizedCtaTexts,
+      ...sanitizedEmails,
+      ...sanitizedPhones,
+      ...addressCandidates,
+    ],
+    200
+  );
+
+  const isProvenanceSafeOverride = (value: string | null | undefined): boolean => {
+    if (!value?.trim()) return false;
+    return isNeutralFallbackText(value, language) || hasProvenanceOverlap(value, provenanceFacts);
+  };
+
   const contact = {
     email: extractFirstEmail(sanitizedEmails[0] ?? null),
     phone: normalizePhoneDisplay(sanitizedPhones[0] ?? null),
@@ -691,10 +795,10 @@ function buildPublicWebsiteViewModel(params: {
     (language === 'cz'
       ? primaryService
         ? `Bezpečný prostor pro změnu a porozumění se zaměřením na ${primaryService}.`
-        : 'Bezpečný prostor pro změnu a porozumění.'
+        : NEUTRAL_FALLBACK_COPY.cz.heroSubtitle
       : primaryService
       ? `Professional support focused on ${primaryService}.`
-      : 'Professional support for sustainable personal growth.');
+      : NEUTRAL_FALLBACK_COPY.en.heroSubtitle);
   const aboutSeed =
     normalizePublicParagraph(bodyFacts[0]) ??
     normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o mne|experience|specializ|podpora)\b/i.test(entry))) ??
@@ -704,10 +808,10 @@ function buildPublicWebsiteViewModel(params: {
     language === 'cz'
       ? services.length > 0
         ? `Nabízím citlivý a praktický přístup zaměřený na ${services.slice(0, 2).join(' a ')}.`
-        : 'Nabízím bezpečný prostor pro hledání stabilního a dlouhodobě udržitelného směru.'
+        : NEUTRAL_FALLBACK_COPY.cz.about
       : services.length > 0
       ? `I offer a practical and sensitive approach focused on ${services.slice(0, 2).join(' and ')}.`
-      : 'I offer a safe and practical space for long-term personal growth.';
+      : NEUTRAL_FALLBACK_COPY.en.about;
   const approachSeed =
     normalizePublicParagraph(bodyFacts[1]) ??
     normalizePublicParagraph(bodyFacts.find((entry) => /\b(pristup|approach|method|metoda|vzd[eě]l[aá]v[aá]n[ií]|education)\b/i.test(entry))) ??
@@ -719,27 +823,40 @@ function buildPublicWebsiteViewModel(params: {
         ? `Pracuji strukturovaně a srozumitelně. Vzdělávání a dlouhodobý rozvoj propojuji s tématy: ${topics
             .slice(0, 3)
             .join(', ')}.`
-        : 'Pracuji strukturovaně, s důrazem na bezpečí, respekt a dlouhodobý rozvoj.'
+        : NEUTRAL_FALLBACK_COPY.cz.approach
       : topics.length > 0
       ? `I work in a structured way and connect education with long-term growth around: ${topics.slice(0, 3).join(', ')}.`
-      : 'I work in a structured way with emphasis on safety, respect, and long-term growth.';
+      : NEUTRAL_FALLBACK_COPY.en.approach;
 
   const sectionOverrides = params.copySections ?? {};
 
-  const heroOverrideTitle = sanitizePublicText(sectionOverrides.hero?.title);
-  const heroOverrideSubtitle = sanitizePublicText(sectionOverrides.hero?.subtitle);
-  const heroOverrideCta = sanitizePublicText(sectionOverrides.hero?.cta);
-  const aboutOverride = sanitizePublicText(sectionOverrides.about?.body);
-  const approachOverride = sanitizePublicText(sectionOverrides.approach?.body);
-  const topicsOverride = sanitizePublicList(sectionOverrides.topics?.items ?? [], 6, {
+  const heroOverrideTitleRaw = sanitizePublicText(sectionOverrides.hero?.title);
+  const heroOverrideSubtitleRaw = sanitizePublicText(sectionOverrides.hero?.subtitle);
+  const heroOverrideCtaRaw = sanitizePublicText(sectionOverrides.hero?.cta);
+  const aboutOverrideRaw = sanitizePublicText(sectionOverrides.about?.body);
+  const approachOverrideRaw = sanitizePublicText(sectionOverrides.approach?.body);
+  const topicsOverrideRaw = sanitizePublicList(sectionOverrides.topics?.items ?? [], 6, {
     rejectNavigationLabels: true,
   });
-  const servicesOverride = sanitizePublicList(sectionOverrides.servicesPricing?.services ?? [], 8, {
+  const servicesOverrideRaw = sanitizePublicList(sectionOverrides.servicesPricing?.services ?? [], 8, {
     rejectNavigationLabels: true,
   });
-  const pricingOverride = normalizePricingRows(sanitizePublicList(sectionOverrides.servicesPricing?.pricing ?? [], 20));
-  const contactIntroOverride = sanitizePublicText(sectionOverrides.contact?.intro);
-  const mapOverride = sanitizePublicText(sectionOverrides.map?.body);
+  const pricingOverrideRaw = normalizePricingRows(sanitizePublicList(sectionOverrides.servicesPricing?.pricing ?? [], 20));
+  const contactIntroOverrideRaw = sanitizePublicText(sectionOverrides.contact?.intro);
+  const mapOverrideRaw = sanitizePublicText(sectionOverrides.map?.body);
+
+  const heroOverrideTitle = isProvenanceSafeOverride(heroOverrideTitleRaw) ? heroOverrideTitleRaw : null;
+  const heroOverrideSubtitle = isProvenanceSafeOverride(heroOverrideSubtitleRaw) ? heroOverrideSubtitleRaw : null;
+  const heroOverrideCta = isProvenanceSafeOverride(heroOverrideCtaRaw) ? heroOverrideCtaRaw : null;
+  const aboutOverride = isProvenanceSafeOverride(aboutOverrideRaw) ? aboutOverrideRaw : null;
+  const approachOverride = isProvenanceSafeOverride(approachOverrideRaw) ? approachOverrideRaw : null;
+  const topicsOverride = topicsOverrideRaw.filter((entry) => isProvenanceSafeOverride(entry));
+  const servicesOverride = servicesOverrideRaw.filter((entry) => isProvenanceSafeOverride(entry));
+  const pricingOverride = pricingOverrideRaw.filter(
+    (entry) => isProvenanceSafeOverride(entry) || /^\d/.test(entry) || /\b(czk|eur|usd|k[čc]|\$|€)\b/i.test(entry)
+  );
+  const contactIntroOverride = isProvenanceSafeOverride(contactIntroOverrideRaw) ? contactIntroOverrideRaw : null;
+  const mapOverride = isProvenanceSafeOverride(mapOverrideRaw) ? mapOverrideRaw : null;
 
   const heroTitle = normalizeWhitespace(heroOverrideTitle ?? title);
   const heroSubtitle = normalizeWhitespace(heroOverrideSubtitle ?? defaultHeroSubtitle);
