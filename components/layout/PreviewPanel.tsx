@@ -156,7 +156,29 @@ function resolveBundlePreviewHtml(bundle: ExecutionOutputBundle): string | null 
     }
   );
 
-  let html = inlineLinkedScripts;
+  const inlineLinkedImages = inlineLinkedScripts.replace(
+    /<img\b([^>]*?)src=["']([^"']+)["']([^>]*)>/gi,
+    (match, before, src, after) => {
+      if (/^(https?:)?\/\//i.test(src) || src.startsWith('data:')) {
+        return match;
+      }
+      const linkedFile = findBundleFile(bundle, src);
+      if (!linkedFile || !isBase64EncodedBundleFileContent(linkedFile.path, linkedFile.content)) {
+        return match;
+      }
+      const lower = linkedFile.path.toLowerCase();
+      const mime = lower.endsWith('.png')
+        ? 'image/png'
+        : lower.endsWith('.webp')
+        ? 'image/webp'
+        : lower.endsWith('.gif')
+        ? 'image/gif'
+        : 'image/jpeg';
+      return `<img${before}src="data:${mime};base64,${decodeBase64BundleFileContent(linkedFile.content)}"${after}>`;
+    }
+  );
+
+  let html = inlineLinkedImages;
   const hasInlineStyle = /<style\b/i.test(html);
   const hasInlineScript = /<script\b/i.test(html);
   const defaultStyle = findBundleFile(bundle, 'style.css');

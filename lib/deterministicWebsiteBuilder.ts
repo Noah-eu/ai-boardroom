@@ -20,6 +20,30 @@ export type DeterministicWebsiteArtifacts = {
   scriptJs: string;
 };
 
+export type WebsitePortraitImage = {
+  src: string;
+  alt: string;
+};
+
+type PublicWebsiteViewModel = {
+  title: string;
+  heroTitle: string;
+  heroSubtitle: string;
+  aboutCopy: string;
+  approachCopy: string;
+  topics: string[];
+  services: string[];
+  pricing: string[];
+  contact: {
+    email: string | null;
+    phone: string | null;
+    address: string | null;
+  };
+  primaryCta: string;
+  sourceUrl: string | null;
+  mapUrl: string | null;
+};
+
 function uniq(values: string[], max = 20): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -46,6 +70,246 @@ function escapeHtml(value: string): string {
 
 function humanTitle(value: string): string {
   return value.replace(/\s+/g, ' ').trim() || 'Website';
+}
+
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizePhoneForTel(value: string): string {
+  return value.replace(/[^\d+]/g, '');
+}
+
+function toPublicCurrency(value: string): string {
+  const upper = value.toUpperCase();
+  if (upper === 'KC' || upper === 'KČ') return 'Kc';
+  return upper;
+}
+
+function normalizePricingLine(value: string): string | null {
+  const cleaned = normalizeWhitespace(value);
+  if (!cleaned) return null;
+
+  const match = cleaned.match(/([0-9][0-9\s.,]{0,20})(?:\s*)(Kc|Kč|CZK|EUR|USD|€|\$)/i);
+  if (!match) return null;
+
+  const amount = match[1].replace(/\s+/g, ' ').trim();
+  const currency = toPublicCurrency(match[2]);
+  const prefix = /\b(from|od)\b/i.test(cleaned) ? 'Od ' : '';
+  return `${prefix}${amount} ${currency}`;
+}
+
+function buildMapUrl(address: string | null): string | null {
+  if (!address) return null;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+}
+
+function buildPublicWebsiteViewModel(params: {
+  projectName: string;
+  verified: VerifiedWebsiteContent;
+}): PublicWebsiteViewModel {
+  const title = humanTitle(params.verified.pageTitle || params.projectName || 'Website');
+
+  const services = uniq(
+    (params.verified.serviceNames.length > 0 ? params.verified.serviceNames : params.verified.headings).slice(0, 12),
+    8
+  );
+
+  const topics = uniq(
+    params.verified.headings
+      .filter((entry) => !/kontakt|contact|mapa|pricing|price|cen/i.test(entry))
+      .slice(0, 10),
+    6
+  );
+
+  const pricing = uniq(
+    params.verified.pricingFields
+      .map((entry) => normalizePricingLine(entry))
+      .filter((entry): entry is string => Boolean(entry)),
+    8
+  );
+
+  const contact = {
+    email: params.verified.emails[0] ?? null,
+    phone: params.verified.phones[0] ?? null,
+    address: params.verified.addresses[0] ?? null,
+  };
+
+  const primaryService = services[0] ?? topics[0] ?? 'individually tailored care';
+  const heroSubtitle = `Professional support focused on ${primaryService}.`;
+  const aboutCopy =
+    services.length > 0
+      ? `Nabizim citlivy a prakticky pristup zamereny na ${services.slice(0, 2).join(' a ')}.`
+      : 'Nabizim bezpecny prostor pro hledani stabilniho a dlouhodobe udrzitelneho smeru.';
+  const approachCopy =
+    topics.length > 0
+      ? `Pracuji strukturovane a srozumitelne. Vzdelavani a dlouhodoby rozvoj propojuji s tematy: ${topics
+          .slice(0, 3)
+          .join(', ')}.`
+      : 'Pracuji strukturovane, s durazem na bezpeci, respekt a dlouhodoby rozvoj.';
+
+  return {
+    title,
+    heroTitle: title,
+    heroSubtitle,
+    aboutCopy,
+    approachCopy,
+    topics: topics.length > 0 ? topics : ['Podpora v narocnych zivotnich situacich', 'Stabilizace a prevence pretizeni'],
+    services: services.length > 0 ? services : ['Individualni konzultace', 'Dlouhodoba podpora'],
+    pricing: pricing.length > 0 ? pricing : ['Cenik na vyzadani'],
+    contact,
+    primaryCta: params.verified.ctaTexts[0] ?? 'Domluvit konzultaci',
+    sourceUrl: params.verified.sourceUrl,
+    mapUrl: buildMapUrl(contact.address),
+  };
+}
+
+function buildPublicHtml(params: {
+  model: PublicWebsiteViewModel;
+  portraitImage?: WebsitePortraitImage | null;
+}): string {
+  const { model, portraitImage } = params;
+  const contactEmail = model.contact.email
+    ? `<p><strong>E-mail:</strong> <a href="mailto:${escapeHtml(model.contact.email)}">${escapeHtml(model.contact.email)}</a></p>`
+    : '<p><strong>E-mail:</strong> Na vyzadani.</p>';
+
+  const contactPhone = model.contact.phone
+    ? `<p><strong>Telefon:</strong> <a href="tel:${escapeHtml(normalizePhoneForTel(model.contact.phone))}">${escapeHtml(model.contact.phone)}</a></p>`
+    : '<p><strong>Telefon:</strong> Na vyzadani.</p>';
+
+  const contactAddress = model.contact.address
+    ? `<p><strong>Adresa:</strong> ${escapeHtml(model.contact.address)}</p>`
+    : '<p><strong>Adresa:</strong> Upresnime pri domluve.</p>';
+
+  const topicsMarkup = model.topics.map((topic) => `<li>${escapeHtml(topic)}</li>`).join('\n');
+  const servicesMarkup = model.services.map((service) => `<li>${escapeHtml(service)}</li>`).join('\n');
+  const pricingMarkup = model.pricing.map((price) => `<li>${escapeHtml(price)}</li>`).join('\n');
+
+  const portraitMarkup = portraitImage
+    ? [
+        '<figure class="portrait">',
+        `  <img src="${escapeHtml(portraitImage.src)}" alt="${escapeHtml(portraitImage.alt)}" loading="lazy" decoding="async" />`,
+        '</figure>',
+      ].join('\n')
+    : '';
+
+  const mapMarkup = model.mapUrl
+    ? `<p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">Otevrit mapu</a></p>`
+    : '<p>Mapa bude doplnena po potvrzeni presne adresy.</p>';
+
+  return [
+    '<!doctype html>',
+    '<html lang="cs">',
+    '<head>',
+    '  <meta charset="utf-8" />',
+    '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
+    `  <title>${escapeHtml(model.title)}</title>`,
+    model.sourceUrl ? `  <meta name="source-url" content="${escapeHtml(model.sourceUrl)}" />` : '',
+    '  <link rel="stylesheet" href="styles.css" />',
+    '</head>',
+    '<body>',
+    '  <header id="hero" class="hero">',
+    '    <p class="section-label">Hero</p>',
+    `    <h1>${escapeHtml(model.heroTitle)}</h1>`,
+    `    <p class="hero-subtitle">${escapeHtml(model.heroSubtitle)}</p>`,
+    '    <a class="cta" href="#kontakt">',
+    `      ${escapeHtml(model.primaryCta)}`,
+    '    </a>',
+    portraitMarkup,
+    '  </header>',
+    '',
+    '  <main>',
+    '    <section id="o-mne" class="card">',
+    '      <h2>O mne</h2>',
+    `      <p>${escapeHtml(model.aboutCopy)}</p>`,
+    '    </section>',
+    '',
+    '    <section id="pristup-vzdelavani" class="card">',
+    '      <h2>Pristup a vzdelavani</h2>',
+    `      <p>${escapeHtml(model.approachCopy)}</p>`,
+    '    </section>',
+    '',
+    '    <section id="temata" class="card">',
+    '      <h2>Temata</h2>',
+    '      <ul>',
+    topicsMarkup,
+    '      </ul>',
+    '    </section>',
+    '',
+    '    <section id="sluzby-ceny" class="card">',
+    '      <h2>Sluzby a ceny</h2>',
+    '      <div class="split">',
+    '        <div>',
+    '          <h3>Sluzby</h3>',
+    '          <ul>',
+    servicesMarkup,
+    '          </ul>',
+    '        </div>',
+    '        <div>',
+    '          <h3>Ceny</h3>',
+    '          <ul>',
+    pricingMarkup,
+    '          </ul>',
+    '        </div>',
+    '      </div>',
+    '    </section>',
+    '',
+    '    <section id="kontakt" class="card">',
+    '      <h2>Kontakt</h2>',
+    contactEmail,
+    contactPhone,
+    contactAddress,
+    '    </section>',
+    '',
+    '    <section id="mapa" class="card">',
+    '      <h2>Mapa</h2>',
+    mapMarkup,
+    '    </section>',
+    '  </main>',
+    '',
+    '  <script src="script.js"></script>',
+    '</body>',
+    '</html>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+export function validatePublicWebsiteHtml(indexHtml: string, rawPrompt?: string | null): string[] {
+  const errors: string[] = [];
+  const lower = indexHtml.toLowerCase();
+
+  const forbiddenLabels = [
+    'verified source snapshot',
+    'missing fields reported by ingestion',
+    'structured snapshot',
+    'debug',
+    'raw extracted',
+    'extractionwarning',
+  ];
+
+  forbiddenLabels.forEach((marker) => {
+    if (lower.includes(marker)) {
+      errors.push(`Public HTML contains internal marker: ${marker}`);
+    }
+  });
+
+  const prompt = normalizeWhitespace(rawPrompt ?? '');
+  if (prompt.length >= 24) {
+    const promptNeedles = uniq(
+      prompt
+        .split(/[\n.!?]/)
+        .map((entry) => normalizeWhitespace(entry))
+        .filter((entry) => entry.length >= 24),
+      3
+    ).map((entry) => entry.toLowerCase());
+
+    if (promptNeedles.some((needle) => lower.includes(needle))) {
+      errors.push('Public HTML appears to include raw user prompt text.');
+    }
+  }
+
+  return errors;
 }
 
 export function deriveVerifiedWebsiteContent(siteSnapshots: ExecutionSnapshot['siteSnapshots']): VerifiedWebsiteContent {
@@ -100,150 +364,52 @@ export function buildDeterministicWebsiteArtifacts(params: {
   projectName: string;
   projectDescription: string;
   verified: VerifiedWebsiteContent;
+  portraitImage?: WebsitePortraitImage | null;
 }): DeterministicWebsiteArtifacts {
-  const title = humanTitle(params.verified.pageTitle || params.projectName || 'Website');
-  const heroSubtitle = params.projectDescription.trim() || 'Generated from approved plan and verified source snapshot.';
+  const model = buildPublicWebsiteViewModel({
+    projectName: params.projectName,
+    verified: params.verified,
+  });
 
-  const navItems = params.verified.headings.slice(0, 5);
-  const serviceItems = (params.verified.serviceNames.length > 0 ? params.verified.serviceNames : params.verified.headings).slice(0, 8);
-  const priceItems = params.verified.pricingFields.slice(0, 8);
-  const cta = params.verified.ctaTexts[0] ?? 'Contact us';
-
-  const missingFieldsText =
-    params.verified.missingFields.length > 0
-      ? params.verified.missingFields.map((field) => `<li>${escapeHtml(field)}</li>`).join('\n')
-      : '<li>none</li>';
-
-  const emailLines = params.verified.emails.length
-    ? params.verified.emails
-        .map((email) => `<li><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></li>`)
-        .join('\n')
-    : '<li>Not available in source snapshot</li>';
-
-  const phoneLines = params.verified.phones.length
-    ? params.verified.phones
-        .map((phone) => `<li><a href="tel:${escapeHtml(phone)}">${escapeHtml(phone)}</a></li>`)
-        .join('\n')
-    : '<li>Not available in source snapshot</li>';
-
-  const addressLines = params.verified.addresses.length
-    ? params.verified.addresses.map((address) => `<li>${escapeHtml(address)}</li>`).join('\n')
-    : '<li>Not available in source snapshot</li>';
-
-  const serviceLines = serviceItems.length
-    ? serviceItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('\n')
-    : '<li>Service information not available in source snapshot</li>';
-
-  const priceLines = priceItems.length
-    ? priceItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('\n')
-    : '<li>Pricing information not available in source snapshot</li>';
-
-  const navLinks = navItems
-    .map((item, index) => `<a href="#section-${index + 1}">${escapeHtml(item)}</a>`)
-    .join('\n');
-
-  const sourceUrl = params.verified.sourceUrl ?? '';
-
-  const indexHtml = [
-    '<!doctype html>',
-    '<html lang="en">',
-    '<head>',
-    '  <meta charset="utf-8" />',
-    '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
-    `  <title>${escapeHtml(title)}</title>`,
-    sourceUrl ? `  <meta name="source-url" content="${escapeHtml(sourceUrl)}" />` : '',
-    '  <link rel="stylesheet" href="styles.css" />',
-    '</head>',
-    '<body>',
-    '  <header class="site-header">',
-    `    <h1>${escapeHtml(title)}</h1>`,
-    `    <p>${escapeHtml(heroSubtitle)}</p>`,
-    '    <nav class="site-nav">',
-    navLinks || '      <a href="#services">Services</a>\n      <a href="#contact">Contact</a>',
-    '    </nav>',
-    `    <a class="cta" href="#contact">${escapeHtml(cta)}</a>`,
-    '  </header>',
-    '',
-    '  <main>',
-    '    <section id="services" class="card">',
-    '      <h2>Services</h2>',
-    '      <ul>',
-    serviceLines,
-    '      </ul>',
-    '    </section>',
-    '',
-    '    <section id="pricing" class="card">',
-    '      <h2>Pricing</h2>',
-    '      <ul>',
-    priceLines,
-    '      </ul>',
-    '    </section>',
-    '',
-    '    <section id="contact" class="card">',
-    '      <h2>Contact</h2>',
-    '      <h3>Email</h3>',
-    '      <ul>',
-    emailLines,
-    '      </ul>',
-    '      <h3>Phone</h3>',
-    '      <ul>',
-    phoneLines,
-    '      </ul>',
-    '      <h3>Address</h3>',
-    '      <ul>',
-    addressLines,
-    '      </ul>',
-    '    </section>',
-    '',
-    '    <section id="verified-source" class="card">',
-    '      <h2>Verified Source Snapshot</h2>',
-    sourceUrl ? `      <p><strong>Source URL:</strong> <a href="${escapeHtml(sourceUrl)}">${escapeHtml(sourceUrl)}</a></p>` : '      <p><strong>Source URL:</strong> not provided</p>',
-    '      <p><strong>Missing fields reported by ingestion:</strong></p>',
-    '      <ul>',
-    missingFieldsText,
-    '      </ul>',
-    '    </section>',
-    '  </main>',
-    '',
-    '  <footer class="site-footer">',
-    '    <p>Built from approved execution plan and verified structured source content.</p>',
-    '  </footer>',
-    '',
-    '  <script src="script.js"></script>',
-    '</body>',
-    '</html>',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const indexHtml = buildPublicHtml({
+    model,
+    portraitImage: params.portraitImage,
+  });
 
   const stylesCss = [
     ':root {',
-    '  --bg: #f5f1e8;',
-    '  --ink: #1f2937;',
-    '  --accent: #b45309;',
-    '  --card: #fffdf7;',
+    '  --bg: #f4efe6;',
+    '  --ink: #222326;',
+    '  --accent: #1f6f5f;',
+    '  --card: #fffdfa;',
+    '  --line: #ded6ca;',
     '}',
     '* { box-sizing: border-box; }',
-    'body { margin: 0; font-family: "Georgia", "Times New Roman", serif; color: var(--ink); background: radial-gradient(circle at top right, #fff2d5, var(--bg)); }',
-    '.site-header { padding: 2rem 1.25rem; max-width: 980px; margin: 0 auto; }',
-    '.site-nav { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0; }',
-    '.site-nav a { color: var(--ink); text-decoration: none; border-bottom: 1px solid transparent; }',
-    '.site-nav a:hover { border-color: var(--accent); }',
-    '.cta { display: inline-block; background: var(--accent); color: white; text-decoration: none; padding: 0.6rem 1rem; border-radius: 999px; }',
-    'main { max-width: 980px; margin: 0 auto; padding: 0 1.25rem 2.5rem; display: grid; gap: 1rem; }',
-    '.card { background: var(--card); border: 1px solid #eadfcb; border-radius: 14px; padding: 1rem 1.1rem; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05); }',
-    '.site-footer { max-width: 980px; margin: 0 auto; padding: 0 1.25rem 2rem; color: #6b7280; }',
+    'body { margin: 0; font-family: "Lora", "Georgia", serif; color: var(--ink); background: linear-gradient(135deg, #f9f3e8 0%, #f2efe8 42%, #ecf5f2 100%); }',
+    '.hero { max-width: 980px; margin: 0 auto; padding: 2.5rem 1.25rem 1.5rem; }',
+    '.section-label { margin: 0 0 0.6rem; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; font-size: 0.78rem; }',
+    '.hero h1 { margin: 0; font-size: clamp(1.9rem, 4vw, 3.1rem); line-height: 1.1; }',
+    '.hero-subtitle { max-width: 58ch; margin-top: 0.8rem; }',
+    '.cta { display: inline-block; margin-top: 1rem; background: var(--accent); color: #ffffff; text-decoration: none; padding: 0.72rem 1.15rem; border-radius: 999px; font-weight: 600; }',
+    '.portrait { margin: 1.3rem 0 0; }',
+    '.portrait img { width: min(280px, 100%); border-radius: 16px; display: block; border: 1px solid var(--line); box-shadow: 0 10px 24px rgba(0, 0, 0, 0.1); }',
+    'main { max-width: 980px; margin: 0 auto; padding: 0 1.25rem 2.6rem; display: grid; gap: 1rem; }',
+    '.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.05rem 1.1rem; box-shadow: 0 4px 14px rgba(26, 26, 26, 0.05); }',
+    '.card h2 { margin-top: 0; }',
+    '.split { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }',
+    '.map-link { color: var(--accent); font-weight: 600; }',
     '@media (max-width: 640px) {',
-    '  .site-header { padding-top: 1.25rem; }',
+    '  .hero { padding-top: 1.3rem; }',
     '  .cta { width: 100%; text-align: center; }',
+    '  .split { grid-template-columns: 1fr; }',
     '}',
   ].join('\n');
 
   const scriptJs = [
-    "document.querySelectorAll('.site-nav a').forEach((anchor) => {",
+    "document.querySelectorAll('a[href^=\"#\"]').forEach((anchor) => {",
     "  anchor.addEventListener('click', (event) => {",
     "    const href = anchor.getAttribute('href');",
-    "    if (!href || !href.startsWith('#')) return;",
+    "    if (!href) return;",
     "    const target = document.querySelector(href);",
     "    if (!target) return;",
     '    event.preventDefault();',

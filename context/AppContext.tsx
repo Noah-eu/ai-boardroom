@@ -68,13 +68,13 @@ import {
   classifyCodeGenerationMode,
   getModeLabel,
   stabilizeCodeExecutionBundle,
-  validateWebsiteBundleSourceFiles,
 } from '@/lib/codeBundleStabilizer';
 import {
   buildDeterministicWebsiteArtifacts,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
 } from '@/lib/deterministicWebsiteBuilder';
+import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -105,7 +105,18 @@ const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const SEGMENTED_WEBSITE_NO_SCRIPT_MARKER = '__NO_SCRIPT__';
-const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
+const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = [
+  '.html',
+  '.css',
+  '.js',
+  '.json',
+  '.md',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.gif',
+] as const;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
     process.env.NEXT_PUBLIC_BUILD_MARKER ||
@@ -1873,6 +1884,94 @@ function resolveAttachmentImageUrl(attachment: ProjectAttachment): string | null
     normalizeAiImageUrl(attachment.sourceUrl) ??
     normalizeAiImageUrl(attachment.aiImageDataUrl)
   );
+}
+
+type PortraitAssetPlan = {
+  sourceUrl: string;
+  assetPath: string;
+  alt: string;
+};
+
+function inferImageExtensionFromUrl(value: string): string {
+  const match = value.toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/);
+  const ext = match?.[1] ?? '';
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+    return ext;
+  }
+  return 'jpg';
+}
+
+function inferImageExtensionFromMime(value: string | null): string {
+  const lower = (value ?? '').toLowerCase();
+  if (lower.includes('image/png')) return 'png';
+  if (lower.includes('image/webp')) return 'webp';
+  if (lower.includes('image/gif')) return 'gif';
+  if (lower.includes('image/jpeg') || lower.includes('image/jpg')) return 'jpg';
+  return 'jpg';
+}
+
+function toBase64FromBytes(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function buildPortraitAssetPlan(snapshot: ExecutionSnapshot): PortraitAssetPlan | null {
+  const portrait = snapshot.imageInputs.find((entry) => typeof entry.url === 'string' && entry.url.trim());
+  if (!portrait) return null;
+  const sourceUrl = portrait.url.trim();
+  if (!sourceUrl) return null;
+
+  const ext = sourceUrl.startsWith('data:image/')
+    ? inferImageExtensionFromMime(sourceUrl.slice(5, sourceUrl.indexOf(';') > 5 ? sourceUrl.indexOf(';') : undefined))
+    : inferImageExtensionFromUrl(sourceUrl);
+
+  const alt = (portrait.description ?? portrait.title ?? 'Portrait').trim() || 'Portrait';
+  return {
+    sourceUrl,
+    assetPath: `assets/portrait.${ext}`,
+    alt,
+  };
+}
+
+async function materializePortraitBundleFile(plan: PortraitAssetPlan): Promise<ExecutionOutputFile | null> {
+  if (plan.sourceUrl.startsWith('data:image/')) {
+    const dataMatch = plan.sourceUrl.match(/^data:image\/[^;]+;base64,(.+)$/i);
+    if (!dataMatch?.[1]) {
+      return null;
+    }
+    return {
+      path: plan.assetPath,
+      content: `base64:${dataMatch[1]}`,
+    };
+  }
+
+  try {
+    const response = await fetch(plan.sourceUrl);
+    if (!response.ok) {
+      return null;
+    }
+    const mime = response.headers.get('content-type');
+    if (mime && !mime.toLowerCase().startsWith('image/')) {
+      return null;
+    }
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length === 0) {
+      return null;
+    }
+    const base64 = toBase64FromBytes(bytes);
+    return {
+      path: plan.assetPath,
+      content: `base64:${base64}`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeBucketName(value?: string | null): string | null {
@@ -5405,6 +5504,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectName: project.name,
                 projectDescription: project.description,
                 verified: verifiedContent,
+                portraitImage: (() => {
+                  const portraitPlan = buildPortraitAssetPlan(snapshot);
+                  if (!portraitPlan) return null;
+                  return {
+                    src: portraitPlan.assetPath,
+                    alt: portraitPlan.alt,
+                  };
+                })(),
               });
 
               const selectedContent =
@@ -5471,40 +5578,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 return;
               }
 
-              const includeScript = Boolean(
-                scriptJsRaw?.trim() && scriptJsRaw.trim() !== SEGMENTED_WEBSITE_NO_SCRIPT_MARKER
-              );
+              const portraitPlan = buildPortraitAssetPlan(snapshot);
+              const portraitBundleFile = portraitPlan
+                ? await materializePortraitBundleFile(portraitPlan)
+                : null;
 
-              const sourceValidation = validateWebsiteBundleSourceFiles({
-                files: [
-                  { path: 'index.html', content: indexHtml },
-                  { path: 'styles.css', content: stylesCss },
-                  ...(includeScript ? [{ path: 'script.js', content: scriptJsRaw as string }] : []),
-                ],
+              const assembled = assembleSegmentedWebsiteSeedBundle({
+                indexHtml,
+                stylesCss,
+                scriptJsRaw,
+                noScriptMarker: SEGMENTED_WEBSITE_NO_SCRIPT_MARKER,
                 sourceUrl,
+                rawProjectPrompt: snapshot.projectPrompt,
+                portraitRequirement: portraitPlan
+                  ? {
+                      assetPath: portraitPlan.assetPath,
+                      materializedFile: portraitBundleFile,
+                    }
+                  : null,
               });
 
-              if (!sourceValidation.ok) {
+              if (!assembled.ok) {
                 failLiveTask(
                   task.agent,
-                  `${task.agent}: segmented website artifacts failed integrity validation: ${sourceValidation.errors.join(' | ')}`
+                  `${task.agent}: ${assembled.error}`
                 );
                 return;
               }
 
-              const seedBundle: ExecutionOutputBundle = {
-                status: 'success',
-                summary: 'Segmented website artifacts assembled into deterministic bundle.',
-                files: sourceValidation.files,
-                notes: [
-                  'generated-files.json assembled locally from segmented website artifacts (index/styles/script).',
-                  includeScript ? 'script.js included.' : 'script.js omitted (no script needed).',
-                ],
-                removePaths: [],
-              };
-
               const stabilized = stabilizeCodeExecutionBundle({
-                bundle: seedBundle,
+                bundle: assembled.bundle,
                 projectName: project.name,
                 projectDescription: project.description,
                 latestRevisionFeedback: project.latestRevisionFeedback,

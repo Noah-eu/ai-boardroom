@@ -3,6 +3,7 @@ import {
   buildDeterministicWebsiteArtifacts,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
+  validatePublicWebsiteHtml,
 } from './deterministicWebsiteBuilder';
 
 describe('deterministicWebsiteBuilder', () => {
@@ -44,15 +45,37 @@ describe('deterministicWebsiteBuilder', () => {
 
     const artifacts = buildDeterministicWebsiteArtifacts({
       projectName: 'Therapist web',
-      projectDescription: 'Modern therapist website',
+      projectDescription: 'Create modern therapist website and include debug report from source snapshot.',
       verified,
+      portraitImage: {
+        src: 'assets/portrait.jpg',
+        alt: 'Portrait',
+      },
     });
 
     expect(artifacts.indexHtml).toContain('</html>');
+    expect(artifacts.indexHtml).toContain('Hero');
+    expect(artifacts.indexHtml).toContain('O mne');
+    expect(artifacts.indexHtml).toContain('Pristup a vzdelavani');
+    expect(artifacts.indexHtml).toContain('Temata');
+    expect(artifacts.indexHtml).toContain('Sluzby a ceny');
+    expect(artifacts.indexHtml).toContain('Kontakt');
+    expect(artifacts.indexHtml).toContain('Mapa');
     expect(artifacts.indexHtml).toContain('hello@example.com');
-    expect(artifacts.indexHtml).toContain('From 1500 Kč / session');
+    expect(artifacts.indexHtml).toContain('Od 1500 Kc');
+    expect(artifacts.indexHtml).toContain('assets/portrait.jpg');
+    expect(artifacts.indexHtml).not.toContain('Verified Source Snapshot');
+    expect(artifacts.indexHtml).not.toContain('missing fields reported by ingestion');
+    expect(artifacts.indexHtml).not.toContain('Create modern therapist website and include debug report from source snapshot.');
     expect(artifacts.stylesCss).toContain(':root');
     expect(artifacts.scriptJs).toContain('scrollIntoView');
+
+    expect(
+      validatePublicWebsiteHtml(
+        artifacts.indexHtml,
+        'Create modern therapist website and include debug report from source snapshot.'
+      )
+    ).toEqual([]);
   });
 
   it('flags insufficient verified content', () => {
