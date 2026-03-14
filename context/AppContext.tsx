@@ -1880,10 +1880,26 @@ function normalizeAiImageUrl(value?: string): string | null {
 
 function resolveAttachmentImageUrl(attachment: ProjectAttachment): string | null {
   return (
+    normalizeAiImageUrl(attachment.aiImageDataUrl) ??
     normalizeAiImageUrl(attachment.downloadUrl) ??
-    normalizeAiImageUrl(attachment.sourceUrl) ??
-    normalizeAiImageUrl(attachment.aiImageDataUrl)
+    normalizeAiImageUrl(attachment.sourceUrl)
   );
+}
+
+function readFileAsDataUrl(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : null;
+      resolve(value && value.startsWith('data:image/') ? value : null);
+    };
+    try {
+      reader.readAsDataURL(file);
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 type PortraitAssetPlan = {
@@ -1950,24 +1966,47 @@ async function materializePortraitBundleFile(plan: PortraitAssetPlan): Promise<E
     };
   }
 
+  const fromArrayBufferToBundleFile = (buffer: ArrayBuffer): ExecutionOutputFile | null => {
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length === 0) return null;
+    return {
+      path: plan.assetPath,
+      content: `base64:${toBase64FromBytes(bytes)}`,
+    };
+  };
+
   try {
     const response = await fetch(plan.sourceUrl);
     if (!response.ok) {
-      return null;
+      throw new Error(`HTTP ${response.status}`);
     }
     const mime = response.headers.get('content-type');
     if (mime && !mime.toLowerCase().startsWith('image/')) {
-      return null;
+      throw new Error('Non-image response');
     }
     const buffer = await response.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    if (bytes.length === 0) {
+    const direct = fromArrayBufferToBundleFile(buffer);
+    if (direct) return direct;
+  } catch {
+    // Fallback to server-side proxy materialization to avoid browser CORS failures.
+  }
+
+  try {
+    const proxyResponse = await fetch('/api/attachments/materialize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: plan.sourceUrl }),
+    });
+    if (!proxyResponse.ok) {
       return null;
     }
-    const base64 = toBase64FromBytes(bytes);
+    const payload = (await proxyResponse.json()) as { base64?: string };
+    if (!payload.base64?.trim()) {
+      return null;
+    }
     return {
       path: plan.assetPath,
-      content: `base64:${base64}`,
+      content: `base64:${payload.base64}`,
     };
   } catch {
     return null;
@@ -7533,6 +7572,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const file = attachment.file;
       const derivedKind = detectFileKind(file);
+      const localImageDataUrl = derivedKind === 'image' ? await readFileAsDataUrl(file) : null;
       const safeName = sanitizeFileName(file.name);
       const storagePath = `projects/${projectId}/attachments/${artifactId}/${safeName}`;
 
@@ -7645,14 +7685,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           storagePath,
           downloadUrl,
           sourceUrl: downloadUrl,
+          aiImageDataUrl: localImageDataUrl ?? undefined,
           ingestion: { status: 'uploaded', summary: 'File uploaded, waiting for ingestion.' },
           createdAt,
         };
 
+        const { aiImageDataUrl: _localOnlyAiImageDataUrl, ...persistableArtifact } = uploadedArtifact;
+
         const savedCollection = await persistAttachmentMetadata(
           client,
           {
-          ...uploadedArtifact,
+          ...persistableArtifact,
           createdAt: createdAt.toISOString(),
           createdBy: firebaseUid,
           },
