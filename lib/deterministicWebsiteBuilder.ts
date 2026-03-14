@@ -3,7 +3,9 @@ import { AppLanguage, ExecutionSnapshot } from '@/types';
 export type VerifiedWebsiteContent = {
   sourceUrl: string | null;
   pageTitle: string;
+  navigationLabels: string[];
   headings: string[];
+  bodyTextBlocks: string[];
   serviceNames: string[];
   pricingFields: string[];
   ctaTexts: string[];
@@ -130,6 +132,16 @@ const NAVIGATION_LABEL_PATTERNS = [
   /^mapa$/i,
 ];
 
+const GENERIC_PRICING_PLACEHOLDER_PATTERNS = [
+  /\bcen[ií]k\s+na\s+vy[žz][aá]d[aá]n[ií]\b/i,
+  /\bprice\s+on\s+request\b/i,
+  /\bcontact\s+for\s+pricing\b/i,
+  /\bpricing\s+tbd\b/i,
+  /\bdle\s+domluvy\b/i,
+];
+
+const CONTENT_BEARING_TEXT_HINT = /\b(od|from|podpora|support|konzult|session|sezen|terapi|counsel|care|approach|metoda|experience|specializ|zam[eě]r|pracuji|offer|provide)\b/i;
+
 function getLocalizedWebsiteLabels(language: AppLanguage): LocalizedWebsiteLabels {
   if (language === 'en') {
     return {
@@ -234,6 +246,7 @@ function sanitizePublicList(
   max: number,
   options?: {
     rejectNavigationLabels?: boolean;
+    rejectInternalMarkers?: boolean;
   }
 ): string[] {
   const out: string[] = [];
@@ -243,6 +256,7 @@ function sanitizePublicList(
     const cleaned = sanitizePublicText(value);
     if (!cleaned) continue;
     if (options?.rejectNavigationLabels && isNavigationLikeLabel(cleaned)) continue;
+    if (options?.rejectInternalMarkers !== false && containsInternalMarker(cleaned)) continue;
 
     const key = cleaned.toLowerCase();
     if (seen.has(key)) continue;
@@ -252,6 +266,50 @@ function sanitizePublicList(
   }
 
   return out;
+}
+
+function normalizeComparable(value: string): string {
+  return normalizeWhitespace(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function toComparableSet(values: string[]): Set<string> {
+  const output = new Set<string>();
+  values.forEach((value) => {
+    const normalized = normalizeComparable(value);
+    if (normalized) output.add(normalized);
+  });
+  return output;
+}
+
+function stripStructuralLabels(values: string[], structuralLabels: Set<string>, max: number): string[] {
+  return sanitizePublicList(values, max).filter((value) => !structuralLabels.has(normalizeComparable(value)));
+}
+
+function deriveContentLikeSentences(values: string[], max: number): string[] {
+  const segments = values
+    .flatMap((entry) => entry.split(/[\n.;!?]+/))
+    .map((entry) => sanitizePublicText(entry))
+    .filter((entry): entry is string => Boolean(entry))
+    .filter((entry) => entry.length >= 24 || CONTENT_BEARING_TEXT_HINT.test(entry));
+  return uniq(segments, max);
+}
+
+function isGenericPricingPlaceholder(value: string): boolean {
+  return GENERIC_PRICING_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function pickFirstContentBearingFact(values: string[], excludedValues: string[]): string | null {
+  const excluded = toComparableSet(excludedValues);
+  for (const value of values) {
+    const normalized = normalizeComparable(value);
+    if (!normalized || excluded.has(normalized)) continue;
+    if (value.length < 18 && !CONTENT_BEARING_TEXT_HINT.test(value)) continue;
+    return value;
+  }
+  return null;
 }
 
 function normalizePhoneForTel(value: string): string {
@@ -277,15 +335,27 @@ function normalizePhoneDisplay(value: string | null): string | null {
 
 function normalizeAddressDisplay(value: string | null): string | null {
   if (!value) return null;
-  const cleaned = value
+
+  const withoutContactFragments = value
+    .replace(/\b(e-?mail|email)\b\s*[:\-]?\s*[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '')
+    .replace(/\b(tel\.?|telefon|phone|mobil(?:e)?)\b\s*[:\-]?\s*\+?[0-9][0-9\s\-()]{6,}/gi, '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '')
+    .replace(/\+?[0-9][0-9\s\-()]{7,}/g, '');
+
+  const cleaned = withoutContactFragments
     .replace(/\b(adresa|address|sidlo|sídlo|provozovna)\s*[:\-]/gi, '')
     .replace(/[\r\n]+/g, ', ')
+    .replace(/[|;]+/g, ', ')
     .replace(/\s*,\s*/g, ', ')
     .replace(/\s{2,}/g, ' ')
     .replace(/^,\s*/, '')
     .replace(/,\s*$/, '')
     .trim();
-  return cleaned || null;
+
+  if (!cleaned) return null;
+  if (/\b(e-?mail|email|tel\.?|telefon|phone|mobil(?:e)?)\b\s*[:\-]/i.test(cleaned)) return null;
+  const hasLetter = /[A-Za-z\u00C0-\u017F]/.test(cleaned);
+  return hasLetter ? cleaned : null;
 }
 
 function parseLocalizedNumber(value: string): number | null {
@@ -360,9 +430,16 @@ function buildPublicWebsiteViewModel(params: {
   const labels = getLocalizedWebsiteLabels(language);
   const title = humanTitle(sanitizePublicText(params.verified.pageTitle) || params.projectName || 'Website');
 
+  const sanitizedNavigationLabels = sanitizePublicList(params.verified.navigationLabels, 30, {
+    rejectNavigationLabels: false,
+  });
   const sanitizedHeadings = sanitizePublicList(params.verified.headings, 30, {
     rejectNavigationLabels: true,
   });
+  const structuralLabels = toComparableSet([...sanitizedNavigationLabels, ...sanitizedHeadings]);
+  const sanitizedBodyTextBlocks = stripStructuralLabels(params.verified.bodyTextBlocks, structuralLabels, 36);
+  const bodyFacts = deriveContentLikeSentences(sanitizedBodyTextBlocks, 16);
+
   const sanitizedServiceNames = sanitizePublicList(params.verified.serviceNames, 20, {
     rejectNavigationLabels: true,
   });
@@ -374,19 +451,17 @@ function buildPublicWebsiteViewModel(params: {
   const sanitizedPhones = sanitizePublicList(params.verified.phones, 12);
   const sanitizedAddresses = sanitizePublicList(params.verified.addresses, 8);
 
-  const services = uniq(
-    (sanitizedServiceNames.length > 0 ? sanitizedServiceNames : sanitizedHeadings).slice(0, 12),
-    8
-  );
+  const verifiedServices = stripStructuralLabels(sanitizedServiceNames, structuralLabels, 12);
+  const services = uniq(verifiedServices, 8);
 
   const topics = uniq(
-    sanitizedHeadings
+    deriveContentLikeSentences(sanitizedBodyTextBlocks, 16)
       .filter((entry) => !/kontakt|contact|mapa|pricing|price|cen/i.test(entry))
       .slice(0, 10),
     6
   );
 
-  const pricing = normalizePricingRows(sanitizedPricingFields);
+  const verifiedPricing = normalizePricingRows(sanitizedPricingFields);
 
   const contact = {
     email: extractFirstEmail(sanitizedEmails[0] ?? null),
@@ -395,15 +470,18 @@ function buildPublicWebsiteViewModel(params: {
   };
 
   const primaryService = services[0] ?? topics[0] ?? null;
+  const heroSupportingFact = pickFirstContentBearingFact(bodyFacts, [title, ...sanitizedHeadings]);
   const defaultHeroSubtitle =
-    language === 'cz'
+    heroSupportingFact ??
+    (language === 'cz'
       ? primaryService
         ? `Bezpečný prostor pro změnu a porozumění se zaměřením na ${primaryService}.`
         : 'Bezpečný prostor pro změnu a porozumění.'
       : primaryService
       ? `Professional support focused on ${primaryService}.`
-      : 'Professional support for sustainable personal growth.';
+      : 'Professional support for sustainable personal growth.');
   const defaultAboutCopy =
+    bodyFacts[0] ??
     language === 'cz'
       ? services.length > 0
         ? `Nabízím citlivý a praktický přístup zaměřený na ${services.slice(0, 2).join(' a ')}.`
@@ -412,6 +490,7 @@ function buildPublicWebsiteViewModel(params: {
       ? `I offer a practical and sensitive approach focused on ${services.slice(0, 2).join(' and ')}.`
       : 'I offer a safe and practical space for long-term personal growth.';
   const defaultApproachCopy =
+    bodyFacts[1] ??
     language === 'cz'
       ? topics.length > 0
         ? `Pracuji strukturovaně a srozumitelně. Vzdělávání a dlouhodobý rozvoj propojuji s tématy: ${topics
@@ -435,9 +514,7 @@ function buildPublicWebsiteViewModel(params: {
   const servicesOverride = sanitizePublicList(sectionOverrides.servicesPricing?.services ?? [], 8, {
     rejectNavigationLabels: true,
   });
-  const pricingOverride = normalizePricingRows(
-    sanitizePublicList(sectionOverrides.servicesPricing?.pricing ?? [], 20)
-  );
+  const pricingOverride = normalizePricingRows(sanitizePublicList(sectionOverrides.servicesPricing?.pricing ?? [], 20));
   const contactIntroOverride = sanitizePublicText(sectionOverrides.contact?.intro);
   const mapOverride = sanitizePublicText(sectionOverrides.map?.body);
 
@@ -449,9 +526,31 @@ function buildPublicWebsiteViewModel(params: {
 
   const aboutCopy = normalizeWhitespace(aboutOverride ?? defaultAboutCopy);
   const approachCopy = normalizeWhitespace(approachOverride ?? defaultApproachCopy);
-  const topicItems = uniq(topicsOverride.length > 0 ? topicsOverride : topics, 6);
-  const serviceItems = uniq(servicesOverride.length > 0 ? servicesOverride : services, 8);
-  const pricingItems = uniq(pricingOverride.length > 0 ? pricingOverride : pricing, 8);
+  const topicItems = uniq(
+    stripStructuralLabels(topicsOverride.length > 0 ? topicsOverride : topics, structuralLabels, 6),
+    6
+  );
+  const serviceItems = uniq(
+    stripStructuralLabels(
+      verifiedServices.length > 0
+        ? [...verifiedServices, ...servicesOverride]
+        : servicesOverride.length > 0
+        ? servicesOverride
+        : services,
+      structuralLabels,
+      8
+    ),
+    8
+  );
+  const filteredPricingOverride = pricingOverride.filter((entry) => !isGenericPricingPlaceholder(entry));
+  const pricingItems = uniq(
+    verifiedPricing.length > 0
+      ? filteredPricingOverride.length > 0
+        ? [...verifiedPricing, ...filteredPricingOverride]
+        : verifiedPricing
+      : pricingOverride,
+    8
+  );
   const contactIntro = normalizeWhitespace(
     contactIntroOverride ??
       (language === 'cz'
@@ -703,9 +802,19 @@ export function deriveVerifiedWebsiteContent(siteSnapshots: ExecutionSnapshot['s
     null;
   const pageTitle = pageTitleCandidate ?? 'Website';
 
+  const navigationLabels = sanitizePublicList(
+    structured.flatMap((entry) => entry.navigationLabels),
+    30,
+    { rejectNavigationLabels: false }
+  );
   const headings = sanitizePublicList(
     structured.flatMap((entry) => entry.headings),
     30,
+    { rejectNavigationLabels: true }
+  );
+  const bodyTextBlocks = sanitizePublicList(
+    structured.flatMap((entry) => [...entry.paragraphs, ...entry.visibleTextBlocks]),
+    40,
     { rejectNavigationLabels: true }
   );
   const serviceNames = sanitizePublicList(
@@ -746,7 +855,9 @@ export function deriveVerifiedWebsiteContent(siteSnapshots: ExecutionSnapshot['s
   return {
     sourceUrl,
     pageTitle,
+    navigationLabels,
     headings,
+    bodyTextBlocks,
     serviceNames,
     pricingFields,
     ctaTexts,
@@ -763,6 +874,7 @@ export function hasSufficientVerifiedWebsiteContent(content: VerifiedWebsiteCont
   return Boolean(
     hasConcreteTitle ||
       content.headings.length > 0 ||
+      content.bodyTextBlocks.length > 0 ||
       content.serviceNames.length > 0 ||
       content.pricingFields.length > 0 ||
       content.emails.length > 0 ||

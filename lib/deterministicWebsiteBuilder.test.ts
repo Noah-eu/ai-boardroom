@@ -151,6 +151,194 @@ describe('deterministicWebsiteBuilder', () => {
     expect(verified.ctaTexts).not.toContain('Contact');
     expect(verified.pricingFields).toContain('Od 1500 Kč / 50 min');
     expect(verified.pricingFields.join(' ')).not.toContain('{"debug":true}');
+
+    const sections = buildDeterministicWebsiteCopySections({
+      projectName: 'Verified Practice',
+      verified,
+    });
+
+    expect(sections.topics.items.join(' ').toLowerCase()).not.toContain('home');
+    expect(sections.servicesPricing.services.join(' ').toLowerCase()).not.toContain('services');
+  });
+
+  it('keeps navigation labels out of topics/services collections', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-bleed',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Practice',
+        summary: 'Structured source',
+        extractedText: 'Obsah webu',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Practice',
+          visibleTextBlocks: ['Podpora při úzkosti a stresu.', 'Dlouhodobá spolupráce podle potřeb klienta.'],
+          headings: ['Home', 'About', 'Contact'],
+          paragraphs: ['Terapeutická podpora zaměřená na stabilizaci a zvládání stresu.'],
+          navigationLabels: ['Home', 'About', 'Services', 'Contact'],
+          contactFields: {
+            emails: ['hello@example.com'],
+            phones: ['+420777888999'],
+            addresses: ['Ulice 1, Praha'],
+            mailtoLinks: ['mailto:hello@example.com'],
+            telLinks: ['tel:+420777888999'],
+          },
+          ctaTexts: ['Book consultation'],
+          serviceNames: ['Services', 'Individual consultations', 'Contact'],
+          pricingFields: ['Od 1500 Kč / 50 min'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const sections = buildDeterministicWebsiteCopySections({ projectName: 'Practice', verified });
+    const topicsJoined = sections.topics.items.join(' ').toLowerCase();
+    const servicesJoined = sections.servicesPricing.services.join(' ').toLowerCase();
+
+    expect(topicsJoined).not.toContain('home');
+    expect(topicsJoined).not.toContain('about');
+    expect(servicesJoined).not.toContain('services');
+    expect(servicesJoined).toContain('individual consultations');
+  });
+
+  it('prefers verified pricing over generic placeholders in slot overrides', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-pricing',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Practice',
+        summary: 'Structured source',
+        extractedText: 'Od 1800 Kč za sezení',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Practice',
+          visibleTextBlocks: ['Od 1800 Kč za sezení'],
+          headings: ['Practice'],
+          paragraphs: ['Individuální konzultace'],
+          navigationLabels: ['Home', 'Pricing'],
+          contactFields: {
+            emails: ['hello@example.com'],
+            phones: ['+420777888999'],
+            addresses: ['Ulice 1, Praha'],
+            mailtoLinks: ['mailto:hello@example.com'],
+            telLinks: ['tel:+420777888999'],
+          },
+          ctaTexts: ['Book consultation'],
+          serviceNames: ['Individuální konzultace'],
+          pricingFields: ['Od 1800 Kč / 50 min'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Practice',
+      projectDescription: 'Public website',
+      verified,
+      copySections: {
+        servicesPricing: {
+          services: ['Individuální konzultace'],
+          pricing: ['Ceník na vyžádání'],
+        },
+      },
+    });
+
+    expect(artifacts.indexHtml).toContain('Od 1800 Kč');
+    expect(artifacts.indexHtml).not.toContain('Ceník na vyžádání');
+  });
+
+  it('normalizes address by stripping phone/email contamination', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-address',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Practice',
+        summary: 'Structured source',
+        extractedText: 'Kontakt',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Practice',
+          visibleTextBlocks: ['Kontaktní údaje'],
+          headings: ['Practice'],
+          paragraphs: ['Objednání konzultace po domluvě.'],
+          navigationLabels: ['Home', 'Contact'],
+          contactFields: {
+            emails: ['hello@example.com'],
+            phones: ['+420 777 888 999'],
+            addresses: ['Address: Ulice 12, Praha; Email: hello@example.com; Telefon: +420 777 888 999'],
+            mailtoLinks: ['mailto:hello@example.com'],
+            telLinks: ['tel:+420777888999'],
+          },
+          ctaTexts: ['Domluvit konzultaci'],
+          serviceNames: ['Individuální konzultace'],
+          pricingFields: ['Od 1500 Kč / sezení'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Practice',
+      projectDescription: 'Public website',
+      verified,
+    });
+
+    expect(artifacts.indexHtml).toContain('Ulice 12, Praha');
+    expect(artifacts.indexHtml).toContain('<strong>Adresa:</strong> Ulice 12, Praha');
+    expect(artifacts.indexHtml).not.toContain('<strong>Adresa:</strong> Ulice 12, Praha; Email');
+    expect(artifacts.indexHtml).not.toContain('<strong>Adresa:</strong> Ulice 12, Praha; Telefon');
+  });
+
+  it('builds hero subtitle from content-bearing body text instead of repeated heading', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-hero',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Calm Practice',
+        summary: 'Structured source',
+        extractedText: 'Body text',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Calm Practice',
+          visibleTextBlocks: ['Calm Practice', 'Podpora při úzkosti a dlouhodobém stresu v bezpečném prostředí.'],
+          headings: ['Calm Practice', 'Services'],
+          paragraphs: ['Podpora při úzkosti a dlouhodobém stresu v bezpečném prostředí.'],
+          navigationLabels: ['Home', 'Services', 'Contact'],
+          contactFields: {
+            emails: ['hello@example.com'],
+            phones: ['+420777888999'],
+            addresses: ['Ulice 12, Praha'],
+            mailtoLinks: ['mailto:hello@example.com'],
+            telLinks: ['tel:+420777888999'],
+          },
+          ctaTexts: ['Domluvit konzultaci'],
+          serviceNames: ['Individuální konzultace'],
+          pricingFields: ['Od 1500 Kč / sezení'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const sections = buildDeterministicWebsiteCopySections({ projectName: 'Calm Practice', verified });
+
+    expect(sections.hero.subtitle).toContain('Podpora při úzkosti');
+    expect(sections.hero.subtitle).not.toBe('Calm Practice');
   });
 
   it('keeps locale consistent in generated public HTML', () => {

@@ -59,6 +59,14 @@ const URL_PLACEHOLDER_PATTERNS = [
   /\[\s*TODO\s*:\s*URL\s*\]/gi,
 ];
 
+const WEBSITE_INTERNAL_ARTIFACTS = [
+  'readme.md',
+  'run-instructions.md',
+  'deploy-instructions.md',
+  'app-manifest.json',
+  'site-metadata.json',
+] as const;
+
 function normalizePath(filePath: string): string {
   return filePath.replace(/^\.\//, '').replace(/^\/+/, '').trim();
 }
@@ -86,10 +94,14 @@ function hasExt(filePath: string, exts: string[]): boolean {
 function isCodeSourceFile(filePath: string): boolean {
   const lower = normalizePath(filePath).toLowerCase();
   if (!lower) return false;
-  if (['readme.md', 'run-instructions.md', 'deploy-instructions.md', 'app-manifest.json', 'site-metadata.json'].includes(lower)) {
+  if ((WEBSITE_INTERNAL_ARTIFACTS as readonly string[]).includes(lower)) {
     return false;
   }
   return hasExt(lower, ['.html', '.css', '.js', '.jsx', '.ts', '.tsx', '.json']);
+}
+
+function excludeWebsiteInternalArtifacts(files: ExecutionOutputFile[]): ExecutionOutputFile[] {
+  return files.filter((file) => !(WEBSITE_INTERNAL_ARTIFACTS as readonly string[]).includes(normalizePath(file.path).toLowerCase()));
 }
 
 function classifyByText(value: string): CodeGenerationMode {
@@ -383,45 +395,35 @@ export function stabilizeCodeExecutionBundle(input: StabilizeInput): {
   });
 
   let files = input.bundle.files.map((file) => ({ path: normalizePath(file.path), content: file.content }));
+  if (input.outputType === 'website') {
+    files = excludeWebsiteInternalArtifacts(files);
+  }
   const entryPoint = detectEntryPoint(files);
 
-  files = upsertFile(
-    files,
-    'README.md',
-    buildReadme({
-      mode,
-      projectName: input.projectName,
-      projectDescription: input.projectDescription,
-      entryPoint,
-      files,
-      language: input.language,
-      sourceUrl: input.sourceUrl,
-    })
-  );
-  files = upsertFile(files, 'run-instructions.md', buildRunInstructions(entryPoint));
-  files = upsertFile(files, 'deploy-instructions.md', buildDeployInstructions(entryPoint));
-  files = upsertFile(
-    files,
-    'app-manifest.json',
-    buildManifest({
-      mode,
-      entryPoint,
-      files,
-      projectName: input.projectName,
-    })
-  );
-  if (input.outputType === 'website') {
+  if (input.outputType !== 'website') {
     files = upsertFile(
       files,
-      'site-metadata.json',
-      buildWebsiteMetadata({
+      'README.md',
+      buildReadme({
         mode,
-        entryPoint,
         projectName: input.projectName,
         projectDescription: input.projectDescription,
-        sourceFiles: files,
+        entryPoint,
+        files,
         language: input.language,
         sourceUrl: input.sourceUrl,
+      })
+    );
+    files = upsertFile(files, 'run-instructions.md', buildRunInstructions(entryPoint));
+    files = upsertFile(files, 'deploy-instructions.md', buildDeployInstructions(entryPoint));
+    files = upsertFile(
+      files,
+      'app-manifest.json',
+      buildManifest({
+        mode,
+        entryPoint,
+        files,
+        projectName: input.projectName,
       })
     );
   }
@@ -429,7 +431,9 @@ export function stabilizeCodeExecutionBundle(input: StabilizeInput): {
   const notes = Array.from(
     new Set([
       ...(input.bundle.notes ?? []),
-      'Code bundle stabilized with deterministic packaging contract (README/run/deploy/manifest).',
+      input.outputType === 'website'
+        ? 'Website bundle stabilized for public deployment (internal metadata artifacts excluded).'
+        : 'Code bundle stabilized with deterministic packaging contract (README/run/deploy/manifest).',
     ])
   );
 
@@ -455,6 +459,13 @@ export function buildDeterministicCodePackagingNotes(params: {
   const sourceFiles = params.bundle.files
     .map((file) => normalizePath(file.path))
     .filter((path) => isCodeSourceFile(path));
+  const contractFiles = params.bundle.files
+    .map((file) => normalizePath(file.path))
+    .filter((path) =>
+      ['README.md', 'run-instructions.md', 'deploy-instructions.md', 'app-manifest.json', 'site-metadata.json']
+        .map((entry) => entry.toLowerCase())
+        .includes(path.toLowerCase())
+    );
 
   return [
     '# Bundle Packaging Notes',
@@ -465,10 +476,7 @@ export function buildDeterministicCodePackagingNotes(params: {
     `- Total file count: ${params.bundle.files.length}`,
     '',
     '## Contract Files',
-    '- README.md',
-    '- run-instructions.md',
-    '- deploy-instructions.md',
-    '- app-manifest.json',
+    ...(contractFiles.length > 0 ? contractFiles.map((path) => `- ${path}`) : ['- (none included in this bundle)']),
     '',
     '## Source Set',
     ...sourceFiles.map((path) => `- ${path}`),

@@ -47,12 +47,17 @@ describe('codeBundleStabilizer', () => {
     ).toBe('uploader-processor-app');
   });
 
-  it('adds deterministic packaging contract files', () => {
+  it('keeps website bundles public-only without internal contract metadata files', () => {
     const stabilized = stabilizeCodeExecutionBundle({
       bundle: {
         status: 'success',
         summary: 'Generated app',
-        files: [{ path: 'index.html', content: '<!doctype html><html></html>' }],
+        files: [
+          { path: 'index.html', content: '<!doctype html><html></html>' },
+          { path: 'styles.css', content: 'body{margin:0;}' },
+          { path: 'README.md', content: 'Project prompt: include secret prompt text' },
+          { path: 'site-metadata.json', content: '{"projectDescription":"prompt"}' },
+        ],
         notes: [],
         removePaths: [],
       },
@@ -64,26 +69,16 @@ describe('codeBundleStabilizer', () => {
     });
 
     const paths = stabilized.bundle.files.map((file) => file.path);
-    expect(paths).toContain('README.md');
-    expect(paths).toContain('run-instructions.md');
-    expect(paths).toContain('deploy-instructions.md');
-    expect(paths).toContain('app-manifest.json');
-    expect(paths).toContain('site-metadata.json');
+    expect(paths).toContain('index.html');
+    expect(paths).toContain('styles.css');
+    expect(paths).not.toContain('README.md');
+    expect(paths).not.toContain('run-instructions.md');
+    expect(paths).not.toContain('deploy-instructions.md');
+    expect(paths).not.toContain('app-manifest.json');
+    expect(paths).not.toContain('site-metadata.json');
     expect(stabilized.entryPoint).toBe('index.html');
     expect(stabilized.bundle.summary).toContain('mode=landing-page');
-
-    const siteMetadataRaw = stabilized.bundle.files.find((file) => file.path === 'site-metadata.json')?.content ?? '{}';
-    const siteMetadata = JSON.parse(siteMetadataRaw) as {
-      mode?: string;
-      outputKind?: string;
-      locale?: string;
-      outputClassification?: { audience?: string; contentPolicy?: string };
-    };
-    expect(siteMetadata.mode).toBe('landing-page');
-    expect(siteMetadata.outputKind).toBe('static-web');
-    expect(siteMetadata.locale).toBe('en');
-    expect(siteMetadata.outputClassification?.audience).toBe('public');
-    expect(siteMetadata.outputClassification?.contentPolicy).toBe('verified-facts-first');
+    expect(stabilized.bundle.notes.join(' ')).toContain('internal metadata artifacts excluded');
   });
 
   it('detects entry point by priority', () => {
@@ -92,6 +87,29 @@ describe('codeBundleStabilizer', () => {
       { path: 'index.html', content: '<!doctype html>' },
     ]);
     expect(entryPoint).toBe('index.html');
+  });
+
+  it('adds deterministic contract files for non-website bundles', () => {
+    const stabilized = stabilizeCodeExecutionBundle({
+      bundle: {
+        status: 'success',
+        summary: 'Generated app',
+        files: [{ path: 'src/main.tsx', content: 'console.log(1);' }],
+        notes: [],
+        removePaths: [],
+      },
+      projectName: 'Ops dashboard',
+      projectDescription: 'Internal dashboard for analytics',
+      latestRevisionFeedback: null,
+      outputType: 'app',
+      language: 'en',
+    });
+
+    const paths = stabilized.bundle.files.map((file) => file.path);
+    expect(paths).toContain('README.md');
+    expect(paths).toContain('run-instructions.md');
+    expect(paths).toContain('deploy-instructions.md');
+    expect(paths).toContain('app-manifest.json');
   });
 
   it('builds deterministic packaging and final summaries', () => {
@@ -112,6 +130,7 @@ describe('codeBundleStabilizer', () => {
       entryPoint: 'index.html',
     });
     expect(packaging).toContain('Generation mode: company website');
+    expect(packaging).toContain('app-manifest.json');
 
     const finalSummary = buildDeterministicCodeFinalSummary({
       bundle,
