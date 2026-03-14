@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildDeterministicWebsiteArtifacts,
+  buildDeterministicWebsiteCopySections,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
   validatePublicWebsiteHtml,
@@ -43,10 +44,28 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(hasSufficientVerifiedWebsiteContent(verified)).toBe(true);
 
+    const sectionCopy = buildDeterministicWebsiteCopySections({
+      projectName: 'Therapist web',
+      verified,
+    });
+
+    expect(sectionCopy.hero.title).toContain('Therapist Studio');
+    expect(sectionCopy.topics.items.length).toBeGreaterThan(0);
+
     const artifacts = buildDeterministicWebsiteArtifacts({
       projectName: 'Therapist web',
       projectDescription: 'Create modern therapist website and include debug report from source snapshot.',
       verified,
+      copySections: {
+        hero: {
+          title: 'Nova Hero Sekce',
+          subtitle: 'Personalizovany uvodni text',
+          cta: 'Objednat termin',
+        },
+        about: {
+          body: 'Upraveny text O mne.',
+        },
+      },
       portraitImage: {
         src: 'assets/portrait.jpg',
         alt: 'Portrait',
@@ -55,6 +74,10 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(artifacts.indexHtml).toContain('</html>');
     expect(artifacts.indexHtml).toContain('Hero');
+    expect(artifacts.indexHtml).toContain('Nova Hero Sekce');
+    expect(artifacts.indexHtml).toContain('Personalizovany uvodni text');
+    expect(artifacts.indexHtml).toContain('Objednat termin');
+    expect(artifacts.indexHtml).toContain('Upraveny text O mne.');
     expect(artifacts.indexHtml).toContain('O mne');
     expect(artifacts.indexHtml).toContain('Pristup a vzdelavani');
     expect(artifacts.indexHtml).toContain('Temata');

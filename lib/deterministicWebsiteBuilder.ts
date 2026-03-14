@@ -25,6 +25,33 @@ export type WebsitePortraitImage = {
   alt: string;
 };
 
+export type WebsiteCopySections = {
+  hero: {
+    title: string;
+    subtitle: string;
+    cta: string;
+  };
+  about: {
+    body: string;
+  };
+  approach: {
+    body: string;
+  };
+  topics: {
+    items: string[];
+  };
+  servicesPricing: {
+    services: string[];
+    pricing: string[];
+  };
+  contact: {
+    intro: string;
+  };
+  map: {
+    body: string;
+  };
+};
+
 type PublicWebsiteViewModel = {
   title: string;
   heroTitle: string;
@@ -42,6 +69,8 @@ type PublicWebsiteViewModel = {
   primaryCta: string;
   sourceUrl: string | null;
   mapUrl: string | null;
+  contactIntro: string;
+  mapCopy: string;
 };
 
 function uniq(values: string[], max = 20): string[] {
@@ -107,6 +136,7 @@ function buildMapUrl(address: string | null): string | null {
 function buildPublicWebsiteViewModel(params: {
   projectName: string;
   verified: VerifiedWebsiteContent;
+  copySections?: Partial<WebsiteCopySections>;
 }): PublicWebsiteViewModel {
   const title = humanTitle(params.verified.pageTitle || params.projectName || 'Website');
 
@@ -136,31 +166,88 @@ function buildPublicWebsiteViewModel(params: {
   };
 
   const primaryService = services[0] ?? topics[0] ?? 'individually tailored care';
-  const heroSubtitle = `Professional support focused on ${primaryService}.`;
-  const aboutCopy =
+  const defaultHeroSubtitle = `Professional support focused on ${primaryService}.`;
+  const defaultAboutCopy =
     services.length > 0
       ? `Nabizim citlivy a prakticky pristup zamereny na ${services.slice(0, 2).join(' a ')}.`
       : 'Nabizim bezpecny prostor pro hledani stabilniho a dlouhodobe udrzitelneho smeru.';
-  const approachCopy =
+  const defaultApproachCopy =
     topics.length > 0
       ? `Pracuji strukturovane a srozumitelne. Vzdelavani a dlouhodoby rozvoj propojuji s tematy: ${topics
           .slice(0, 3)
           .join(', ')}.`
       : 'Pracuji strukturovane, s durazem na bezpeci, respekt a dlouhodoby rozvoj.';
 
+  const sectionOverrides = params.copySections ?? {};
+
+  const heroTitle = normalizeWhitespace(sectionOverrides.hero?.title ?? title);
+  const heroSubtitle = normalizeWhitespace(sectionOverrides.hero?.subtitle ?? defaultHeroSubtitle);
+  const primaryCta = normalizeWhitespace(sectionOverrides.hero?.cta ?? (params.verified.ctaTexts[0] ?? 'Domluvit konzultaci'));
+
+  const aboutCopy = normalizeWhitespace(sectionOverrides.about?.body ?? defaultAboutCopy);
+  const approachCopy = normalizeWhitespace(sectionOverrides.approach?.body ?? defaultApproachCopy);
+  const topicItems = uniq(sectionOverrides.topics?.items ?? topics, 6);
+  const serviceItems = uniq(sectionOverrides.servicesPricing?.services ?? services, 8);
+  const pricingItems = uniq(sectionOverrides.servicesPricing?.pricing ?? pricing, 8);
+  const contactIntro = normalizeWhitespace(
+    sectionOverrides.contact?.intro ?? 'Pro objednani terminu me prosim kontaktujte e-mailem nebo telefonicky.'
+  );
+  const mapCopy = normalizeWhitespace(
+    sectionOverrides.map?.body ?? 'Setkani probiha po domluve na adrese uvedene nize.'
+  );
+
   return {
     title,
-    heroTitle: title,
+    heroTitle,
     heroSubtitle,
     aboutCopy,
     approachCopy,
-    topics: topics.length > 0 ? topics : ['Podpora v narocnych zivotnich situacich', 'Stabilizace a prevence pretizeni'],
-    services: services.length > 0 ? services : ['Individualni konzultace', 'Dlouhodoba podpora'],
-    pricing: pricing.length > 0 ? pricing : ['Cenik na vyzadani'],
+    topics: topicItems.length > 0 ? topicItems : ['Podpora v narocnych zivotnich situacich', 'Stabilizace a prevence pretizeni'],
+    services: serviceItems.length > 0 ? serviceItems : ['Individualni konzultace', 'Dlouhodoba podpora'],
+    pricing: pricingItems.length > 0 ? pricingItems : ['Cenik na vyzadani'],
     contact,
-    primaryCta: params.verified.ctaTexts[0] ?? 'Domluvit konzultaci',
+    primaryCta,
     sourceUrl: params.verified.sourceUrl,
     mapUrl: buildMapUrl(contact.address),
+    contactIntro,
+    mapCopy,
+  };
+}
+
+export function buildDeterministicWebsiteCopySections(params: {
+  projectName: string;
+  verified: VerifiedWebsiteContent;
+}): WebsiteCopySections {
+  const model = buildPublicWebsiteViewModel({
+    projectName: params.projectName,
+    verified: params.verified,
+  });
+
+  return {
+    hero: {
+      title: model.heroTitle,
+      subtitle: model.heroSubtitle,
+      cta: model.primaryCta,
+    },
+    about: {
+      body: model.aboutCopy,
+    },
+    approach: {
+      body: model.approachCopy,
+    },
+    topics: {
+      items: model.topics,
+    },
+    servicesPricing: {
+      services: model.services,
+      pricing: model.pricing,
+    },
+    contact: {
+      intro: model.contactIntro,
+    },
+    map: {
+      body: model.mapCopy,
+    },
   };
 }
 
@@ -194,8 +281,8 @@ function buildPublicHtml(params: {
     : '';
 
   const mapMarkup = model.mapUrl
-    ? `<p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">Otevrit mapu</a></p>`
-    : '<p>Mapa bude doplnena po potvrzeni presne adresy.</p>';
+    ? `<p>${escapeHtml(model.mapCopy)}</p><p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">Otevrit mapu</a></p>`
+    : `<p>${escapeHtml(model.mapCopy)}</p>`;
 
   return [
     '<!doctype html>',
@@ -256,6 +343,7 @@ function buildPublicHtml(params: {
     '',
     '    <section id="kontakt" class="card">',
     '      <h2>Kontakt</h2>',
+    `      <p>${escapeHtml(model.contactIntro)}</p>`,
     contactEmail,
     contactPhone,
     contactAddress,
@@ -365,10 +453,12 @@ export function buildDeterministicWebsiteArtifacts(params: {
   projectDescription: string;
   verified: VerifiedWebsiteContent;
   portraitImage?: WebsitePortraitImage | null;
+  copySections?: Partial<WebsiteCopySections>;
 }): DeterministicWebsiteArtifacts {
   const model = buildPublicWebsiteViewModel({
     projectName: params.projectName,
     verified: params.verified,
+    copySections: params.copySections,
   });
 
   const indexHtml = buildPublicHtml({

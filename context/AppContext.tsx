@@ -71,8 +71,10 @@ import {
 } from '@/lib/codeBundleStabilizer';
 import {
   buildDeterministicWebsiteArtifacts,
+  buildDeterministicWebsiteCopySections,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
+  type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
 
@@ -105,6 +107,15 @@ const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const SEGMENTED_WEBSITE_NO_SCRIPT_MARKER = '__NO_SCRIPT__';
+const SEGMENTED_WEBSITE_COPY_ARTIFACTS = [
+  { path: 'copy-hero.json', section: 'hero' },
+  { path: 'copy-about.json', section: 'about' },
+  { path: 'copy-approach.json', section: 'approach' },
+  { path: 'copy-topics.json', section: 'topics' },
+  { path: 'copy-services-pricing.json', section: 'servicesPricing' },
+  { path: 'copy-contact.json', section: 'contact' },
+  { path: 'copy-map.json', section: 'map' },
+] as const;
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = [
   '.html',
   '.css',
@@ -1401,6 +1412,60 @@ function isSegmentedWebsiteSourceArtifactPath(artifactPath: string): boolean {
   return artifactPath === 'index.html' || artifactPath === 'styles.css' || artifactPath === 'script.js';
 }
 
+function isSegmentedWebsiteCopyArtifactPath(artifactPath: string): boolean {
+  return SEGMENTED_WEBSITE_COPY_ARTIFACTS.some((entry) => entry.path === artifactPath);
+}
+
+function resolveSegmentedWebsiteCopySectionByPath(
+  artifactPath: string
+): (typeof SEGMENTED_WEBSITE_COPY_ARTIFACTS)[number]['section'] | null {
+  const matched = SEGMENTED_WEBSITE_COPY_ARTIFACTS.find((entry) => entry.path === artifactPath);
+  return matched?.section ?? null;
+}
+
+function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<WebsiteCopySections> {
+  const output: Partial<WebsiteCopySections> = {};
+
+  SEGMENTED_WEBSITE_COPY_ARTIFACTS.forEach((entry) => {
+    const raw = getLatestArtifactContent(tasks, entry.path);
+    if (!raw?.trim()) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+
+      switch (entry.section) {
+        case 'hero':
+          output.hero = parsed as WebsiteCopySections['hero'];
+          break;
+        case 'about':
+          output.about = parsed as WebsiteCopySections['about'];
+          break;
+        case 'approach':
+          output.approach = parsed as WebsiteCopySections['approach'];
+          break;
+        case 'topics':
+          output.topics = parsed as WebsiteCopySections['topics'];
+          break;
+        case 'servicesPricing':
+          output.servicesPricing = parsed as WebsiteCopySections['servicesPricing'];
+          break;
+        case 'contact':
+          output.contact = parsed as WebsiteCopySections['contact'];
+          break;
+        case 'map':
+          output.map = parsed as WebsiteCopySections['map'];
+          break;
+        default:
+          break;
+      }
+    } catch {
+      // Invalid section payload is ignored; deterministic defaults remain in use.
+    }
+  });
+
+  return output;
+}
+
 function shouldUseSegmentedWebsiteBuild(project: Project): boolean {
   return decideExecutionPipeline(project) === 'code' && project.outputType === 'website';
 }
@@ -1597,6 +1662,9 @@ function artifactCanBeGeneratedLocally(
   artifact: Task['producesArtifacts'][number]
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (task.agent === 'Builder' && isSegmentedWebsiteCopyArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
+    return true;
+  }
   if (task.agent === 'Builder' && isSegmentedWebsiteSourceArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
     return true;
   }
@@ -2235,9 +2303,17 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
 
   const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
   const isCodePipelineTask =
-    /CodePlanner|AppArchitect|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
+    /CodePlanner|AppArchitect|WebCopyBuilder|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
       task.title
     );
+
+  if (isSegmentedWebsiteCopyArtifactPath(primaryArtifact)) {
+    return [{ path: 'execution-plan.md' }, { path: 'architecture-review.md' }];
+  }
+
+  if (primaryArtifact === 'index.html') {
+    return SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry) => ({ path: entry.path }));
+  }
 
   if (primaryArtifact === 'styles.css') {
     return [{ path: 'index.html' }];
@@ -5528,7 +5604,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             if (
               task.agent === 'Builder' &&
               shouldUseSegmentedWebsiteBuild(project) &&
-              isSegmentedWebsiteSourceArtifactPath(artifact.path)
+              (isSegmentedWebsiteCopyArtifactPath(artifact.path) ||
+                isSegmentedWebsiteSourceArtifactPath(artifact.path))
             ) {
               const verifiedContent = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
               if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
@@ -5539,10 +5616,48 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 return;
               }
 
+              const copySections = buildDeterministicWebsiteCopySections({
+                projectName: project.name,
+                verified: verifiedContent,
+              });
+
+              if (isSegmentedWebsiteCopyArtifactPath(artifact.path)) {
+                const sectionKey = resolveSegmentedWebsiteCopySectionByPath(artifact.path);
+                if (!sectionKey) {
+                  failLiveTask(
+                    task.agent,
+                    `${task.agent}: unknown website copy artifact mapping for ${artifact.path}.`
+                  );
+                  return;
+                }
+
+                const selectedSection = copySections[sectionKey];
+                const selectedContent = JSON.stringify(selectedSection, null, 2);
+
+                updatedArtifacts[index] = {
+                  ...artifact,
+                  content: selectedContent,
+                  rawContent: selectedContent,
+                  producedBy: task.agent,
+                  generatedAt: new Date(),
+                };
+
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'info',
+                  agent: task.agent,
+                  message: `${task.agent}: deterministic website copy section generated locally (${artifact.path}).`,
+                });
+                continue;
+              }
+
+              const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(project.tasks);
+
               const websiteArtifacts = buildDeterministicWebsiteArtifacts({
                 projectName: project.name,
                 projectDescription: project.description,
                 verified: verifiedContent,
+                copySections: sectionOverrides,
                 portraitImage: (() => {
                   const portraitPlan = buildPortraitAssetPlan(snapshot);
                   if (!portraitPlan) return null;
@@ -6791,14 +6906,46 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (shouldUseSegmentedWebsiteBuild(project)) {
+          let latestCopyDependencyId = appArchitect.id;
+          const copyTasks = SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry, sectionIndex) => {
+            const titleLabel =
+              entry.section === 'hero'
+                ? 'Hero'
+                : entry.section === 'about'
+                ? 'O mne'
+                : entry.section === 'approach'
+                ? 'Pristup a vzdelavani'
+                : entry.section === 'topics'
+                ? 'Temata'
+                : entry.section === 'servicesPricing'
+                ? 'Sluzby a ceny'
+                : entry.section === 'contact'
+                ? 'Kontakt'
+                : 'Mapa';
+
+            const dependencyId = latestCopyDependencyId;
+            const task = createTask({
+              title: `WebCopyBuilder ${sectionIndex + 1}/7: ${titleLabel} (${codeModeLabel})`,
+              description: `Generate rewritten public website copy section for ${titleLabel} only.`,
+              agent: 'Builder',
+              provider: 'openai',
+              model: taskModel,
+              dependsOn: [dependencyId],
+              status: statusFor([dependencyId]),
+              producesArtifacts: [{ path: entry.path, label: `Website Copy ${titleLabel}`, kind: 'json' }],
+            });
+            latestCopyDependencyId = task.id;
+            return task;
+          });
+
           const webHtmlBuilder = createTask({
             title: `WebHtmlBuilder: Generate index.html (${codeModeLabel})`,
-            description: 'Generate only index.html as focused website shell output.',
+            description: 'Generate only index.html from validated section-level website copy outputs.',
             agent: 'Builder',
             provider: 'openai',
             model: taskModel,
-            dependsOn: [appArchitect.id],
-            status: statusFor([appArchitect.id]),
+            dependsOn: [latestCopyDependencyId],
+            status: statusFor([latestCopyDependencyId]),
             producesArtifacts: [{ path: 'index.html', label: 'Website HTML', kind: 'doc' }],
           });
 
@@ -6882,6 +7029,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             tasks: [
               codePlanner,
               appArchitect,
+              ...copyTasks,
               webHtmlBuilder,
               webStyleBuilder,
               webScriptBuilder,
