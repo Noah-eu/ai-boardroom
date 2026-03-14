@@ -79,6 +79,7 @@ import {
   type VerifiedWebsiteContent,
   type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
+import { normalizeArchitectureReviewInput } from '@/lib/architectureReviewInput';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
 import { decideWebsiteGraphStrategy } from '@/lib/websiteGraphStrategy';
 
@@ -4894,6 +4895,58 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ? `Missing inputs to mention explicitly if relevant:\n- ${snapshot.missingInputNotes.join('\n- ')}`
         : 'Missing inputs: none detected.';
 
+      if (artifact.path === 'architecture-review.md' && decideExecutionPipeline(project) === 'code') {
+        const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+          projectName: project.name,
+          projectDescription: project.description,
+          projectPrompt: snapshot.projectPrompt,
+          revisionPrompt: snapshot.revisionPrompt,
+          debateSummary: snapshot.approvedDebateSummary,
+        });
+        const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+        const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);
+        const hasIngestionVerified = hasSufficientVerifiedWebsiteContent(ingestionVerified);
+        const mergedVerified = hasIngestionVerified
+          ? hasPromptVerified
+            ? mergeVerifiedWebsiteContent(ingestionVerified, promptVerified)
+            : ingestionVerified
+          : promptVerified;
+
+        const normalizedArchitecture = normalizeArchitectureReviewInput({
+          projectName: project.name,
+          outputType: project.outputType,
+          projectDescription: project.description,
+          projectPrompt: snapshot.projectPrompt,
+          revisionPrompt: snapshot.revisionPrompt,
+          debateSummary: snapshot.approvedDebateSummary,
+          maxChars: 4200,
+          websiteFacts: {
+            sourceUrl: mergedVerified.sourceUrl,
+            headings: mergedVerified.headings,
+            bodyTextBlocks: mergedVerified.bodyTextBlocks,
+            serviceNames: mergedVerified.serviceNames,
+            pricingFields: mergedVerified.pricingFields,
+            ctaTexts: mergedVerified.ctaTexts,
+            emails: mergedVerified.emails,
+            phones: mergedVerified.phones,
+            addresses: mergedVerified.addresses,
+          },
+        });
+
+        return [
+          project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
+          `You are ${task.agent}. Produce artifact "${artifact.path}" only in Markdown.`,
+          'Use normalized architecture input below. Do not pass through raw prompt blobs or repeated facts.',
+          'Prioritize deterministic file/module-level design, dependencies, and implementation constraints.',
+          `Required sections:\n- ${sectionList.join('\n- ')}`,
+          missingInputs,
+          'Normalized architecture input:',
+          normalizedArchitecture.normalizedInput,
+          `Normalization stats: raw=${normalizedArchitecture.stats.rawChars} chars, normalized=${normalizedArchitecture.stats.normalizedChars} chars, dedupDropped=${normalizedArchitecture.stats.droppedDuplicates}`,
+          `Snapshot counts: site=${snapshot.siteSnapshots.length}, zip=${snapshot.zipSnapshots.length}, pdf=${snapshot.pdfTexts.length}, images=${snapshot.imageInputs.length}`,
+        ].join('\n\n');
+      }
+
       return [
         project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
         `You are ${task.agent}. Produce artifact \"${artifact.path}\" only in Markdown.`,
@@ -4914,6 +4967,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const buildExecutionAgentContext = useCallback(
     (task: Task, snapshot: ExecutionSnapshot) => {
+      const primaryArtifact = getPrimaryArtifactPath(task);
+      const isArchitectureReviewTask = task.agent === 'Architect' && primaryArtifact === 'architecture-review.md';
+
+      if (isArchitectureReviewTask) {
+        return {
+          snapshotId: snapshot.id,
+          cycleNumber: snapshot.cycleNumber,
+          revisionPrompt: shorten(snapshot.revisionPrompt ?? '', 700),
+          projectPrompt: shorten(snapshot.projectPrompt, 1400),
+          approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 1400),
+          latestStableSummary: shorten(snapshot.latestStableSummary ?? '', 900),
+          attachmentCounts: {
+            project: snapshot.projectAttachments.length,
+            message: snapshot.messageAttachments.length,
+            zip: snapshot.zipSnapshots.length,
+            site: snapshot.siteSnapshots.length,
+            pdf: snapshot.pdfTexts.length,
+            images: snapshot.imageInputs.length,
+          },
+          missingInputNotes: snapshot.missingInputNotes.slice(0, 10),
+        };
+      }
+
       return {
         snapshotId: snapshot.id,
         cycleNumber: snapshot.cycleNumber,
