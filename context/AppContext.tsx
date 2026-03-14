@@ -72,8 +72,10 @@ import {
 import {
   buildDeterministicWebsiteArtifacts,
   buildDeterministicWebsiteCopySections,
+  deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
+  mergeVerifiedWebsiteContent,
   type VerifiedWebsiteContent,
   type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
@@ -1430,21 +1432,45 @@ type SegmentedWebsiteContentModel = {
   type: 'ai-boardroom-segmented-website-content-model';
   generatedAt: string;
   language: AppLanguage;
+  sourceMode: 'ingestion' | 'prompt-only' | 'hybrid';
   verified: VerifiedWebsiteContent;
   copySections: WebsiteCopySections;
 };
 
 function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: ExecutionSnapshot): SegmentedWebsiteContentModel | null {
-  const verified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+  const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+  const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+    projectName: project.name,
+    projectDescription: project.description,
+    projectPrompt: snapshot.projectPrompt,
+    revisionPrompt: snapshot.revisionPrompt,
+    debateSummary: snapshot.approvedDebateSummary,
+  });
+
+  const hasIngestion = hasSufficientVerifiedWebsiteContent(ingestionVerified);
+  const hasPrompt = hasSufficientVerifiedWebsiteContent(promptVerified);
+  const verified = hasIngestion
+    ? hasPrompt
+      ? mergeVerifiedWebsiteContent(ingestionVerified, promptVerified)
+      : ingestionVerified
+    : promptVerified;
+
   if (!hasSufficientVerifiedWebsiteContent(verified)) {
     return null;
   }
+
+  const sourceMode: SegmentedWebsiteContentModel['sourceMode'] = hasIngestion
+    ? hasPrompt
+      ? 'hybrid'
+      : 'ingestion'
+    : 'prompt-only';
 
   return {
     schemaVersion: 1,
     type: 'ai-boardroom-segmented-website-content-model',
     generatedAt: new Date().toISOString(),
     language: project.language,
+    sourceMode,
     verified,
     copySections: buildDeterministicWebsiteCopySections({
       projectName: project.name,
@@ -5960,6 +5986,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   entryPoint: stabilized.entryPoint,
                   reviewNotes,
                   packagingNotes,
+                  rawProjectPrompt: snapshot.projectPrompt,
+                  rawDebateSummary: snapshot.approvedDebateSummary,
                 }),
                 rawContent: '',
                 producedBy: task.agent,

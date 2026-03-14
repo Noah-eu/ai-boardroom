@@ -489,7 +489,42 @@ export function buildDeterministicCodeFinalSummary(params: {
   entryPoint: string;
   reviewNotes?: string | null;
   packagingNotes?: string | null;
+  rawProjectPrompt?: string | null;
+  rawDebateSummary?: string | null;
 }): string {
+  const normalize = (value: string): string => value.replace(/\s+/g, ' ').trim().toLowerCase();
+  const forbiddenMarkers = [
+    'project prompt:',
+    'revision request:',
+    'approved debate summary:',
+    'raw prompt:',
+    'structured snapshot',
+    'verified source snapshot',
+  ];
+  const bannedNeedles = [
+    ...(params.rawProjectPrompt ? [normalize(params.rawProjectPrompt).slice(0, 220)] : []),
+    ...(params.rawDebateSummary ? [normalize(params.rawDebateSummary).slice(0, 220)] : []),
+  ].filter((entry) => entry.length >= 60);
+
+  const sanitizeSection = (value?: string | null): string | null => {
+    if (!value?.trim()) return null;
+    const trimmed = value.trim();
+    const lower = normalize(trimmed);
+
+    if (forbiddenMarkers.some((marker) => lower.includes(marker))) {
+      return null;
+    }
+
+    if (bannedNeedles.some((needle) => needle && lower.includes(needle))) {
+      return null;
+    }
+
+    return trimmed;
+  };
+
+  const safeReviewNotes = sanitizeSection(params.reviewNotes);
+  const safePackagingNotes = sanitizeSection(params.packagingNotes);
+
   const lines = [
     '# Final Summary',
     '',
@@ -500,12 +535,16 @@ export function buildDeterministicCodeFinalSummary(params: {
     'The preview and exported bundle use the same generated source set from generated-files.json.',
   ];
 
-  if (params.reviewNotes?.trim()) {
-    lines.push('', '## Reviewer Notes', params.reviewNotes.trim());
+  if (safeReviewNotes) {
+    lines.push('', '## Reviewer Notes', safeReviewNotes);
   }
 
-  if (params.packagingNotes?.trim()) {
-    lines.push('', '## Packaging Notes', params.packagingNotes.trim());
+  if (safePackagingNotes) {
+    lines.push('', '## Packaging Notes', safePackagingNotes);
+  }
+
+  if (!safeReviewNotes && !safePackagingNotes) {
+    lines.push('', '## Output Guardrails', '- Final summary is intentionally derived only from validated generated artifacts.');
   }
 
   return lines.join('\n');

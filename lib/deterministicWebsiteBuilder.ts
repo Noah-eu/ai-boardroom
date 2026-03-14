@@ -54,6 +54,14 @@ export type WebsiteCopySections = {
   };
 };
 
+export type PromptWebsiteExtractionInput = {
+  projectName?: string;
+  projectDescription?: string;
+  projectPrompt?: string;
+  revisionPrompt?: string | null;
+  debateSummary?: string | null;
+};
+
 type PublicWebsiteViewModel = {
   language: AppLanguage;
   labels: LocalizedWebsiteLabels;
@@ -191,6 +199,125 @@ function uniq(values: string[], max = 20): string[] {
     if (out.length >= max) break;
   }
   return out;
+}
+
+function extractUrls(value: string): string[] {
+  const matches = value.match(/https?:\/\/[^\s)\]}>"']+/gi) ?? [];
+  return uniq(matches, 8);
+}
+
+function extractEmailsFromText(value: string): string[] {
+  const matches = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+  return uniq(matches, 12);
+}
+
+function extractPhonesFromText(value: string): string[] {
+  const matches = value.match(/(?:\+?\d[\d\s().-]{7,}\d)/g) ?? [];
+  return uniq(matches.map((entry) => normalizePhoneDisplay(entry) ?? '').filter(Boolean), 12);
+}
+
+function splitPromptLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*]\s+/, '').trim())
+    .filter(Boolean);
+}
+
+function parseLabeledPromptFields(lines: string[]): Map<string, string[]> {
+  const output = new Map<string, string[]>();
+
+  lines.forEach((line) => {
+    const match = line.match(/^([A-Za-z\u00C0-\u017F\s]+):\s*(.+)$/);
+    if (!match) return;
+    const rawLabel = match[1].trim().toLowerCase();
+    const value = normalizeWhitespace(match[2]);
+    if (!value) return;
+
+    const normalizedLabel = rawLabel
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const current = output.get(normalizedLabel) ?? [];
+    current.push(value);
+    output.set(normalizedLabel, current);
+  });
+
+  return output;
+}
+
+function getPromptLabelValues(map: Map<string, string[]>, aliases: string[]): string[] {
+  const normalizedAliases = aliases.map((alias) =>
+    alias
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim()
+  );
+
+  const output: string[] = [];
+  map.forEach((values, key) => {
+    if (!normalizedAliases.includes(key)) return;
+    output.push(...values);
+  });
+
+  return uniq(output, 20);
+}
+
+function looksLikeAddressFact(value: string): boolean {
+  return /\b(adresa|address|ulice|street|praha|brno|\d{3}\s?\d{2})\b/i.test(value);
+}
+
+function looksLikeServiceFact(value: string): boolean {
+  return /\b(sluzb|service|konzultac|therapy|terapie|coaching|session|sezeni)\b/i.test(value);
+}
+
+function looksLikePricingFact(value: string): boolean {
+  return /\b(od|from|cena|cenik|pricing|price)\b/i.test(value) || /(Kc|Kč|CZK|EUR|USD|€|\$)/i.test(value);
+}
+
+function looksLikeCtaFact(value: string): boolean {
+  return /\b(objednat|book|contact|kontakt|domluvit|rezervovat|appointment|call)\b/i.test(value);
+}
+
+function extractPromptFacts(lines: string[]): {
+  headings: string[];
+  bodyTextBlocks: string[];
+  serviceNames: string[];
+  pricingFields: string[];
+  ctaTexts: string[];
+  addresses: string[];
+} {
+  const unlabeledLines = lines.filter((line) => !/^[A-Za-z\u00C0-\u017F\s]+:\s*.+$/.test(line));
+
+  const headings = uniq(
+    unlabeledLines
+      .filter((line) => /^(hero|about|approach|topics?|services?|pricing|contact|mapa?|o mne|pristup|sluzby)\b/i.test(line))
+      .map((line) => line.replace(/:.+$/, '').trim()),
+    20
+  );
+
+  const bodyTextBlocks = uniq(
+    unlabeledLines.filter(
+      (line) => line.length >= 24 && !looksLikeSerializedPayload(line) && !containsInternalMarker(line)
+    ),
+    36
+  );
+
+  const serviceNames = uniq(unlabeledLines.filter((line) => looksLikeServiceFact(line)), 16);
+  const pricingFields = uniq(unlabeledLines.filter((line) => looksLikePricingFact(line)), 16);
+  const ctaTexts = uniq(unlabeledLines.filter((line) => looksLikeCtaFact(line)).slice(0, 10), 10);
+  const addresses = uniq(unlabeledLines.filter((line) => looksLikeAddressFact(line)), 8);
+
+  return {
+    headings,
+    bodyTextBlocks,
+    serviceNames,
+    pricingFields,
+    ctaTexts,
+    addresses,
+  };
 }
 
 function escapeHtml(value: string): string {
@@ -769,17 +896,22 @@ export function validatePublicWebsiteHtml(indexHtml: string, rawPrompt?: string 
   });
 
   const prompt = normalizeWhitespace(rawPrompt ?? '');
-  if (prompt.length >= 24) {
-    const promptNeedles = uniq(
+  if (prompt.length >= 120) {
+    const promptLines = uniq(
       prompt
-        .split(/[\n.!?]/)
+        .split(/\r?\n/)
         .map((entry) => normalizeWhitespace(entry))
-        .filter((entry) => entry.length >= 24),
+        .filter((entry) => entry.length >= 120),
       3
-    ).map((entry) => entry.toLowerCase());
+    );
 
-    if (promptNeedles.some((needle) => lower.includes(needle))) {
-      errors.push('Public HTML appears to include raw user prompt text.');
+    if (promptLines.some((line) => lower.includes(line.toLowerCase()))) {
+      errors.push('Public HTML appears to include a full raw user prompt block.');
+    }
+
+    const normalizedPrompt = prompt.toLowerCase();
+    if (normalizedPrompt.length >= 260 && lower.includes(normalizedPrompt)) {
+      errors.push('Public HTML appears to include the entire raw user prompt text.');
     }
   }
 
@@ -788,6 +920,105 @@ export function validatePublicWebsiteHtml(indexHtml: string, rawPrompt?: string 
   }
 
   return errors;
+}
+
+export function deriveVerifiedWebsiteContentFromPrompt(
+  input: PromptWebsiteExtractionInput
+): VerifiedWebsiteContent {
+  const combinedPrompt = [
+    input.projectPrompt ?? '',
+    input.revisionPrompt ?? '',
+    input.projectDescription ?? '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const lines = splitPromptLines(combinedPrompt);
+  const labels = parseLabeledPromptFields(lines);
+  const extracted = extractPromptFacts(lines);
+
+  const labeledHero = getPromptLabelValues(labels, ['hero', 'headline', 'title', 'nadpis']);
+  const labeledAbout = getPromptLabelValues(labels, ['about', 'o mne']);
+  const labeledApproach = getPromptLabelValues(labels, ['approach', 'pristup']);
+  const labeledTopics = getPromptLabelValues(labels, ['topics', 'temata']);
+  const labeledServices = getPromptLabelValues(labels, ['services', 'sluzby']);
+  const labeledPricing = getPromptLabelValues(labels, ['pricing', 'price', 'cenik', 'cena']);
+  const labeledContact = getPromptLabelValues(labels, ['contact', 'kontakt']);
+  const labeledAddress = getPromptLabelValues(labels, ['address', 'adresa']);
+  const labeledCta = getPromptLabelValues(labels, ['cta', 'call to action']);
+
+  const sourceUrl = extractUrls(combinedPrompt)[0] ?? null;
+  const projectName = sanitizePublicText(input.projectName) ?? 'Website';
+  const explicitTitle = sanitizePublicText(labeledHero[0]) ?? null;
+
+  const pageTitle = explicitTitle && explicitTitle.length >= 4 ? explicitTitle : projectName;
+  const bodyTextBlocks = sanitizePublicList(
+    [...labeledAbout, ...labeledApproach, ...labeledTopics, ...labeledServices, ...labeledContact, ...extracted.bodyTextBlocks],
+    40,
+    { rejectNavigationLabels: true }
+  );
+
+  const serviceNames = sanitizePublicList([...labeledServices, ...extracted.serviceNames], 20, {
+    rejectNavigationLabels: true,
+  });
+
+  const pricingFields = sanitizePublicList([...labeledPricing, ...extracted.pricingFields], 20);
+  const ctaTexts = sanitizePublicList([...labeledCta, ...extracted.ctaTexts], 20, {
+    rejectNavigationLabels: true,
+  });
+  const emails = extractEmailsFromText(combinedPrompt);
+  const phones = extractPhonesFromText(combinedPrompt);
+  const addresses = sanitizePublicList([...labeledAddress, ...labeledContact, ...extracted.addresses], 10)
+    .map((entry) => normalizeAddressDisplay(entry) ?? '')
+    .filter(Boolean);
+
+  const headings = sanitizePublicList([...extracted.headings, pageTitle], 24, {
+    rejectNavigationLabels: true,
+  });
+
+  const missingFields = [
+    emails.length === 0 ? 'email' : '',
+    phones.length === 0 ? 'phone' : '',
+    addresses.length === 0 ? 'address' : '',
+    pricingFields.length === 0 ? 'pricing' : '',
+  ].filter(Boolean);
+
+  return {
+    sourceUrl,
+    pageTitle,
+    navigationLabels: [],
+    headings,
+    bodyTextBlocks,
+    serviceNames,
+    pricingFields,
+    ctaTexts,
+    emails,
+    phones,
+    addresses,
+    missingFields,
+    warnings: ['Content model derived from explicit prompt facts (prompt-only fast path).'],
+  };
+}
+
+export function mergeVerifiedWebsiteContent(
+  primary: VerifiedWebsiteContent,
+  secondary: VerifiedWebsiteContent
+): VerifiedWebsiteContent {
+  return {
+    sourceUrl: primary.sourceUrl ?? secondary.sourceUrl,
+    pageTitle: sanitizePublicText(primary.pageTitle) ?? sanitizePublicText(secondary.pageTitle) ?? 'Website',
+    navigationLabels: uniq([...primary.navigationLabels, ...secondary.navigationLabels], 30),
+    headings: uniq([...primary.headings, ...secondary.headings], 30),
+    bodyTextBlocks: uniq([...primary.bodyTextBlocks, ...secondary.bodyTextBlocks], 40),
+    serviceNames: uniq([...primary.serviceNames, ...secondary.serviceNames], 24),
+    pricingFields: uniq([...primary.pricingFields, ...secondary.pricingFields], 24),
+    ctaTexts: uniq([...primary.ctaTexts, ...secondary.ctaTexts], 20),
+    emails: uniq([...primary.emails, ...secondary.emails], 12),
+    phones: uniq([...primary.phones, ...secondary.phones], 12),
+    addresses: uniq([...primary.addresses, ...secondary.addresses], 12),
+    missingFields: uniq([...primary.missingFields, ...secondary.missingFields], 20),
+    warnings: uniq([...primary.warnings, ...secondary.warnings], 20),
+  };
 }
 
 export function deriveVerifiedWebsiteContent(siteSnapshots: ExecutionSnapshot['siteSnapshots']): VerifiedWebsiteContent {

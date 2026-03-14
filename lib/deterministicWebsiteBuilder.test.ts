@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDeterministicWebsiteArtifacts,
   buildDeterministicWebsiteCopySections,
+  deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
+  mergeVerifiedWebsiteContent,
   validatePublicWebsiteHtml,
 } from './deterministicWebsiteBuilder';
 
@@ -427,6 +429,83 @@ describe('deterministicWebsiteBuilder', () => {
     expect(verified.headings).toEqual([]);
     expect(verified.serviceNames).toEqual([]);
     expect(hasSufficientVerifiedWebsiteContent(verified)).toBe(false);
+  });
+
+  it('supports prompt-only explicit website facts without source ingestion', () => {
+    const promptOnly = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Aster Therapy',
+      projectDescription: 'Build a public website from explicit facts listed in prompt.',
+      projectPrompt: [
+        'Hero: Aster Therapy',
+        'About: Poskytuji individualni terapii pro dospele se zamerenim na uzkost a stres.',
+        'Services: Individualni terapie, Kratke krizove konzultace',
+        'Pricing: Od 1700 Kc / 50 min',
+        'Contact: kontakt@astertherapy.cz, +420 777 111 222',
+        'Address: Botanicka 12, Brno 602 00',
+        'CTA: Domluvit konzultaci',
+      ].join('\n'),
+      revisionPrompt: 'Zachovej civilni ton a jasnou strukturu sekci.',
+    });
+
+    expect(hasSufficientVerifiedWebsiteContent(promptOnly)).toBe(true);
+    expect(promptOnly.pageTitle).toContain('Aster Therapy');
+    expect(promptOnly.emails).toContain('kontakt@astertherapy.cz');
+    expect(promptOnly.phones.join(' ')).toContain('+420 777 111 222');
+    expect(promptOnly.pricingFields.join(' ')).toContain('1700');
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Aster Therapy',
+      projectDescription: 'Prompt-only website',
+      verified: promptOnly,
+    });
+
+    expect(artifacts.indexHtml).toContain('Aster Therapy');
+    expect(artifacts.indexHtml).toContain('kontakt@astertherapy.cz');
+    expect(artifacts.indexHtml).toContain('Od 1700 Kč');
+  });
+
+  it('merges ingestion and prompt-derived website facts deterministically', () => {
+    const ingestion = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-merge-1',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Aster Therapy',
+        summary: 'Structured source',
+        extractedText: 'Individualni terapie',
+        pages: [{ url: 'https://aster.example', title: 'Home', summary: 'Home' }],
+        structuredData: {
+          sourceUrl: 'https://aster.example',
+          pageTitle: 'Aster Therapy',
+          visibleTextBlocks: ['Individualni terapie'],
+          headings: ['Aster Therapy', 'Kontakt'],
+          paragraphs: ['Podpora pri uzkosti.'],
+          navigationLabels: ['Domu', 'Kontakt'],
+          contactFields: {
+            emails: ['hello@aster.example'],
+            phones: [],
+            addresses: [],
+            mailtoLinks: ['mailto:hello@aster.example'],
+            telLinks: [],
+          },
+          ctaTexts: ['Kontakt'],
+          serviceNames: ['Individualni terapie'],
+          pricingFields: [],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const promptOnly = deriveVerifiedWebsiteContentFromPrompt({
+      projectPrompt: 'Pricing: Od 1700 Kc / 50 min\nPhone: +420 777 111 222',
+    });
+
+    const merged = mergeVerifiedWebsiteContent(ingestion, promptOnly);
+    expect(merged.emails).toContain('hello@aster.example');
+    expect(merged.phones.join(' ')).toContain('+420 777 111 222');
+    expect(merged.pricingFields.join(' ')).toContain('1700');
   });
 
   it('detects prompt/debug leakage markers in generated HTML', () => {

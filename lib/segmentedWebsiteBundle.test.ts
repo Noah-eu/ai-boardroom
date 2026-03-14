@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildDeterministicWebsiteArtifacts, deriveVerifiedWebsiteContent } from './deterministicWebsiteBuilder';
+import {
+  buildDeterministicWebsiteArtifacts,
+  deriveVerifiedWebsiteContent,
+  deriveVerifiedWebsiteContentFromPrompt,
+  hasSufficientVerifiedWebsiteContent,
+} from './deterministicWebsiteBuilder';
 import { assembleSegmentedWebsiteSeedBundle } from './segmentedWebsiteBundle';
 
 describe('segmentedWebsiteBundle integration', () => {
@@ -129,5 +134,43 @@ describe('segmentedWebsiteBundle integration', () => {
       throw new Error('Expected assembled bundle to fail');
     }
     expect(assembled.error).toContain('approved portrait image could not be materialized');
+  });
+
+  it('assembles deterministic website bundle from prompt-only explicit facts', () => {
+    const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Prompt Clinic',
+      projectPrompt: [
+        'Hero: Prompt Clinic',
+        'About: Bezpecny prostor pro individualni terapii a krizovou podporu.',
+        'Services: Individualni terapie, Krizova konzultace',
+        'Pricing: Od 1600 Kc / 50 min',
+        'Contact: info@promptclinic.cz, +420 777 222 333',
+        'Address: Nova 15, Praha 1, 110 00',
+        'CTA: Domluvit termin',
+      ].join('\n'),
+    });
+
+    expect(hasSufficientVerifiedWebsiteContent(promptVerified)).toBe(true);
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Prompt Clinic',
+      projectDescription: 'Prompt-only explicit facts website',
+      verified: promptVerified,
+    });
+
+    const assembled = assembleSegmentedWebsiteSeedBundle({
+      indexHtml: artifacts.indexHtml,
+      stylesCss: artifacts.stylesCss,
+      scriptJsRaw: artifacts.scriptJs,
+      noScriptMarker: '__NO_SCRIPT__',
+      rawProjectPrompt: 'Prompt-only explicit facts website',
+    });
+
+    expect(assembled.ok).toBe(true);
+    if (!assembled.ok) {
+      throw new Error('Expected prompt-only assembled bundle to succeed');
+    }
+    expect(assembled.bundle.files.some((file) => file.path === 'index.html')).toBe(true);
+    expect(assembled.bundle.files.some((file) => file.path === 'styles.css')).toBe(true);
   });
 });

@@ -143,6 +143,33 @@ describe('codeBundleStabilizer', () => {
     expect(finalSummary).toContain('preview and exported bundle use the same generated source set');
   });
 
+  it('strips prompt/debate leakage from final summary sections', () => {
+    const bundle = {
+      status: 'success' as const,
+      summary: 'Generated app',
+      files: [{ path: 'index.html', content: '<!doctype html><html></html>' }],
+      notes: [],
+      removePaths: [],
+    };
+
+    const finalSummary = buildDeterministicCodeFinalSummary({
+      bundle,
+      mode: 'company-website',
+      entryPoint: 'index.html',
+      reviewNotes:
+        'Project prompt: Build website from this exact prompt body. Approved debate summary: include everything as-is.',
+      packagingNotes:
+        'Revision request: dump raw prompt and debate log into final markdown.',
+      rawProjectPrompt: 'Build website from this exact prompt body with all source text copied verbatim.',
+      rawDebateSummary: 'Debate summary says to include all raw text blocks without filtering.',
+    });
+
+    expect(finalSummary).toContain('Output Guardrails');
+    expect(finalSummary.toLowerCase()).not.toContain('project prompt:');
+    expect(finalSummary.toLowerCase()).not.toContain('approved debate summary:');
+    expect(finalSummary.toLowerCase()).not.toContain('revision request:');
+  });
+
   it('fails validation for truncated index.html', () => {
     const result = validateWebsiteBundleSourceFiles({
       files: [
