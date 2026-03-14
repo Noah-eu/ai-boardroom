@@ -82,11 +82,11 @@ describe('segmentedWebsiteBundle integration', () => {
     const portraitFile = assembled.bundle.files.find((file) => file.path.startsWith('assets/portrait.'));
 
     expect(indexFile?.content).toContain('assets/portrait.jpg');
-    expect(indexFile?.content).toContain('Hero');
-    expect(indexFile?.content).toContain('O mne');
-    expect(indexFile?.content).toContain('Pristup a vzdelavani');
-    expect(indexFile?.content).toContain('Temata');
-    expect(indexFile?.content).toContain('Sluzby a ceny');
+    expect(indexFile?.content).toContain('Úvod');
+    expect(indexFile?.content).toContain('O mně');
+    expect(indexFile?.content).toContain('Přístup a vzdělávání');
+    expect(indexFile?.content).toContain('Témata');
+    expect(indexFile?.content).toContain('Služby a ceny');
     expect(indexFile?.content).toContain('Kontakt');
     expect(indexFile?.content).toContain('Mapa');
 

@@ -8,6 +8,10 @@ export type CodeGenerationMode =
   | 'uploader-processor-app'
   | 'small-game-prototype';
 
+function normalizeWebsiteMode(mode: CodeGenerationMode): 'landing-page' | 'company-website' {
+  return mode === 'landing-page' ? 'landing-page' : 'company-website';
+}
+
 interface ModeInput {
   name: string;
   description: string;
@@ -118,10 +122,7 @@ export function classifyCodeGenerationMode(input: ModeInput): CodeGenerationMode
   const byText = classifyByText(combined);
 
   if (input.outputType === 'website') {
-    if (byText === 'dashboard' || byText === 'crud-internal-tool' || byText === 'uploader-processor-app') {
-      return byText;
-    }
-    return byText === 'company-website' ? 'company-website' : 'landing-page';
+    return normalizeWebsiteMode(byText);
   }
 
   if (input.outputType === 'app') {
@@ -251,10 +252,12 @@ export function buildWebsiteMetadata(params: {
   sourceFiles: ExecutionOutputFile[];
   sourceUrl?: string | null;
 }): string {
+  const normalizedMode = normalizeWebsiteMode(params.mode);
   const payload = {
     schemaVersion: 1,
     type: 'ai-boardroom-website-metadata',
-    mode: params.mode,
+    mode: normalizedMode,
+    outputKind: 'static-web',
     entryPoint: params.entryPoint,
     projectName: params.projectName || 'Generated Website',
     projectDescription: replaceKnownUrlPlaceholders(params.projectDescription || '', params.sourceUrl),

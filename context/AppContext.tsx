@@ -5619,6 +5619,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               const copySections = buildDeterministicWebsiteCopySections({
                 projectName: project.name,
                 verified: verifiedContent,
+                language: project.language,
               });
 
               if (isSegmentedWebsiteCopyArtifactPath(artifact.path)) {
@@ -5658,6 +5659,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectDescription: project.description,
                 verified: verifiedContent,
                 copySections: sectionOverrides,
+                language: project.language,
                 portraitImage: (() => {
                   const portraitPlan = buildPortraitAssetPlan(snapshot);
                   if (!portraitPlan) return null;

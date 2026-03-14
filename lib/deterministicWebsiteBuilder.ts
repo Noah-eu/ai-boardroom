@@ -1,4 +1,4 @@
-import { ExecutionSnapshot } from '@/types';
+import { AppLanguage, ExecutionSnapshot } from '@/types';
 
 export type VerifiedWebsiteContent = {
   sourceUrl: string | null;
@@ -73,6 +73,11 @@ type PublicWebsiteViewModel = {
   mapCopy: string;
 };
 
+type PricingCandidate = {
+  display: string;
+  value: number;
+};
+
 function uniq(values: string[], max = 20): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -109,23 +114,91 @@ function normalizePhoneForTel(value: string): string {
   return value.replace(/[^\d+]/g, '');
 }
 
+function extractFirstEmail(value: string | null): string | null {
+  if (!value) return null;
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0] ?? null;
+}
+
+function normalizePhoneDisplay(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  const digits = normalized.replace(/[^\d+]/g, '');
+  const czMatch = digits.match(/^\+?420(\d{3})(\d{3})(\d{3})$/);
+  if (czMatch) {
+    return `+420 ${czMatch[1]} ${czMatch[2]} ${czMatch[3]}`;
+  }
+  return normalized;
+}
+
+function normalizeAddressDisplay(value: string | null): string | null {
+  if (!value) return null;
+  const cleaned = value
+    .replace(/\b(adresa|address|sidlo|sídlo|provozovna)\s*[:\-]/gi, '')
+    .replace(/[\r\n]+/g, ', ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^,\s*/, '')
+    .replace(/,\s*$/, '')
+    .trim();
+  return cleaned || null;
+}
+
+function parseLocalizedNumber(value: string): number | null {
+  const cleaned = value.replace(/\s+/g, '').replace(/,/g, '.').replace(/[^0-9.]/g, '');
+  if (!cleaned) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function toPublicCurrency(value: string): string {
   const upper = value.toUpperCase();
-  if (upper === 'KC' || upper === 'KČ') return 'Kc';
+  if (upper === 'KC' || upper === 'KČ' || upper === 'CZK') return 'Kč';
   return upper;
 }
 
-function normalizePricingLine(value: string): string | null {
+function normalizePricingLine(value: string): PricingCandidate | null {
   const cleaned = normalizeWhitespace(value);
   if (!cleaned) return null;
+
+  // Require a pricing-like context to avoid dumping unrelated extracted numeric labels.
+  if (!/(od|from|cena|ceník|cenik|konzultac|sezen|sezení|min|za|\/)/i.test(cleaned)) {
+    return null;
+  }
 
   const match = cleaned.match(/([0-9][0-9\s.,]{0,20})(?:\s*)(Kc|Kč|CZK|EUR|USD|€|\$)/i);
   if (!match) return null;
 
+  const numericValue = parseLocalizedNumber(match[1]);
+  if (!numericValue || numericValue <= 0) return null;
+
   const amount = match[1].replace(/\s+/g, ' ').trim();
   const currency = toPublicCurrency(match[2]);
   const prefix = /\b(from|od)\b/i.test(cleaned) ? 'Od ' : '';
-  return `${prefix}${amount} ${currency}`;
+  return {
+    display: `${prefix}${amount} ${currency}`,
+    value: numericValue,
+  };
+}
+
+function normalizePricingRows(rows: string[]): string[] {
+  const candidates = rows
+    .map((entry) => normalizePricingLine(entry))
+    .filter((entry): entry is PricingCandidate => Boolean(entry));
+
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  if (candidates.length === 1) {
+    return [candidates[0].display];
+  }
+
+  const sortedValues = [...candidates].map((entry) => entry.value).sort((a, b) => a - b);
+  const median = sortedValues[Math.floor(sortedValues.length / 2)] ?? sortedValues[0];
+  const filtered = candidates.filter((entry) => entry.value >= median * 0.7 && entry.value <= median * 2.5);
+  const selected = filtered.length > 0 ? filtered : candidates;
+  return uniq(selected.map((entry) => entry.display), 8);
 }
 
 function buildMapUrl(address: string | null): string | null {
@@ -137,7 +210,9 @@ function buildPublicWebsiteViewModel(params: {
   projectName: string;
   verified: VerifiedWebsiteContent;
   copySections?: Partial<WebsiteCopySections>;
+  language?: AppLanguage;
 }): PublicWebsiteViewModel {
+  const language = params.language ?? 'cz';
   const title = humanTitle(params.verified.pageTitle || params.projectName || 'Website');
 
   const services = uniq(
@@ -152,37 +227,45 @@ function buildPublicWebsiteViewModel(params: {
     6
   );
 
-  const pricing = uniq(
-    params.verified.pricingFields
-      .map((entry) => normalizePricingLine(entry))
-      .filter((entry): entry is string => Boolean(entry)),
-    8
-  );
+  const pricing = normalizePricingRows(params.verified.pricingFields);
 
   const contact = {
-    email: params.verified.emails[0] ?? null,
-    phone: params.verified.phones[0] ?? null,
-    address: params.verified.addresses[0] ?? null,
+    email: extractFirstEmail(params.verified.emails[0] ?? null),
+    phone: normalizePhoneDisplay(params.verified.phones[0] ?? null),
+    address: normalizeAddressDisplay(params.verified.addresses[0] ?? null),
   };
 
-  const primaryService = services[0] ?? topics[0] ?? 'individually tailored care';
-  const defaultHeroSubtitle = `Professional support focused on ${primaryService}.`;
+  const primaryService = services[0] ?? topics[0] ?? (language === 'cz' ? 'osobní podporu' : 'individual support');
+  const defaultHeroSubtitle =
+    language === 'cz'
+      ? `Bezpečný prostor pro změnu a porozumění se zaměřením na ${primaryService}.`
+      : `Professional support focused on ${primaryService}.`;
   const defaultAboutCopy =
-    services.length > 0
-      ? `Nabizim citlivy a prakticky pristup zamereny na ${services.slice(0, 2).join(' a ')}.`
-      : 'Nabizim bezpecny prostor pro hledani stabilniho a dlouhodobe udrzitelneho smeru.';
+    language === 'cz'
+      ? services.length > 0
+        ? `Nabízím citlivý a praktický přístup zaměřený na ${services.slice(0, 2).join(' a ')}.`
+        : 'Nabízím bezpečný prostor pro hledání stabilního a dlouhodobě udržitelného směru.'
+      : services.length > 0
+      ? `I offer a practical and sensitive approach focused on ${services.slice(0, 2).join(' and ')}.`
+      : 'I offer a safe and practical space for long-term personal growth.';
   const defaultApproachCopy =
-    topics.length > 0
-      ? `Pracuji strukturovane a srozumitelne. Vzdelavani a dlouhodoby rozvoj propojuji s tematy: ${topics
-          .slice(0, 3)
-          .join(', ')}.`
-      : 'Pracuji strukturovane, s durazem na bezpeci, respekt a dlouhodoby rozvoj.';
+    language === 'cz'
+      ? topics.length > 0
+        ? `Pracuji strukturovaně a srozumitelně. Vzdělávání a dlouhodobý rozvoj propojuji s tématy: ${topics
+            .slice(0, 3)
+            .join(', ')}.`
+        : 'Pracuji strukturovaně, s důrazem na bezpečí, respekt a dlouhodobý rozvoj.'
+      : topics.length > 0
+      ? `I work in a structured way and connect education with long-term growth around: ${topics.slice(0, 3).join(', ')}.`
+      : 'I work in a structured way with emphasis on safety, respect, and long-term growth.';
 
   const sectionOverrides = params.copySections ?? {};
 
   const heroTitle = normalizeWhitespace(sectionOverrides.hero?.title ?? title);
   const heroSubtitle = normalizeWhitespace(sectionOverrides.hero?.subtitle ?? defaultHeroSubtitle);
-  const primaryCta = normalizeWhitespace(sectionOverrides.hero?.cta ?? (params.verified.ctaTexts[0] ?? 'Domluvit konzultaci'));
+  const primaryCta = normalizeWhitespace(
+    sectionOverrides.hero?.cta ?? (params.verified.ctaTexts[0] ?? (language === 'cz' ? 'Domluvit konzultaci' : 'Book a consultation'))
+  );
 
   const aboutCopy = normalizeWhitespace(sectionOverrides.about?.body ?? defaultAboutCopy);
   const approachCopy = normalizeWhitespace(sectionOverrides.approach?.body ?? defaultApproachCopy);
@@ -190,10 +273,16 @@ function buildPublicWebsiteViewModel(params: {
   const serviceItems = uniq(sectionOverrides.servicesPricing?.services ?? services, 8);
   const pricingItems = uniq(sectionOverrides.servicesPricing?.pricing ?? pricing, 8);
   const contactIntro = normalizeWhitespace(
-    sectionOverrides.contact?.intro ?? 'Pro objednani terminu me prosim kontaktujte e-mailem nebo telefonicky.'
+    sectionOverrides.contact?.intro ??
+      (language === 'cz'
+        ? 'Pro objednání termínu mě prosím kontaktujte e-mailem nebo telefonicky.'
+        : 'Please contact me by email or phone to book an appointment.')
   );
   const mapCopy = normalizeWhitespace(
-    sectionOverrides.map?.body ?? 'Setkani probiha po domluve na adrese uvedene nize.'
+    sectionOverrides.map?.body ??
+      (language === 'cz'
+        ? 'Setkání probíhá po domluvě na adrese uvedené níže.'
+        : 'Sessions take place at the address below by appointment.')
   );
 
   return {
@@ -202,9 +291,9 @@ function buildPublicWebsiteViewModel(params: {
     heroSubtitle,
     aboutCopy,
     approachCopy,
-    topics: topicItems.length > 0 ? topicItems : ['Podpora v narocnych zivotnich situacich', 'Stabilizace a prevence pretizeni'],
-    services: serviceItems.length > 0 ? serviceItems : ['Individualni konzultace', 'Dlouhodoba podpora'],
-    pricing: pricingItems.length > 0 ? pricingItems : ['Cenik na vyzadani'],
+    topics: topicItems.length > 0 ? topicItems : ['Podpora v náročných životních situacích', 'Stabilizace a prevence přetížení'],
+    services: serviceItems.length > 0 ? serviceItems : ['Individuální konzultace', 'Dlouhodobá podpora'],
+    pricing: pricingItems.length > 0 ? pricingItems : ['Ceník na vyžádání'],
     contact,
     primaryCta,
     sourceUrl: params.verified.sourceUrl,
@@ -217,10 +306,12 @@ function buildPublicWebsiteViewModel(params: {
 export function buildDeterministicWebsiteCopySections(params: {
   projectName: string;
   verified: VerifiedWebsiteContent;
+  language?: AppLanguage;
 }): WebsiteCopySections {
   const model = buildPublicWebsiteViewModel({
     projectName: params.projectName,
     verified: params.verified,
+    language: params.language,
   });
 
   return {
@@ -266,7 +357,7 @@ function buildPublicHtml(params: {
 
   const contactAddress = model.contact.address
     ? `<p><strong>Adresa:</strong> ${escapeHtml(model.contact.address)}</p>`
-    : '<p><strong>Adresa:</strong> Upresnime pri domluve.</p>';
+    : '<p><strong>Adresa:</strong> Upřesníme při domluvě.</p>';
 
   const topicsMarkup = model.topics.map((topic) => `<li>${escapeHtml(topic)}</li>`).join('\n');
   const servicesMarkup = model.services.map((service) => `<li>${escapeHtml(service)}</li>`).join('\n');
@@ -281,7 +372,7 @@ function buildPublicHtml(params: {
     : '';
 
   const mapMarkup = model.mapUrl
-    ? `<p>${escapeHtml(model.mapCopy)}</p><p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">Otevrit mapu</a></p>`
+    ? `<p>${escapeHtml(model.mapCopy)}</p><p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">Otevřít mapu</a></p>`
     : `<p>${escapeHtml(model.mapCopy)}</p>`;
 
   return [
@@ -296,7 +387,7 @@ function buildPublicHtml(params: {
     '</head>',
     '<body>',
     '  <header id="hero" class="hero">',
-    '    <p class="section-label">Hero</p>',
+    '    <p class="section-label">Úvod</p>',
     `    <h1>${escapeHtml(model.heroTitle)}</h1>`,
     `    <p class="hero-subtitle">${escapeHtml(model.heroSubtitle)}</p>`,
     '    <a class="cta" href="#kontakt">',
@@ -307,27 +398,27 @@ function buildPublicHtml(params: {
     '',
     '  <main>',
     '    <section id="o-mne" class="card">',
-    '      <h2>O mne</h2>',
+    '      <h2>O mně</h2>',
     `      <p>${escapeHtml(model.aboutCopy)}</p>`,
     '    </section>',
     '',
     '    <section id="pristup-vzdelavani" class="card">',
-    '      <h2>Pristup a vzdelavani</h2>',
+    '      <h2>Přístup a vzdělávání</h2>',
     `      <p>${escapeHtml(model.approachCopy)}</p>`,
     '    </section>',
     '',
     '    <section id="temata" class="card">',
-    '      <h2>Temata</h2>',
+    '      <h2>Témata</h2>',
     '      <ul>',
     topicsMarkup,
     '      </ul>',
     '    </section>',
     '',
     '    <section id="sluzby-ceny" class="card">',
-    '      <h2>Sluzby a ceny</h2>',
+    '      <h2>Služby a ceny</h2>',
     '      <div class="split">',
     '        <div>',
-    '          <h3>Sluzby</h3>',
+    '          <h3>Služby</h3>',
     '          <ul>',
     servicesMarkup,
     '          </ul>',
@@ -454,11 +545,13 @@ export function buildDeterministicWebsiteArtifacts(params: {
   verified: VerifiedWebsiteContent;
   portraitImage?: WebsitePortraitImage | null;
   copySections?: Partial<WebsiteCopySections>;
+  language?: AppLanguage;
 }): DeterministicWebsiteArtifacts {
   const model = buildPublicWebsiteViewModel({
     projectName: params.projectName,
     verified: params.verified,
     copySections: params.copySections,
+    language: params.language,
   });
 
   const indexHtml = buildPublicHtml({

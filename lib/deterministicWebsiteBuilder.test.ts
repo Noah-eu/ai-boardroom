@@ -34,7 +34,7 @@ describe('deterministicWebsiteBuilder', () => {
           },
           ctaTexts: ['Book appointment'],
           serviceNames: ['Individual sessions'],
-          pricingFields: ['From 1500 Kč / session'],
+          pricingFields: ['Od 1500 Kč / sezení', 'sleva 500 Kč na newsletter'],
           extractedLinks: [{ href: 'https://example.com/services', label: 'Services', kind: 'http' }],
           missingFields: [],
           extractionWarnings: [],
@@ -58,12 +58,12 @@ describe('deterministicWebsiteBuilder', () => {
       verified,
       copySections: {
         hero: {
-          title: 'Nova Hero Sekce',
-          subtitle: 'Personalizovany uvodni text',
-          cta: 'Objednat termin',
+          title: 'Nová úvodní sekce',
+          subtitle: 'Personalizovaný úvodní text',
+          cta: 'Objednat termín',
         },
         about: {
-          body: 'Upraveny text O mne.',
+          body: 'Upravený text O mně.',
         },
       },
       portraitImage: {
@@ -73,19 +73,21 @@ describe('deterministicWebsiteBuilder', () => {
     });
 
     expect(artifacts.indexHtml).toContain('</html>');
-    expect(artifacts.indexHtml).toContain('Hero');
-    expect(artifacts.indexHtml).toContain('Nova Hero Sekce');
-    expect(artifacts.indexHtml).toContain('Personalizovany uvodni text');
-    expect(artifacts.indexHtml).toContain('Objednat termin');
-    expect(artifacts.indexHtml).toContain('Upraveny text O mne.');
-    expect(artifacts.indexHtml).toContain('O mne');
-    expect(artifacts.indexHtml).toContain('Pristup a vzdelavani');
-    expect(artifacts.indexHtml).toContain('Temata');
-    expect(artifacts.indexHtml).toContain('Sluzby a ceny');
+    expect(artifacts.indexHtml).toContain('Úvod');
+    expect(artifacts.indexHtml).toContain('Nová úvodní sekce');
+    expect(artifacts.indexHtml).toContain('Personalizovaný úvodní text');
+    expect(artifacts.indexHtml).toContain('Objednat termín');
+    expect(artifacts.indexHtml).toContain('Upravený text O mně.');
+    expect(artifacts.indexHtml).toContain('O mně');
+    expect(artifacts.indexHtml).toContain('Přístup a vzdělávání');
+    expect(artifacts.indexHtml).toContain('Témata');
+    expect(artifacts.indexHtml).toContain('Služby a ceny');
     expect(artifacts.indexHtml).toContain('Kontakt');
     expect(artifacts.indexHtml).toContain('Mapa');
     expect(artifacts.indexHtml).toContain('hello@example.com');
-    expect(artifacts.indexHtml).toContain('Od 1500 Kc');
+    expect(artifacts.indexHtml).toContain('Od 1500 Kč');
+    expect(artifacts.indexHtml).not.toContain('<li>500 Kč</li>');
+    expect(artifacts.indexHtml).not.toContain('Professional support focused on');
     expect(artifacts.indexHtml).toContain('assets/portrait.jpg');
     expect(artifacts.indexHtml).not.toContain('Verified Source Snapshot');
     expect(artifacts.indexHtml).not.toContain('missing fields reported by ingestion');

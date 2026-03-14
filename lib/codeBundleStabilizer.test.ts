@@ -30,6 +30,15 @@ describe('codeBundleStabilizer', () => {
 
     expect(
       classifyCodeGenerationMode({
+        name: 'Therapist website uploader wording',
+        description: 'Build website from uploaded source materials',
+        latestRevisionFeedback: null,
+        outputType: 'website',
+      })
+    ).toBe('company-website');
+
+    expect(
+      classifyCodeGenerationMode({
         name: 'PDF uploader',
         description: 'Create a simple PDF upload web app',
         latestRevisionFeedback: null,
@@ -62,6 +71,11 @@ describe('codeBundleStabilizer', () => {
     expect(paths).toContain('site-metadata.json');
     expect(stabilized.entryPoint).toBe('index.html');
     expect(stabilized.bundle.summary).toContain('mode=landing-page');
+
+    const siteMetadataRaw = stabilized.bundle.files.find((file) => file.path === 'site-metadata.json')?.content ?? '{}';
+    const siteMetadata = JSON.parse(siteMetadataRaw) as { mode?: string; outputKind?: string };
+    expect(siteMetadata.mode).toBe('landing-page');
+    expect(siteMetadata.outputKind).toBe('static-web');
   });
 
   it('detects entry point by priority', () => {
