@@ -1558,11 +1558,14 @@ function shouldUseSegmentedWebsiteBuild(project: Project, snapshot?: ExecutionSn
     return false;
   }
 
+  const intentText = buildWebsiteTaskIntentText(project, snapshot);
+
   const strategy = decideWebsiteGraphStrategy({
     outputType: project.outputType,
     projectName: project.name,
     projectDescription: project.description,
     projectPrompt: snapshot?.projectPrompt ?? project.description,
+    taskIntentText: intentText,
     revisionPrompt: snapshot?.revisionPrompt ?? project.latestRevisionFeedback,
     debateSummary: snapshot?.approvedDebateSummary ?? getLatestOrchestratorSummary(project),
     hasWebsiteAttachmentSignals: hasWebsiteAttachmentSignals(project),
@@ -2813,6 +2816,31 @@ function getLatestOrchestratorSummary(project: Project): string | null {
     .reverse()
     .find((entry) => entry.sender === 'orchestrator' && entry.type === 'system');
   return message?.content ?? null;
+}
+
+function buildWebsiteTaskIntentText(project: Project, snapshot?: ExecutionSnapshot): string {
+  const recentUserMessages = [...project.messages]
+    .reverse()
+    .filter((entry) => entry.sender === 'user' && entry.type === 'chat' && entry.content.trim())
+    .slice(0, 3)
+    .map((entry) => entry.content.trim())
+    .reverse();
+
+  const latestRevisionUserPrompt = [...project.revisionHistory]
+    .reverse()
+    .map((entry) => entry.userPrompt?.trim())
+    .find((entry): entry is string => Boolean(entry));
+
+  return [
+    project.description,
+    snapshot?.projectPrompt ?? '',
+    project.latestRevisionFeedback ?? '',
+    snapshot?.revisionPrompt ?? '',
+    latestRevisionUserPrompt ?? '',
+    ...recentUserMessages,
+  ]
+    .filter((entry) => Boolean(entry && entry.trim()))
+    .join('\n');
 }
 
 function shorten(value: string | undefined, maxChars: number): string {
@@ -7096,7 +7124,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           producesArtifacts: [{ path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' }],
         });
 
-        if (shouldUseSegmentedWebsiteBuild(project)) {
+        if (shouldUseSegmentedWebsiteBuild(project, project.executionSnapshot ?? undefined)) {
           const webContentNormalizer = createTask({
             title: `WebContentNormalizer: Normalize website content model (${codeModeLabel})`,
             description:

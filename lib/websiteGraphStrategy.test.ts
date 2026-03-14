@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decideWebsiteGraphStrategy } from './websiteGraphStrategy';
+import { decideWebsiteGraphStrategy, deriveWebsiteNodeDecomposition } from './websiteGraphStrategy';
 
 describe('websiteGraphStrategy', () => {
   it('selects segmented website graph for prompt-only explicit website facts', () => {
@@ -36,10 +36,11 @@ describe('websiteGraphStrategy', () => {
     });
 
     expect(strategy.kind).toBe('segmented-website');
-    expect(strategy.reasoning.hasSourceSignals).toBe(true);
+    expect(strategy.reasoning.hasStructuredWebsiteSources).toBe(true);
+    expect(strategy.reasoning.hasAcquisitionSignals).toBe(true);
   });
 
-  it('keeps prompt-only and attachment-based website inputs on comparable segmented strategy', () => {
+  it('keeps prompt-only and attachment-based website inputs on comparable segmented decomposition', () => {
     const promptOnly = decideWebsiteGraphStrategy({
       outputType: 'app',
       projectName: 'Parity Prompt',
@@ -61,6 +62,49 @@ describe('websiteGraphStrategy', () => {
 
     expect(promptOnly.kind).toBe('segmented-website');
     expect(attachmentBased.kind).toBe('segmented-website');
+    expect(deriveWebsiteNodeDecomposition(promptOnly.kind)).toEqual(
+      deriveWebsiteNodeDecomposition(attachmentBased.kind)
+    );
+    expect(promptOnly.reasoning.structuredContentAvailability).toBe(true);
+    expect(attachmentBased.reasoning.structuredContentAvailability).toBe(true);
+  });
+
+  it('does not treat acquisition-only signals as structured website assembly readiness', () => {
+    const strategy = decideWebsiteGraphStrategy({
+      outputType: 'app',
+      projectName: 'URL-only Intent',
+      projectDescription: 'Website rebuild',
+      projectPrompt: 'Use URL',
+      hasWebsiteAttachmentSignals: true,
+      hasStructuredWebsiteSources: false,
+    });
+
+    expect(strategy.reasoning.hasAcquisitionSignals).toBe(true);
+    expect(strategy.reasoning.hasStructuredWebsiteSources).toBe(false);
+    expect(strategy.reasoning.structuredContentAvailability).toBe(false);
+    expect(strategy.kind).toBe('generic-code');
+  });
+
+  it('uses normalized task intent text to unlock segmented graph for prompt-only tasks', () => {
+    const strategy = decideWebsiteGraphStrategy({
+      outputType: 'app',
+      projectName: 'General Project',
+      projectDescription: 'Build product output',
+      taskIntentText: [
+        'Create a one-page website for advisory studio',
+        'Hero: Advisory Studio',
+        'About: Boutique strategic consulting for founders',
+        'Services: Strategy sprint, Fractional CTO',
+        'Pricing: From 120 EUR / hour',
+        'Contact: hello@advisor.test',
+      ].join('\n'),
+      hasWebsiteAttachmentSignals: false,
+      hasStructuredWebsiteSources: false,
+    });
+
+    expect(strategy.kind).toBe('segmented-website');
+    expect(strategy.reasoning.websiteIntent).toBe(true);
+    expect(strategy.reasoning.structuredContentAvailability).toBe(true);
   });
 
   it('avoids segmented website graph for non-website app intent without structured facts', () => {

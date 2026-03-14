@@ -9,6 +9,7 @@ export type WebsiteGraphStrategyInput = {
   projectName: string;
   projectDescription: string;
   projectPrompt?: string | null;
+  taskIntentText?: string | null;
   revisionPrompt?: string | null;
   debateSummary?: string | null;
   hasWebsiteAttachmentSignals?: boolean;
@@ -21,9 +22,48 @@ export type WebsiteGraphStrategy = {
     websiteIntent: boolean;
     explicitSectionSignals: number;
     promptFactsSufficient: boolean;
-    hasSourceSignals: boolean;
+    promptStructuredFactsAvailable: boolean;
+    hasStructuredWebsiteSources: boolean;
+    hasAcquisitionSignals: boolean;
+    structuredContentAvailability: boolean;
   };
 };
+
+export const SEGMENTED_WEBSITE_GRAPH_NODE_DECOMPOSITION = [
+  'content-normalization',
+  'copy-hero',
+  'copy-about',
+  'copy-approach',
+  'copy-topics',
+  'copy-services-pricing',
+  'copy-contact',
+  'copy-map',
+  'html-build',
+  'styles-build',
+  'script-build',
+  'generated-files-assembly',
+  'patch-plan',
+  'quality-review',
+  'bundle-export',
+  'final-summary',
+] as const;
+
+export const GENERIC_CODE_GRAPH_NODE_DECOMPOSITION = [
+  'file-build',
+  'generated-files',
+  'patch-plan',
+  'quality-review',
+  'bundle-export',
+  'final-summary',
+] as const;
+
+export function deriveWebsiteNodeDecomposition(
+  kind: WebsiteGraphStrategy['kind']
+): readonly string[] {
+  return kind === 'segmented-website'
+    ? SEGMENTED_WEBSITE_GRAPH_NODE_DECOMPOSITION
+    : GENERIC_CODE_GRAPH_NODE_DECOMPOSITION;
+}
 
 const WEBSITE_INTENT_PATTERN =
   /\b(website|web site|landing page|home\s?page|homepage|company site|static site|html\s+css|corporate site|one-page|one page)\b/i;
@@ -35,6 +75,7 @@ export function decideWebsiteGraphStrategy(input: WebsiteGraphStrategyInput): We
     input.projectName,
     input.projectDescription,
     input.projectPrompt ?? '',
+    input.taskIntentText ?? '',
     input.revisionPrompt ?? '',
     input.debateSummary ?? '',
   ]
@@ -56,11 +97,24 @@ export function decideWebsiteGraphStrategy(input: WebsiteGraphStrategyInput): We
   });
 
   const promptFactsSufficient = hasSufficientVerifiedWebsiteContent(promptFacts);
-  const hasSourceSignals = Boolean(input.hasWebsiteAttachmentSignals || input.hasStructuredWebsiteSources);
+  const promptStructuredFactsAvailable = Boolean(
+    promptFacts.sourceUrl ||
+      promptFacts.bodyTextBlocks.length > 0 ||
+      promptFacts.serviceNames.length > 0 ||
+      promptFacts.pricingFields.length > 0 ||
+      promptFacts.ctaTexts.length > 0 ||
+      promptFacts.emails.length > 0 ||
+      promptFacts.phones.length > 0 ||
+      promptFacts.addresses.length > 0
+  );
+  const hasStructuredWebsiteSources = Boolean(input.hasStructuredWebsiteSources);
+  const hasAcquisitionSignals = Boolean(input.hasWebsiteAttachmentSignals);
+  const structuredContentAvailability =
+    promptStructuredFactsAvailable || explicitSectionSignals >= 3 || hasStructuredWebsiteSources;
 
   const shouldUseSegmented =
     input.outputType === 'website' ||
-    (websiteIntent && (promptFactsSufficient || explicitSectionSignals >= 3 || hasSourceSignals));
+    (websiteIntent && structuredContentAvailability);
 
   return {
     kind: shouldUseSegmented ? 'segmented-website' : 'generic-code',
@@ -68,7 +122,10 @@ export function decideWebsiteGraphStrategy(input: WebsiteGraphStrategyInput): We
       websiteIntent,
       explicitSectionSignals,
       promptFactsSufficient,
-      hasSourceSignals,
+      promptStructuredFactsAvailable,
+      hasStructuredWebsiteSources,
+      hasAcquisitionSignals,
+      structuredContentAvailability,
     },
   };
 }
