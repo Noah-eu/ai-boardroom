@@ -250,6 +250,7 @@ export function buildWebsiteMetadata(params: {
   projectName: string;
   projectDescription: string;
   sourceFiles: ExecutionOutputFile[];
+  language: AppLanguage;
   sourceUrl?: string | null;
 }): string {
   const normalizedMode = normalizeWebsiteMode(params.mode);
@@ -258,6 +259,11 @@ export function buildWebsiteMetadata(params: {
     type: 'ai-boardroom-website-metadata',
     mode: normalizedMode,
     outputKind: 'static-web',
+    outputClassification: {
+      audience: 'public',
+      contentPolicy: 'verified-facts-first',
+    },
+    locale: params.language,
     entryPoint: params.entryPoint,
     projectName: params.projectName || 'Generated Website',
     projectDescription: replaceKnownUrlPlaceholders(params.projectDescription || '', params.sourceUrl),
@@ -414,6 +420,7 @@ export function stabilizeCodeExecutionBundle(input: StabilizeInput): {
         projectName: input.projectName,
         projectDescription: input.projectDescription,
         sourceFiles: files,
+        language: input.language,
         sourceUrl: input.sourceUrl,
       })
     );

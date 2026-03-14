@@ -107,4 +107,147 @@ describe('deterministicWebsiteBuilder', () => {
     const verified = deriveVerifiedWebsiteContent([] as never);
     expect(hasSufficientVerifiedWebsiteContent(verified)).toBe(false);
   });
+
+  it('filters navigation/debug/metadata-like text from verified facts', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-2',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: '"projectPrompt": "internal"',
+        summary: 'Structured source',
+        extractedText: 'Public content',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Verified Practice',
+          visibleTextBlocks: ['Therapy support'],
+          headings: ['Home', 'Services', 'Verified Care'],
+          paragraphs: ['Paragraph'],
+          navigationLabels: ['Home', 'Contact'],
+          contactFields: {
+            emails: ['debug@example.com'],
+            phones: ['+420 123 456 789'],
+            addresses: ['Address: Test Street 1'],
+            mailtoLinks: ['mailto:debug@example.com'],
+            telLinks: ['tel:+420123456789'],
+          },
+          ctaTexts: ['Contact', 'Book Consultation'],
+          serviceNames: ['Services', 'Project prompt: internal note', 'Individual counseling'],
+          pricingFields: ['{"debug":true}', 'Od 1500 Kč / 50 min'],
+          extractedLinks: [{ href: 'https://example.com/services', label: 'Services', kind: 'http' }],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    expect(verified.pageTitle).toBe('Verified Practice');
+    expect(verified.headings).toContain('Verified Care');
+    expect(verified.headings).not.toContain('Home');
+    expect(verified.serviceNames).toContain('Individual counseling');
+    expect(verified.serviceNames.join(' ')).not.toContain('Project prompt');
+    expect(verified.ctaTexts).toContain('Book Consultation');
+    expect(verified.ctaTexts).not.toContain('Contact');
+    expect(verified.pricingFields).toContain('Od 1500 Kč / 50 min');
+    expect(verified.pricingFields.join(' ')).not.toContain('{"debug":true}');
+  });
+
+  it('keeps locale consistent in generated public HTML', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-3',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Mind Studio',
+        summary: 'Structured source',
+        extractedText: 'Professional support from 80 EUR.',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Mind Studio',
+          visibleTextBlocks: ['Coaching support', 'From 80 EUR'],
+          headings: ['Coaching support', 'Stress management'],
+          paragraphs: ['Individual sessions.'],
+          navigationLabels: ['Home', 'Contact'],
+          contactFields: {
+            emails: ['hello@example.com'],
+            phones: ['+420777888999'],
+            addresses: ['Main Street 1, Prague'],
+            mailtoLinks: ['mailto:hello@example.com'],
+            telLinks: ['tel:+420777888999'],
+          },
+          ctaTexts: ['Book consultation'],
+          serviceNames: ['Individual sessions'],
+          pricingFields: ['From 80 EUR'],
+          extractedLinks: [{ href: 'https://example.com/services', label: 'Services', kind: 'http' }],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Mind Studio',
+      projectDescription: 'Public website',
+      verified,
+      language: 'en',
+    });
+
+    expect(artifacts.indexHtml).toContain('<html lang="en">');
+    expect(artifacts.indexHtml).toContain('Intro');
+    expect(artifacts.indexHtml).toContain('About');
+    expect(artifacts.indexHtml).toContain('Services and Pricing');
+    expect(artifacts.indexHtml).not.toContain('<h2>O mně</h2>');
+  });
+
+  it('fails sufficiency check when only source URL exists without verified public facts', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-4',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: '',
+        summary: 'Structured source',
+        extractedText: '',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: '',
+          visibleTextBlocks: [],
+          headings: ['Home', 'Contact'],
+          paragraphs: [],
+          navigationLabels: ['Home', 'Contact'],
+          contactFields: {
+            emails: [],
+            phones: [],
+            addresses: [],
+            mailtoLinks: [],
+            telLinks: [],
+          },
+          ctaTexts: ['Contact'],
+          serviceNames: ['Services'],
+          pricingFields: [],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    expect(verified.sourceUrl).toBe('https://example.com');
+    expect(verified.headings).toEqual([]);
+    expect(verified.serviceNames).toEqual([]);
+    expect(hasSufficientVerifiedWebsiteContent(verified)).toBe(false);
+  });
+
+  it('detects prompt/debug leakage markers in generated HTML', () => {
+    const errors = validatePublicWebsiteHtml(
+      '<!doctype html><html><body><p>Project prompt: expose internals</p><p>{{ TEMPLATE }}</p></body></html>',
+      'Create website from verified facts only.'
+    );
+
+    expect(errors.join(' | ')).toContain('internal marker: project prompt:');
+    expect(errors.join(' | ')).toContain('unresolved template tokens');
+  });
 });

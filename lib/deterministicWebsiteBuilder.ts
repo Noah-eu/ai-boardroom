@@ -53,6 +53,8 @@ export type WebsiteCopySections = {
 };
 
 type PublicWebsiteViewModel = {
+  language: AppLanguage;
+  labels: LocalizedWebsiteLabels;
   title: string;
   heroTitle: string;
   heroSubtitle: string;
@@ -77,6 +79,92 @@ type PricingCandidate = {
   display: string;
   value: number;
 };
+
+type LocalizedWebsiteLabels = {
+  htmlLang: 'cs' | 'en';
+  heroSectionLabel: string;
+  aboutHeading: string;
+  approachHeading: string;
+  topicsHeading: string;
+  servicesPricingHeading: string;
+  servicesHeading: string;
+  pricingHeading: string;
+  contactHeading: string;
+  mapHeading: string;
+  mapLinkLabel: string;
+  emptyListNote: string;
+  noContactNote: string;
+};
+
+const INTERNAL_TEXT_MARKERS = [
+  /\bverified\s+source\s+snapshot\b/i,
+  /\bstructured\s+snapshot\b/i,
+  /\bproject\s+prompt\b/i,
+  /\brevision\s+request\b/i,
+  /\braw\s+prompt\b/i,
+  /\bsummary-metadata\.json\b/i,
+  /\bsite-metadata\.json\b/i,
+  /\bapp-manifest\.json\b/i,
+  /\bmissing\s+fields\b/i,
+  /\bextraction\s*warnings?\b/i,
+  /\bdebug\b/i,
+  /\bmetadata\b/i,
+  /\bnavigation\s+labels?\b/i,
+  /\braw\s+extracted\b/i,
+];
+
+const NAVIGATION_LABEL_PATTERNS = [
+  /^home$/i,
+  /^domu$/i,
+  /^dom[uů]$/i,
+  /^about$/i,
+  /^o\s*mne$/i,
+  /^services?$/i,
+  /^sluzby$/i,
+  /^contact$/i,
+  /^kontakt$/i,
+  /^pricing$/i,
+  /^cenik$/i,
+  /^blog$/i,
+  /^faq$/i,
+  /^mapa$/i,
+];
+
+function getLocalizedWebsiteLabels(language: AppLanguage): LocalizedWebsiteLabels {
+  if (language === 'en') {
+    return {
+      htmlLang: 'en',
+      heroSectionLabel: 'Intro',
+      aboutHeading: 'About',
+      approachHeading: 'Approach and Education',
+      topicsHeading: 'Topics',
+      servicesPricingHeading: 'Services and Pricing',
+      servicesHeading: 'Services',
+      pricingHeading: 'Pricing',
+      contactHeading: 'Contact',
+      mapHeading: 'Map',
+      mapLinkLabel: 'Open map',
+      emptyListNote: 'Details will be added after source verification.',
+      noContactNote: 'Contact details are not publicly listed yet.',
+    };
+  }
+
+  return {
+    htmlLang: 'cs',
+    heroSectionLabel: 'Úvod',
+    aboutHeading: 'O mně',
+    approachHeading: 'Přístup a vzdělávání',
+    topicsHeading: 'Témata',
+    servicesPricingHeading: 'Služby a ceny',
+    servicesHeading: 'Služby',
+    pricingHeading: 'Ceny',
+    contactHeading: 'Kontakt',
+    mapHeading: 'Mapa',
+    mapLinkLabel: 'Otevřít mapu',
+    emptyListNote: 'Detaily budou doplněny po ověření zdrojů.',
+    noContactNote: 'Kontaktní údaje zatím nejsou veřejně uvedeny.',
+  };
+}
 
 function uniq(values: string[], max = 20): string[] {
   const out: string[] = [];
@@ -108,6 +196,62 @@ function humanTitle(value: string): string {
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function looksLikeSerializedPayload(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    return true;
+  }
+  return /"[^"]+"\s*:/.test(trimmed);
+}
+
+function containsInternalMarker(value: string): boolean {
+  return INTERNAL_TEXT_MARKERS.some((pattern) => pattern.test(value));
+}
+
+function isNavigationLikeLabel(value: string): boolean {
+  const normalized = normalizeWhitespace(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  if (!normalized) return false;
+  return NAVIGATION_LABEL_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function sanitizePublicText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const cleaned = normalizeWhitespace(value);
+  if (!cleaned) return null;
+  if (containsInternalMarker(cleaned)) return null;
+  if (looksLikeSerializedPayload(cleaned)) return null;
+  return cleaned;
+}
+
+function sanitizePublicList(
+  values: Array<string | null | undefined>,
+  max: number,
+  options?: {
+    rejectNavigationLabels?: boolean;
+  }
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const cleaned = sanitizePublicText(value);
+    if (!cleaned) continue;
+    if (options?.rejectNavigationLabels && isNavigationLikeLabel(cleaned)) continue;
+
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= max) break;
+  }
+
+  return out;
 }
 
 function normalizePhoneForTel(value: string): string {
@@ -213,33 +357,52 @@ function buildPublicWebsiteViewModel(params: {
   language?: AppLanguage;
 }): PublicWebsiteViewModel {
   const language = params.language ?? 'cz';
-  const title = humanTitle(params.verified.pageTitle || params.projectName || 'Website');
+  const labels = getLocalizedWebsiteLabels(language);
+  const title = humanTitle(sanitizePublicText(params.verified.pageTitle) || params.projectName || 'Website');
+
+  const sanitizedHeadings = sanitizePublicList(params.verified.headings, 30, {
+    rejectNavigationLabels: true,
+  });
+  const sanitizedServiceNames = sanitizePublicList(params.verified.serviceNames, 20, {
+    rejectNavigationLabels: true,
+  });
+  const sanitizedPricingFields = sanitizePublicList(params.verified.pricingFields, 20);
+  const sanitizedCtaTexts = sanitizePublicList(params.verified.ctaTexts, 12, {
+    rejectNavigationLabels: true,
+  });
+  const sanitizedEmails = sanitizePublicList(params.verified.emails, 12);
+  const sanitizedPhones = sanitizePublicList(params.verified.phones, 12);
+  const sanitizedAddresses = sanitizePublicList(params.verified.addresses, 8);
 
   const services = uniq(
-    (params.verified.serviceNames.length > 0 ? params.verified.serviceNames : params.verified.headings).slice(0, 12),
+    (sanitizedServiceNames.length > 0 ? sanitizedServiceNames : sanitizedHeadings).slice(0, 12),
     8
   );
 
   const topics = uniq(
-    params.verified.headings
+    sanitizedHeadings
       .filter((entry) => !/kontakt|contact|mapa|pricing|price|cen/i.test(entry))
       .slice(0, 10),
     6
   );
 
-  const pricing = normalizePricingRows(params.verified.pricingFields);
+  const pricing = normalizePricingRows(sanitizedPricingFields);
 
   const contact = {
-    email: extractFirstEmail(params.verified.emails[0] ?? null),
-    phone: normalizePhoneDisplay(params.verified.phones[0] ?? null),
-    address: normalizeAddressDisplay(params.verified.addresses[0] ?? null),
+    email: extractFirstEmail(sanitizedEmails[0] ?? null),
+    phone: normalizePhoneDisplay(sanitizedPhones[0] ?? null),
+    address: normalizeAddressDisplay(sanitizedAddresses[0] ?? null),
   };
 
-  const primaryService = services[0] ?? topics[0] ?? (language === 'cz' ? 'osobní podporu' : 'individual support');
+  const primaryService = services[0] ?? topics[0] ?? null;
   const defaultHeroSubtitle =
     language === 'cz'
-      ? `Bezpečný prostor pro změnu a porozumění se zaměřením na ${primaryService}.`
-      : `Professional support focused on ${primaryService}.`;
+      ? primaryService
+        ? `Bezpečný prostor pro změnu a porozumění se zaměřením na ${primaryService}.`
+        : 'Bezpečný prostor pro změnu a porozumění.'
+      : primaryService
+      ? `Professional support focused on ${primaryService}.`
+      : 'Professional support for sustainable personal growth.';
   const defaultAboutCopy =
     language === 'cz'
       ? services.length > 0
@@ -261,39 +424,58 @@ function buildPublicWebsiteViewModel(params: {
 
   const sectionOverrides = params.copySections ?? {};
 
-  const heroTitle = normalizeWhitespace(sectionOverrides.hero?.title ?? title);
-  const heroSubtitle = normalizeWhitespace(sectionOverrides.hero?.subtitle ?? defaultHeroSubtitle);
+  const heroOverrideTitle = sanitizePublicText(sectionOverrides.hero?.title);
+  const heroOverrideSubtitle = sanitizePublicText(sectionOverrides.hero?.subtitle);
+  const heroOverrideCta = sanitizePublicText(sectionOverrides.hero?.cta);
+  const aboutOverride = sanitizePublicText(sectionOverrides.about?.body);
+  const approachOverride = sanitizePublicText(sectionOverrides.approach?.body);
+  const topicsOverride = sanitizePublicList(sectionOverrides.topics?.items ?? [], 6, {
+    rejectNavigationLabels: true,
+  });
+  const servicesOverride = sanitizePublicList(sectionOverrides.servicesPricing?.services ?? [], 8, {
+    rejectNavigationLabels: true,
+  });
+  const pricingOverride = normalizePricingRows(
+    sanitizePublicList(sectionOverrides.servicesPricing?.pricing ?? [], 20)
+  );
+  const contactIntroOverride = sanitizePublicText(sectionOverrides.contact?.intro);
+  const mapOverride = sanitizePublicText(sectionOverrides.map?.body);
+
+  const heroTitle = normalizeWhitespace(heroOverrideTitle ?? title);
+  const heroSubtitle = normalizeWhitespace(heroOverrideSubtitle ?? defaultHeroSubtitle);
   const primaryCta = normalizeWhitespace(
-    sectionOverrides.hero?.cta ?? (params.verified.ctaTexts[0] ?? (language === 'cz' ? 'Domluvit konzultaci' : 'Book a consultation'))
+    heroOverrideCta ?? (sanitizedCtaTexts[0] ?? (language === 'cz' ? 'Domluvit konzultaci' : 'Book a consultation'))
   );
 
-  const aboutCopy = normalizeWhitespace(sectionOverrides.about?.body ?? defaultAboutCopy);
-  const approachCopy = normalizeWhitespace(sectionOverrides.approach?.body ?? defaultApproachCopy);
-  const topicItems = uniq(sectionOverrides.topics?.items ?? topics, 6);
-  const serviceItems = uniq(sectionOverrides.servicesPricing?.services ?? services, 8);
-  const pricingItems = uniq(sectionOverrides.servicesPricing?.pricing ?? pricing, 8);
+  const aboutCopy = normalizeWhitespace(aboutOverride ?? defaultAboutCopy);
+  const approachCopy = normalizeWhitespace(approachOverride ?? defaultApproachCopy);
+  const topicItems = uniq(topicsOverride.length > 0 ? topicsOverride : topics, 6);
+  const serviceItems = uniq(servicesOverride.length > 0 ? servicesOverride : services, 8);
+  const pricingItems = uniq(pricingOverride.length > 0 ? pricingOverride : pricing, 8);
   const contactIntro = normalizeWhitespace(
-    sectionOverrides.contact?.intro ??
+    contactIntroOverride ??
       (language === 'cz'
         ? 'Pro objednání termínu mě prosím kontaktujte e-mailem nebo telefonicky.'
         : 'Please contact me by email or phone to book an appointment.')
   );
   const mapCopy = normalizeWhitespace(
-    sectionOverrides.map?.body ??
+    mapOverride ??
       (language === 'cz'
         ? 'Setkání probíhá po domluvě na adrese uvedené níže.'
         : 'Sessions take place at the address below by appointment.')
   );
 
   return {
+    language,
+    labels,
     title,
     heroTitle,
     heroSubtitle,
     aboutCopy,
     approachCopy,
-    topics: topicItems.length > 0 ? topicItems : ['Podpora v náročných životních situacích', 'Stabilizace a prevence přetížení'],
-    services: serviceItems.length > 0 ? serviceItems : ['Individuální konzultace', 'Dlouhodobá podpora'],
-    pricing: pricingItems.length > 0 ? pricingItems : ['Ceník na vyžádání'],
+    topics: topicItems,
+    services: serviceItems,
+    pricing: pricingItems,
     contact,
     primaryCta,
     sourceUrl: params.verified.sourceUrl,
@@ -347,21 +529,34 @@ function buildPublicHtml(params: {
   portraitImage?: WebsitePortraitImage | null;
 }): string {
   const { model, portraitImage } = params;
-  const contactEmail = model.contact.email
-    ? `<p><strong>E-mail:</strong> <a href="mailto:${escapeHtml(model.contact.email)}">${escapeHtml(model.contact.email)}</a></p>`
-    : '<p><strong>E-mail:</strong> Na vyzadani.</p>';
+  const contactRows = [
+    model.contact.email
+      ? `<p><strong>E-mail:</strong> <a href="mailto:${escapeHtml(model.contact.email)}">${escapeHtml(model.contact.email)}</a></p>`
+      : '',
+    model.contact.phone
+      ? `<p><strong>${model.language === 'cz' ? 'Telefon' : 'Phone'}:</strong> <a href="tel:${escapeHtml(normalizePhoneForTel(model.contact.phone))}">${escapeHtml(model.contact.phone)}</a></p>`
+      : '',
+    model.contact.address
+      ? `<p><strong>${model.language === 'cz' ? 'Adresa' : 'Address'}:</strong> ${escapeHtml(model.contact.address)}</p>`
+      : '',
+  ].filter(Boolean);
 
-  const contactPhone = model.contact.phone
-    ? `<p><strong>Telefon:</strong> <a href="tel:${escapeHtml(normalizePhoneForTel(model.contact.phone))}">${escapeHtml(model.contact.phone)}</a></p>`
-    : '<p><strong>Telefon:</strong> Na vyzadani.</p>';
+  const contactMarkup =
+    contactRows.length > 0 ? contactRows.join('\n') : `<p>${escapeHtml(model.labels.noContactNote)}</p>`;
 
-  const contactAddress = model.contact.address
-    ? `<p><strong>Adresa:</strong> ${escapeHtml(model.contact.address)}</p>`
-    : '<p><strong>Adresa:</strong> Upřesníme při domluvě.</p>';
+  const topicsMarkup =
+    model.topics.length > 0
+      ? `<ul>\n${model.topics.map((topic) => `<li>${escapeHtml(topic)}</li>`).join('\n')}\n      </ul>`
+      : `<p class="empty-note">${escapeHtml(model.labels.emptyListNote)}</p>`;
+  const servicesMarkup =
+    model.services.length > 0
+      ? `<ul>\n${model.services.map((service) => `<li>${escapeHtml(service)}</li>`).join('\n')}\n          </ul>`
+      : `<p class="empty-note">${escapeHtml(model.labels.emptyListNote)}</p>`;
+  const pricingMarkup =
+    model.pricing.length > 0
+      ? `<ul>\n${model.pricing.map((price) => `<li>${escapeHtml(price)}</li>`).join('\n')}\n          </ul>`
+      : `<p class="empty-note">${escapeHtml(model.labels.emptyListNote)}</p>`;
 
-  const topicsMarkup = model.topics.map((topic) => `<li>${escapeHtml(topic)}</li>`).join('\n');
-  const servicesMarkup = model.services.map((service) => `<li>${escapeHtml(service)}</li>`).join('\n');
-  const pricingMarkup = model.pricing.map((price) => `<li>${escapeHtml(price)}</li>`).join('\n');
 
   const portraitMarkup = portraitImage
     ? [
@@ -372,12 +567,12 @@ function buildPublicHtml(params: {
     : '';
 
   const mapMarkup = model.mapUrl
-    ? `<p>${escapeHtml(model.mapCopy)}</p><p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">Otevřít mapu</a></p>`
+    ? `<p>${escapeHtml(model.mapCopy)}</p><p><a class="map-link" href="${escapeHtml(model.mapUrl)}" target="_blank" rel="noreferrer">${escapeHtml(model.labels.mapLinkLabel)}</a></p>`
     : `<p>${escapeHtml(model.mapCopy)}</p>`;
 
   return [
     '<!doctype html>',
-    '<html lang="cs">',
+    `<html lang="${model.labels.htmlLang}">`,
     '<head>',
     '  <meta charset="utf-8" />',
     '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
@@ -387,7 +582,7 @@ function buildPublicHtml(params: {
     '</head>',
     '<body>',
     '  <header id="hero" class="hero">',
-    '    <p class="section-label">Úvod</p>',
+    `    <p class="section-label">${escapeHtml(model.labels.heroSectionLabel)}</p>`,
     `    <h1>${escapeHtml(model.heroTitle)}</h1>`,
     `    <p class="hero-subtitle">${escapeHtml(model.heroSubtitle)}</p>`,
     '    <a class="cta" href="#kontakt">',
@@ -398,50 +593,42 @@ function buildPublicHtml(params: {
     '',
     '  <main>',
     '    <section id="o-mne" class="card">',
-    '      <h2>O mně</h2>',
+    `      <h2>${escapeHtml(model.labels.aboutHeading)}</h2>`,
     `      <p>${escapeHtml(model.aboutCopy)}</p>`,
     '    </section>',
     '',
     '    <section id="pristup-vzdelavani" class="card">',
-    '      <h2>Přístup a vzdělávání</h2>',
+    `      <h2>${escapeHtml(model.labels.approachHeading)}</h2>`,
     `      <p>${escapeHtml(model.approachCopy)}</p>`,
     '    </section>',
     '',
     '    <section id="temata" class="card">',
-    '      <h2>Témata</h2>',
-    '      <ul>',
+    `      <h2>${escapeHtml(model.labels.topicsHeading)}</h2>`,
     topicsMarkup,
-    '      </ul>',
     '    </section>',
     '',
     '    <section id="sluzby-ceny" class="card">',
-    '      <h2>Služby a ceny</h2>',
+    `      <h2>${escapeHtml(model.labels.servicesPricingHeading)}</h2>`,
     '      <div class="split">',
     '        <div>',
-    '          <h3>Služby</h3>',
-    '          <ul>',
+    `          <h3>${escapeHtml(model.labels.servicesHeading)}</h3>`,
     servicesMarkup,
-    '          </ul>',
     '        </div>',
     '        <div>',
-    '          <h3>Ceny</h3>',
-    '          <ul>',
+    `          <h3>${escapeHtml(model.labels.pricingHeading)}</h3>`,
     pricingMarkup,
-    '          </ul>',
     '        </div>',
     '      </div>',
     '    </section>',
     '',
     '    <section id="kontakt" class="card">',
-    '      <h2>Kontakt</h2>',
+    `      <h2>${escapeHtml(model.labels.contactHeading)}</h2>`,
     `      <p>${escapeHtml(model.contactIntro)}</p>`,
-    contactEmail,
-    contactPhone,
-    contactAddress,
+    contactMarkup,
     '    </section>',
     '',
     '    <section id="mapa" class="card">',
-    '      <h2>Mapa</h2>',
+    `      <h2>${escapeHtml(model.labels.mapHeading)}</h2>`,
     mapMarkup,
     '    </section>',
     '  </main>',
@@ -465,6 +652,15 @@ export function validatePublicWebsiteHtml(indexHtml: string, rawPrompt?: string 
     'debug',
     'raw extracted',
     'extractionwarning',
+    'project prompt:',
+    'revision request:',
+    'raw prompt:',
+    'summary-metadata.json',
+    'site-metadata.json',
+    'app-manifest.json',
+    '"rawprojectprompt"',
+    '"missingfields"',
+    '"extractionwarnings"',
   ];
 
   forbiddenLabels.forEach((marker) => {
@@ -488,6 +684,10 @@ export function validatePublicWebsiteHtml(indexHtml: string, rawPrompt?: string 
     }
   }
 
+  if (/\{\{\s*[^}]+\s*\}\}/.test(indexHtml)) {
+    errors.push('Public HTML contains unresolved template tokens.');
+  }
+
   return errors;
 }
 
@@ -497,18 +697,49 @@ export function deriveVerifiedWebsiteContent(siteSnapshots: ExecutionSnapshot['s
     .filter((entry): entry is NonNullable<ExecutionSnapshot['siteSnapshots'][number]['structuredData']> => Boolean(entry));
 
   const sourceUrl = structured.map((entry) => entry.sourceUrl).find((value) => Boolean(value)) ?? null;
-  const pageTitle =
-    structured.map((entry) => entry.pageTitle).find((value) => Boolean(value)) ??
-    siteSnapshots.map((entry) => entry.pageTitle).find((value) => Boolean(value)) ??
-    'Website';
+  const pageTitleCandidate =
+    structured.map((entry) => sanitizePublicText(entry.pageTitle)).find((value) => Boolean(value)) ??
+    siteSnapshots.map((entry) => sanitizePublicText(entry.pageTitle)).find((value) => Boolean(value)) ??
+    null;
+  const pageTitle = pageTitleCandidate ?? 'Website';
 
-  const headings = uniq(structured.flatMap((entry) => entry.headings), 30);
-  const serviceNames = uniq(structured.flatMap((entry) => entry.serviceNames), 20);
-  const pricingFields = uniq(structured.flatMap((entry) => entry.pricingFields), 20);
-  const ctaTexts = uniq(structured.flatMap((entry) => entry.ctaTexts), 20);
-  const emails = uniq(structured.flatMap((entry) => entry.contactFields.emails), 12);
-  const phones = uniq(structured.flatMap((entry) => entry.contactFields.phones), 12);
-  const addresses = uniq(structured.flatMap((entry) => entry.contactFields.addresses), 8);
+  const headings = sanitizePublicList(
+    structured.flatMap((entry) => entry.headings),
+    30,
+    { rejectNavigationLabels: true }
+  );
+  const serviceNames = sanitizePublicList(
+    structured.flatMap((entry) => entry.serviceNames),
+    20,
+    { rejectNavigationLabels: true }
+  );
+  const pricingFields = sanitizePublicList(structured.flatMap((entry) => entry.pricingFields), 20);
+  const ctaTexts = sanitizePublicList(
+    structured.flatMap((entry) => entry.ctaTexts),
+    20,
+    { rejectNavigationLabels: true }
+  );
+  const emails = uniq(
+    structured
+      .flatMap((entry) => entry.contactFields.emails)
+      .map((entry) => sanitizePublicText(entry))
+      .map((entry) => extractFirstEmail(entry ?? null) ?? ''),
+    12
+  ).filter(Boolean);
+  const phones = uniq(
+    structured
+      .flatMap((entry) => entry.contactFields.phones)
+      .map((entry) => sanitizePublicText(entry))
+      .map((entry) => normalizePhoneDisplay(entry ?? null) ?? ''),
+    12
+  ).filter(Boolean);
+  const addresses = uniq(
+    structured
+      .flatMap((entry) => entry.contactFields.addresses)
+      .map((entry) => sanitizePublicText(entry))
+      .map((entry) => normalizeAddressDisplay(entry ?? null) ?? ''),
+    8
+  ).filter(Boolean);
   const missingFields = uniq(structured.flatMap((entry) => entry.missingFields), 20);
   const warnings = uniq(structured.flatMap((entry) => entry.extractionWarnings), 20);
 
@@ -528,8 +759,9 @@ export function deriveVerifiedWebsiteContent(siteSnapshots: ExecutionSnapshot['s
 }
 
 export function hasSufficientVerifiedWebsiteContent(content: VerifiedWebsiteContent): boolean {
+  const hasConcreteTitle = Boolean(content.pageTitle && content.pageTitle.trim().toLowerCase() !== 'website');
   return Boolean(
-    content.sourceUrl ||
+    hasConcreteTitle ||
       content.headings.length > 0 ||
       content.serviceNames.length > 0 ||
       content.pricingFields.length > 0 ||

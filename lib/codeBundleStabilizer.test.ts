@@ -73,9 +73,17 @@ describe('codeBundleStabilizer', () => {
     expect(stabilized.bundle.summary).toContain('mode=landing-page');
 
     const siteMetadataRaw = stabilized.bundle.files.find((file) => file.path === 'site-metadata.json')?.content ?? '{}';
-    const siteMetadata = JSON.parse(siteMetadataRaw) as { mode?: string; outputKind?: string };
+    const siteMetadata = JSON.parse(siteMetadataRaw) as {
+      mode?: string;
+      outputKind?: string;
+      locale?: string;
+      outputClassification?: { audience?: string; contentPolicy?: string };
+    };
     expect(siteMetadata.mode).toBe('landing-page');
     expect(siteMetadata.outputKind).toBe('static-web');
+    expect(siteMetadata.locale).toBe('en');
+    expect(siteMetadata.outputClassification?.audience).toBe('public');
+    expect(siteMetadata.outputClassification?.contentPolicy).toBe('verified-facts-first');
   });
 
   it('detects entry point by priority', () => {
