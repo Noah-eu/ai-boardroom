@@ -80,6 +80,7 @@ import {
   type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
+import { decideWebsiteGraphStrategy } from '@/lib/websiteGraphStrategy';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -1543,8 +1544,32 @@ function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<Web
   return output;
 }
 
-function shouldUseSegmentedWebsiteBuild(project: Project): boolean {
-  return decideExecutionPipeline(project) === 'code' && project.outputType === 'website';
+function hasWebsiteAttachmentSignals(project: Project): boolean {
+  return project.attachments.some((attachment) => {
+    if (attachment.kind === 'url') return true;
+    if (attachment.kind !== 'zip') return false;
+    const tree = attachment.ingestion?.zipFileTree ?? [];
+    return tree.some((entry) => /\.(html?|css|js|md)$/i.test(entry));
+  });
+}
+
+function shouldUseSegmentedWebsiteBuild(project: Project, snapshot?: ExecutionSnapshot): boolean {
+  if (decideExecutionPipeline(project) !== 'code') {
+    return false;
+  }
+
+  const strategy = decideWebsiteGraphStrategy({
+    outputType: project.outputType,
+    projectName: project.name,
+    projectDescription: project.description,
+    projectPrompt: snapshot?.projectPrompt ?? project.description,
+    revisionPrompt: snapshot?.revisionPrompt ?? project.latestRevisionFeedback,
+    debateSummary: snapshot?.approvedDebateSummary ?? getLatestOrchestratorSummary(project),
+    hasWebsiteAttachmentSignals: hasWebsiteAttachmentSignals(project),
+    hasStructuredWebsiteSources: Boolean(snapshot?.siteSnapshots?.length),
+  });
+
+  return strategy.kind === 'segmented-website';
 }
 
 function resolvePrimaryWebsiteSourceUrl(project: Project, snapshot: ExecutionSnapshot): string | null {
@@ -1736,23 +1761,36 @@ function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['p
 function artifactCanBeGeneratedLocally(
   project: Project,
   task: Task,
-  artifact: Task['producesArtifacts'][number]
+  artifact: Task['producesArtifacts'][number],
+  snapshot?: ExecutionSnapshot
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
   if (
     task.agent === 'Builder' &&
     artifact.path === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH &&
-    shouldUseSegmentedWebsiteBuild(project)
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
   ) {
     return true;
   }
-  if (task.agent === 'Builder' && isSegmentedWebsiteCopyArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
+  if (
+    task.agent === 'Builder' &&
+    isSegmentedWebsiteCopyArtifactPath(artifact.path) &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
     return true;
   }
-  if (task.agent === 'Builder' && isSegmentedWebsiteSourceArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
+  if (
+    task.agent === 'Builder' &&
+    isSegmentedWebsiteSourceArtifactPath(artifact.path) &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
     return true;
   }
-  if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+  if (
+    task.agent === 'Builder' &&
+    artifact.path === 'generated-files.json' &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
     return true;
   }
   if (decideExecutionPipeline(project) !== 'code') return false;
@@ -4562,7 +4600,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         shorten(findArtifactText(artifactPath) ?? '{}', maxChars);
       const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
-      if (shouldUseSegmentedWebsiteBuild(project) && isSegmentedWebsiteSourceArtifactPath(artifact.path)) {
+      if (shouldUseSegmentedWebsiteBuild(project, snapshot) && isSegmentedWebsiteSourceArtifactPath(artifact.path)) {
         const baselineByPath = snapshot.latestStableFiles.find(
           (file) => normalizeExecutionFilePath(file.path) === artifact.path
         );
@@ -5694,13 +5732,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const artifact = updatedArtifacts[index];
           const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
-          if (artifactCanBeGeneratedLocally(project, task, artifact)) {
+          if (artifactCanBeGeneratedLocally(project, task, artifact, snapshot)) {
             const builderBundle = findBuilderExecutionBundle(project.tasks);
 
             if (
               task.agent === 'Builder' &&
               artifact.path === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH &&
-              shouldUseSegmentedWebsiteBuild(project)
+              shouldUseSegmentedWebsiteBuild(project, snapshot)
             ) {
               const modelPayload = buildSegmentedWebsiteContentModelPayload(project, snapshot);
               if (!modelPayload) {
@@ -5731,7 +5769,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
             if (
               task.agent === 'Builder' &&
-              shouldUseSegmentedWebsiteBuild(project) &&
+              shouldUseSegmentedWebsiteBuild(project, snapshot) &&
               (isSegmentedWebsiteCopyArtifactPath(artifact.path) ||
                 isSegmentedWebsiteSourceArtifactPath(artifact.path))
             ) {
@@ -5852,7 +5890,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               continue;
             }
 
-            if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+            if (
+              task.agent === 'Builder' &&
+              artifact.path === 'generated-files.json' &&
+              shouldUseSegmentedWebsiteBuild(project, snapshot)
+            ) {
               const indexHtml = getLatestArtifactContent(project.tasks, 'index.html');
               const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css');
               const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js');
@@ -6044,7 +6086,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             continue;
           }
 
-          if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+          if (
+            task.agent === 'Builder' &&
+            artifact.path === 'generated-files.json' &&
+            shouldUseSegmentedWebsiteBuild(project, snapshot)
+          ) {
             failLiveTask(
               task.agent,
               `${task.agent}: website generated-files assembly must be deterministic/local; OpenAI fallback is disabled to avoid timeout-prone monolithic generation.`
