@@ -74,6 +74,7 @@ import {
   buildDeterministicWebsiteCopySections,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
+  type VerifiedWebsiteContent,
   type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
@@ -107,6 +108,7 @@ const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const SEGMENTED_WEBSITE_NO_SCRIPT_MARKER = '__NO_SCRIPT__';
+const SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH = 'website-content-model.json';
 const SEGMENTED_WEBSITE_COPY_ARTIFACTS = [
   { path: 'copy-hero.json', section: 'hero' },
   { path: 'copy-about.json', section: 'about' },
@@ -1423,7 +1425,56 @@ function resolveSegmentedWebsiteCopySectionByPath(
   return matched?.section ?? null;
 }
 
+type SegmentedWebsiteContentModel = {
+  schemaVersion: 1;
+  type: 'ai-boardroom-segmented-website-content-model';
+  generatedAt: string;
+  language: AppLanguage;
+  verified: VerifiedWebsiteContent;
+  copySections: WebsiteCopySections;
+};
+
+function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: ExecutionSnapshot): SegmentedWebsiteContentModel | null {
+  const verified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+  if (!hasSufficientVerifiedWebsiteContent(verified)) {
+    return null;
+  }
+
+  return {
+    schemaVersion: 1,
+    type: 'ai-boardroom-segmented-website-content-model',
+    generatedAt: new Date().toISOString(),
+    language: project.language,
+    verified,
+    copySections: buildDeterministicWebsiteCopySections({
+      projectName: project.name,
+      verified,
+      language: project.language,
+    }),
+  };
+}
+
+function resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks: Task[]): SegmentedWebsiteContentModel | null {
+  const raw = getLatestArtifactContent(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH);
+  if (!raw?.trim()) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<SegmentedWebsiteContentModel>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (parsed.type !== 'ai-boardroom-segmented-website-content-model') return null;
+    if (!parsed.verified || !parsed.copySections) return null;
+    return parsed as SegmentedWebsiteContentModel;
+  } catch {
+    return null;
+  }
+}
+
 function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<WebsiteCopySections> {
+  const model = resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks);
+  if (model?.copySections) {
+    return model.copySections;
+  }
+
   const output: Partial<WebsiteCopySections> = {};
 
   SEGMENTED_WEBSITE_COPY_ARTIFACTS.forEach((entry) => {
@@ -1662,6 +1713,13 @@ function artifactCanBeGeneratedLocally(
   artifact: Task['producesArtifacts'][number]
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (
+    task.agent === 'Builder' &&
+    artifact.path === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH &&
+    shouldUseSegmentedWebsiteBuild(project)
+  ) {
+    return true;
+  }
   if (task.agent === 'Builder' && isSegmentedWebsiteCopyArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
     return true;
   }
@@ -2303,16 +2361,27 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
 
   const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
   const isCodePipelineTask =
-    /CodePlanner|AppArchitect|WebCopyBuilder|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
+    /CodePlanner|AppArchitect|WebContentNormalizer|WebCopyBuilder|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
       task.title
     );
 
   if (isSegmentedWebsiteCopyArtifactPath(primaryArtifact)) {
+    return [
+      { path: 'execution-plan.md' },
+      { path: 'architecture-review.md' },
+      { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH },
+    ];
+  }
+
+  if (primaryArtifact === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH) {
     return [{ path: 'execution-plan.md' }, { path: 'architecture-review.md' }];
   }
 
   if (primaryArtifact === 'index.html') {
-    return SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry) => ({ path: entry.path }));
+    return [
+      { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH },
+      ...SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry) => ({ path: entry.path })),
+    ];
   }
 
   if (primaryArtifact === 'styles.css') {
@@ -2344,6 +2413,7 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
         return [
           { path: 'execution-plan.md' },
           { path: 'architecture-review.md' },
+          { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH },
           { path: 'index.html' },
           { path: 'styles.css' },
           { path: 'script.js' },
@@ -5603,11 +5673,46 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
             if (
               task.agent === 'Builder' &&
+              artifact.path === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH &&
+              shouldUseSegmentedWebsiteBuild(project)
+            ) {
+              const modelPayload = buildSegmentedWebsiteContentModelPayload(project, snapshot);
+              if (!modelPayload) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: verified source content is insufficient for deterministic website model normalization.`
+                );
+                return;
+              }
+
+              const selectedContent = JSON.stringify(modelPayload, null, 2);
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: selectedContent,
+                rawContent: selectedContent,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: normalized verified website content model generated locally (${artifact.path}).`,
+              });
+              continue;
+            }
+
+            if (
+              task.agent === 'Builder' &&
               shouldUseSegmentedWebsiteBuild(project) &&
               (isSegmentedWebsiteCopyArtifactPath(artifact.path) ||
                 isSegmentedWebsiteSourceArtifactPath(artifact.path))
             ) {
-              const verifiedContent = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+              const websiteModel =
+                resolveSegmentedWebsiteContentModelFromTaskArtifacts(project.tasks) ??
+                buildSegmentedWebsiteContentModelPayload(project, snapshot);
+              const verifiedContent = websiteModel?.verified ?? deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
               if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
                 failLiveTask(
                   task.agent,
@@ -5616,11 +5721,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 return;
               }
 
-              const copySections = buildDeterministicWebsiteCopySections({
-                projectName: project.name,
-                verified: verifiedContent,
-                language: project.language,
-              });
+              const copySections =
+                websiteModel?.copySections ??
+                buildDeterministicWebsiteCopySections({
+                  projectName: project.name,
+                  verified: verifiedContent,
+                  language: project.language,
+                });
 
               if (isSegmentedWebsiteCopyArtifactPath(artifact.path)) {
                 const sectionKey = resolveSegmentedWebsiteCopySectionByPath(artifact.path);
@@ -5907,6 +6014,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 `(${deterministicExport.invoiceSummary.summary.invoiceCount} row(s), ${deterministicExport.bundle.files.length} file(s)).`,
             });
             continue;
+          }
+
+          if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+            failLiveTask(
+              task.agent,
+              `${task.agent}: website generated-files assembly must be deterministic/local; OpenAI fallback is disabled to avoid timeout-prone monolithic generation.`
+            );
+            return;
           }
 
           dispatch({
@@ -6908,7 +7023,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (shouldUseSegmentedWebsiteBuild(project)) {
-          let latestCopyDependencyId = appArchitect.id;
+          const webContentNormalizer = createTask({
+            title: `WebContentNormalizer: Normalize website content model (${codeModeLabel})`,
+            description:
+              'Normalize verified source facts, slot mapping, pricing/contact/address fields, and public-safe section model before rendering files.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [appArchitect.id],
+            status: statusFor([appArchitect.id]),
+            producesArtifacts: [
+              { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, label: 'Website Content Model', kind: 'json' },
+            ],
+          });
+
+          let latestCopyDependencyId = webContentNormalizer.id;
           const copyTasks = SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry, sectionIndex) => {
             const titleLabel =
               entry.section === 'hero'
@@ -7031,6 +7160,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             tasks: [
               codePlanner,
               appArchitect,
+              webContentNormalizer,
               ...copyTasks,
               webHtmlBuilder,
               webStyleBuilder,
