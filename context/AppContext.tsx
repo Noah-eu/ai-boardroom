@@ -80,6 +80,10 @@ import {
   type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
 import { normalizeArchitectureReviewInput } from '@/lib/architectureReviewInput';
+import {
+  buildDeterministicArchitectureReviewFallback,
+  shouldUseArchitectureReviewFallback,
+} from '@/lib/architectureReviewFallback';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
 import { decideWebsiteGraphStrategy } from '@/lib/websiteGraphStrategy';
 
@@ -6644,6 +6648,79 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             } catch (error) {
               const detail = formatAiExecutionError(error);
               const infra = error instanceof AiRequestError ? error : null;
+
+              if (
+                shouldUseArchitectureReviewFallback({
+                  agent: task.agent,
+                  artifactPath: artifact.path,
+                  isCodePipeline: decideExecutionPipeline(project) === 'code',
+                })
+              ) {
+                const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+                  projectName: project.name,
+                  projectDescription: project.description,
+                  projectPrompt: snapshot.projectPrompt,
+                  revisionPrompt: snapshot.revisionPrompt,
+                  debateSummary: snapshot.approvedDebateSummary,
+                });
+                const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+                const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);
+                const hasIngestionVerified = hasSufficientVerifiedWebsiteContent(ingestionVerified);
+                const mergedVerified = hasIngestionVerified
+                  ? hasPromptVerified
+                    ? mergeVerifiedWebsiteContent(ingestionVerified, promptVerified)
+                    : ingestionVerified
+                  : promptVerified;
+
+                const normalizedArchitecture = normalizeArchitectureReviewInput({
+                  projectName: project.name,
+                  outputType: project.outputType,
+                  projectDescription: project.description,
+                  projectPrompt: snapshot.projectPrompt,
+                  revisionPrompt: snapshot.revisionPrompt,
+                  debateSummary: snapshot.approvedDebateSummary,
+                  maxChars: 4200,
+                  websiteFacts: {
+                    sourceUrl: mergedVerified.sourceUrl,
+                    headings: mergedVerified.headings,
+                    bodyTextBlocks: mergedVerified.bodyTextBlocks,
+                    serviceNames: mergedVerified.serviceNames,
+                    pricingFields: mergedVerified.pricingFields,
+                    ctaTexts: mergedVerified.ctaTexts,
+                    emails: mergedVerified.emails,
+                    phones: mergedVerified.phones,
+                    addresses: mergedVerified.addresses,
+                  },
+                });
+
+                const fallbackContent = buildDeterministicArchitectureReviewFallback({
+                  projectName: project.name,
+                  outputType: project.outputType,
+                  language: project.language,
+                  normalizedArchitectureInput: normalizedArchitecture.normalizedInput,
+                  executionPlanExcerpt: shorten(getLatestArtifactContent(project.tasks, 'execution-plan.md') ?? '', 1600),
+                  reason: 'openai-error',
+                });
+
+                updatedArtifacts[index] = {
+                  ...artifact,
+                  content: fallbackContent,
+                  rawContent: fallbackContent,
+                  producedBy: task.agent,
+                  generatedAt: new Date(),
+                };
+
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'warning',
+                  agent: task.agent,
+                  message:
+                    `${task.agent}: architecture fallback applied (${artifact.path}) after OpenAI failure; ` +
+                    `raw=${normalizedArchitecture.stats.rawChars}, normalized=${normalizedArchitecture.stats.normalizedChars}.`,
+                });
+                continue;
+              }
+
               failLiveTask(task.agent, `${task.agent}: OpenAI call failed for ${artifact.path}: ${detail.message}`, {
                 artifactPath: artifact.path,
                 rawBodySnippet: infra?.rawBodySnippet ?? null,
@@ -6670,6 +6747,78 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
 
           if (!response.text || !response.text.trim()) {
+            if (
+              shouldUseArchitectureReviewFallback({
+                agent: task.agent,
+                artifactPath: artifact.path,
+                isCodePipeline: decideExecutionPipeline(project) === 'code',
+              })
+            ) {
+              const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+                projectName: project.name,
+                projectDescription: project.description,
+                projectPrompt: snapshot.projectPrompt,
+                revisionPrompt: snapshot.revisionPrompt,
+                debateSummary: snapshot.approvedDebateSummary,
+              });
+              const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+              const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);
+              const hasIngestionVerified = hasSufficientVerifiedWebsiteContent(ingestionVerified);
+              const mergedVerified = hasIngestionVerified
+                ? hasPromptVerified
+                  ? mergeVerifiedWebsiteContent(ingestionVerified, promptVerified)
+                  : ingestionVerified
+                : promptVerified;
+
+              const normalizedArchitecture = normalizeArchitectureReviewInput({
+                projectName: project.name,
+                outputType: project.outputType,
+                projectDescription: project.description,
+                projectPrompt: snapshot.projectPrompt,
+                revisionPrompt: snapshot.revisionPrompt,
+                debateSummary: snapshot.approvedDebateSummary,
+                maxChars: 4200,
+                websiteFacts: {
+                  sourceUrl: mergedVerified.sourceUrl,
+                  headings: mergedVerified.headings,
+                  bodyTextBlocks: mergedVerified.bodyTextBlocks,
+                  serviceNames: mergedVerified.serviceNames,
+                  pricingFields: mergedVerified.pricingFields,
+                  ctaTexts: mergedVerified.ctaTexts,
+                  emails: mergedVerified.emails,
+                  phones: mergedVerified.phones,
+                  addresses: mergedVerified.addresses,
+                },
+              });
+
+              const fallbackContent = buildDeterministicArchitectureReviewFallback({
+                projectName: project.name,
+                outputType: project.outputType,
+                language: project.language,
+                normalizedArchitectureInput: normalizedArchitecture.normalizedInput,
+                executionPlanExcerpt: shorten(getLatestArtifactContent(project.tasks, 'execution-plan.md') ?? '', 1600),
+                reason: 'empty-response',
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: fallbackContent,
+                rawContent: fallbackContent,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'warning',
+                agent: task.agent,
+                message:
+                  `${task.agent}: architecture fallback applied (${artifact.path}) after empty model output; ` +
+                  `raw=${normalizedArchitecture.stats.rawChars}, normalized=${normalizedArchitecture.stats.normalizedChars}.`,
+              });
+              continue;
+            }
+
             failLiveTask(task.agent, `${task.agent}: artifact parsing failed for ${artifact.path} (empty output).`);
             return;
           }
