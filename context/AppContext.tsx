@@ -1455,14 +1455,15 @@ type SegmentedWebsiteContentModel = {
 };
 
 function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: ExecutionSnapshot): SegmentedWebsiteContentModel | null {
+  const deriveCurrentTaskPromptVerified = () =>
+    deriveVerifiedWebsiteContentFromPrompt({
+      projectName: project.name,
+      projectPrompt: snapshot.projectPrompt,
+      revisionPrompt: snapshot.revisionPrompt,
+    });
+
   const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
-  const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
-    projectName: project.name,
-    projectDescription: project.description,
-    projectPrompt: snapshot.projectPrompt,
-    revisionPrompt: snapshot.revisionPrompt,
-    debateSummary: snapshot.approvedDebateSummary,
-  });
+  const promptVerified = deriveCurrentTaskPromptVerified();
 
   const hasIngestion = hasSufficientVerifiedWebsiteContent(ingestionVerified);
   const hasPrompt = hasSufficientVerifiedWebsiteContent(promptVerified);
@@ -4935,10 +4936,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (artifact.path === 'architecture-review.md' && decideExecutionPipeline(project) === 'code') {
         const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
           projectName: project.name,
-          projectDescription: project.description,
           projectPrompt: snapshot.projectPrompt,
           revisionPrompt: snapshot.revisionPrompt,
-          debateSummary: snapshot.approvedDebateSummary,
         });
         const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
         const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);
@@ -6702,10 +6701,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               ) {
                 const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
                   projectName: project.name,
-                  projectDescription: project.description,
                   projectPrompt: snapshot.projectPrompt,
                   revisionPrompt: snapshot.revisionPrompt,
-                  debateSummary: snapshot.approvedDebateSummary,
                 });
                 const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
                 const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);
@@ -6800,10 +6797,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             ) {
               const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
                 projectName: project.name,
-                projectDescription: project.description,
                 projectPrompt: snapshot.projectPrompt,
                 revisionPrompt: snapshot.revisionPrompt,
-                debateSummary: snapshot.approvedDebateSummary,
               });
               const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
               const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);

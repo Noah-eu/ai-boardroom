@@ -190,6 +190,57 @@ const NEUTRAL_FALLBACK_COPY = {
   },
 } as const;
 
+type DomainTag = 'therapy' | 'hospitality' | 'business';
+
+const DOMAIN_TOKENS: Record<DomainTag, RegExp[]> = {
+  therapy: [
+    /\btherap(y|ist|eut|ie)|counsel(l?ing)?|psycholog|psychoterap|uzkost|depre(s|ss)|trauma\b/i,
+    /\bmental\s+health|krizov(a|e)\s+podpora|individualni\s+terapie\b/i,
+  ],
+  hospitality: [
+    /\bhotel|resort|accommodation|ubytovan(i|í)|wellness|spa|check-?in|check-?out\b/i,
+    /\broom\s+service|snidan(e|ě)|breakfast|reception|noc\b/i,
+  ],
+  business: [
+    /\bconsult(ing|ation)|agency|company|business|firm|startup|enterprise\b/i,
+    /\bsolution(s)?|product(s)?|partner(s)?|portfolio|service(s)?\b/i,
+  ],
+};
+
+function detectDomainTag(texts: string[]): DomainTag | null {
+  const score: Record<DomainTag, number> = {
+    therapy: 0,
+    hospitality: 0,
+    business: 0,
+  };
+
+  texts.forEach((text) => {
+    const normalized = normalizeWhitespace(text);
+    if (!normalized) return;
+    (Object.keys(DOMAIN_TOKENS) as DomainTag[]).forEach((tag) => {
+      DOMAIN_TOKENS[tag].forEach((pattern) => {
+        if (pattern.test(normalized)) {
+          score[tag] += 1;
+        }
+      });
+    });
+  });
+
+  const entries = (Object.entries(score) as Array<[DomainTag, number]>).sort((a, b) => b[1] - a[1]);
+  const [bestTag, bestScore] = entries[0];
+  const secondScore = entries[1]?.[1] ?? 0;
+  if (bestScore === 0) return null;
+  if (bestScore === secondScore) return null;
+  return bestTag;
+}
+
+function isDomainMismatch(candidate: string, currentDomain: DomainTag | null): boolean {
+  if (!currentDomain) return false;
+  const candidateDomain = detectDomainTag([candidate]);
+  if (!candidateDomain) return false;
+  return candidateDomain !== currentDomain;
+}
+
 function tokenizeForProvenance(value: string): string[] {
   return value
     .toLowerCase()
@@ -724,7 +775,9 @@ function buildPublicWebsiteViewModel(params: {
   });
   const structuralLabels = toComparableSet([...sanitizedNavigationLabels, ...sanitizedHeadings]);
   const sanitizedBodyTextBlocks = stripStructuralLabels(params.verified.bodyTextBlocks, structuralLabels, 36);
-  const bodyFacts = deriveContentLikeSentences(sanitizedBodyTextBlocks, 16).map((entry) => limitSentenceLength(entry, 200));
+  const candidateBodyFacts = deriveContentLikeSentences(sanitizedBodyTextBlocks, 16).map((entry) =>
+    limitSentenceLength(entry, 200)
+  );
 
   const sanitizedServiceNames = sanitizePublicList(params.verified.serviceNames, 20, {
     rejectNavigationLabels: true,
@@ -739,12 +792,21 @@ function buildPublicWebsiteViewModel(params: {
   const addressCandidates = uniq(
     [
       ...sanitizedAddresses,
-      ...bodyFacts.filter((entry) => looksLikeAddressFact(entry)),
+      ...candidateBodyFacts.filter((entry) => looksLikeAddressFact(entry)),
     ],
     10
   );
 
   const verifiedServices = stripStructuralLabels(sanitizedServiceNames, structuralLabels, 12);
+  const currentDomain = detectDomainTag([
+    title,
+    ...sanitizedHeadings,
+    ...verifiedServices,
+    ...sanitizedBodyTextBlocks,
+    ...sanitizedPricingFields,
+    ...sanitizedCtaTexts,
+  ]);
+  const bodyFacts = candidateBodyFacts.filter((entry) => !isDomainMismatch(entry, currentDomain));
   const services = uniq(verifiedServices, 8);
 
   const topics = deriveTopicLikeItems(
@@ -779,6 +841,7 @@ function buildPublicWebsiteViewModel(params: {
 
   const isProvenanceSafeOverride = (value: string | null | undefined): boolean => {
     if (!value?.trim()) return false;
+    if (isDomainMismatch(value, currentDomain)) return false;
     return isNeutralFallbackText(value, language) || hasProvenanceOverlap(value, provenanceFacts);
   };
 
@@ -793,40 +856,17 @@ function buildPublicWebsiteViewModel(params: {
   const defaultHeroSubtitle =
     heroSupportingFact ??
     (language === 'cz'
-      ? primaryService
-        ? `Bezpečný prostor pro změnu a porozumění se zaměřením na ${primaryService}.`
-        : NEUTRAL_FALLBACK_COPY.cz.heroSubtitle
-      : primaryService
-      ? `Professional support focused on ${primaryService}.`
+      ? NEUTRAL_FALLBACK_COPY.cz.heroSubtitle
       : NEUTRAL_FALLBACK_COPY.en.heroSubtitle);
   const aboutSeed =
-    normalizePublicParagraph(bodyFacts[0]) ??
-    normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o mne|experience|specializ|podpora)\b/i.test(entry))) ??
+    normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o mne|experience|specializ|podpora|profil|team)\b/i.test(entry))) ??
     null;
-  const defaultAboutCopy =
-    aboutSeed ??
-    language === 'cz'
-      ? services.length > 0
-        ? `Nabízím citlivý a praktický přístup zaměřený na ${services.slice(0, 2).join(' a ')}.`
-        : NEUTRAL_FALLBACK_COPY.cz.about
-      : services.length > 0
-      ? `I offer a practical and sensitive approach focused on ${services.slice(0, 2).join(' and ')}.`
-      : NEUTRAL_FALLBACK_COPY.en.about;
+  const defaultAboutCopy = aboutSeed ?? (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.about : NEUTRAL_FALLBACK_COPY.en.about);
   const approachSeed =
-    normalizePublicParagraph(bodyFacts[1]) ??
     normalizePublicParagraph(bodyFacts.find((entry) => /\b(pristup|approach|method|metoda|vzd[eě]l[aá]v[aá]n[ií]|education)\b/i.test(entry))) ??
     null;
   const defaultApproachCopy =
-    approachSeed ??
-    language === 'cz'
-      ? topics.length > 0
-        ? `Pracuji strukturovaně a srozumitelně. Vzdělávání a dlouhodobý rozvoj propojuji s tématy: ${topics
-            .slice(0, 3)
-            .join(', ')}.`
-        : NEUTRAL_FALLBACK_COPY.cz.approach
-      : topics.length > 0
-      ? `I work in a structured way and connect education with long-term growth around: ${topics.slice(0, 3).join(', ')}.`
-      : NEUTRAL_FALLBACK_COPY.en.approach;
+    approachSeed ?? (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.approach : NEUTRAL_FALLBACK_COPY.en.approach);
 
   const sectionOverrides = params.copySections ?? {};
 

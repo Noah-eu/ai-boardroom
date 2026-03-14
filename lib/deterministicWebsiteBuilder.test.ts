@@ -752,4 +752,62 @@ describe('deterministicWebsiteBuilder', () => {
     expect(runBArtifacts.indexHtml.toLowerCase()).not.toContain('psychology room');
     expect(runBArtifacts.indexHtml.toLowerCase()).not.toContain('terapi');
   });
+
+  it('prevents contamination across A/B/C cross-domain run sequence', () => {
+    const runA = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Insight Therapy',
+      projectPrompt: 'About: Terapie zamerena na uzkost. Approach: Individualni terapeuticky plan.',
+    });
+    const runAHtml = buildDeterministicWebsiteArtifacts({
+      projectName: 'Insight Therapy',
+      projectDescription: 'Public website',
+      verified: runA,
+    }).indexHtml;
+
+    const runB = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Harbor City Hotel',
+      projectPrompt: 'Services: Ubytovani, Wellness. Pricing: Od 3400 Kc / noc. Contact: reception@harborcity.example',
+    });
+    const runBHtml = buildDeterministicWebsiteArtifacts({
+      projectName: 'Harbor City Hotel',
+      projectDescription: 'Public website',
+      verified: runB,
+    }).indexHtml;
+
+    const runC = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Northwind Legal Services',
+      projectPrompt: 'Services: Pravni konzultace, Smluvni agenda. Contact: office@northwindlegal.example',
+    });
+    const runCHtml = buildDeterministicWebsiteArtifacts({
+      projectName: 'Northwind Legal Services',
+      projectDescription: 'Public website',
+      verified: runC,
+    }).indexHtml;
+
+    expect(runAHtml.toLowerCase()).toContain('terapi');
+    expect(runBHtml.toLowerCase()).not.toContain('terapi');
+    expect(runCHtml.toLowerCase()).not.toContain('terapi');
+    expect(runCHtml.toLowerCase()).not.toContain('wellness');
+    expect(runCHtml).toContain('Northwind Legal Services');
+  });
+
+  it('omits uncertain semantic slots instead of injecting foreign copy', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Minimal Service Site',
+      projectPrompt: 'Hero: Minimal Service Site\nContact: hello@minimal.example',
+    });
+
+    const sections = buildDeterministicWebsiteCopySections({
+      projectName: 'Minimal Service Site',
+      verified,
+    });
+
+    expect(sections.topics.items).toEqual([]);
+    expect(sections.servicesPricing.services).toEqual([]);
+    expect(sections.servicesPricing.pricing).toEqual([]);
+    const combined = `${sections.about.body} ${sections.approach.body}`.toLowerCase();
+    expect(combined).toContain('overeni');
+    expect(combined).not.toContain('therapy');
+    expect(combined).not.toContain('hotel');
+  });
 });
