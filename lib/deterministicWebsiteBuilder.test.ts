@@ -464,6 +464,152 @@ describe('deterministicWebsiteBuilder', () => {
     expect(artifacts.indexHtml).toContain('Od 1700 Kč');
   });
 
+  it('retains verified page title over generic fallback naming', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-title-retention',
+        title: 'Source',
+        source: 'project',
+        pageTitle: 'Studio Harmonie',
+        summary: 'Structured source',
+        extractedText: 'Support content',
+        pages: [{ url: 'https://harmonie.example', title: 'Home', summary: 'Home' }],
+        structuredData: {
+          sourceUrl: 'https://harmonie.example',
+          pageTitle: 'Studio Harmonie',
+          visibleTextBlocks: ['Terapeutická podpora'],
+          headings: ['Studio Harmonie'],
+          paragraphs: ['Citlivá podpora při stresu.'],
+          navigationLabels: ['Domů', 'Kontakt'],
+          contactFields: {
+            emails: ['kontakt@harmonie.example'],
+            phones: ['+420777111222'],
+            addresses: ['Náměstí 1, Brno'],
+            mailtoLinks: ['mailto:kontakt@harmonie.example'],
+            telLinks: ['tel:+420777111222'],
+          },
+          ctaTexts: ['Domluvit konzultaci'],
+          serviceNames: ['Individuální terapie'],
+          pricingFields: ['Od 1700 Kč / 50 min'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Website',
+      projectDescription: 'Public website',
+      verified,
+    });
+
+    expect(artifacts.indexHtml).toContain('<title>Studio Harmonie</title>');
+    expect(artifacts.indexHtml).not.toContain('<title>Website</title>');
+  });
+
+  it('renders topics as concise topic-like items instead of sentence dumps', () => {
+    const promptOnly = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Topic Lab',
+      projectPrompt: [
+        'About: Poskytuji podporu pri uzkosti a stresu v bezpecnem prostredi s jasnym planem prace.',
+        'Approach: Kombinuji kratkodobe stabilizacni techniky a dlouhodoby rozvoj resilience.',
+        'Topics: uzkost a stres, vztahy a hranice, sebehodnota a sebejistota',
+        'Services: Individualni terapie',
+      ].join('\n'),
+    });
+
+    const sections = buildDeterministicWebsiteCopySections({
+      projectName: 'Topic Lab',
+      verified: promptOnly,
+    });
+
+    expect(sections.topics.items.length).toBeGreaterThan(0);
+    sections.topics.items.forEach((item) => {
+      expect(item.length).toBeLessThanOrEqual(64);
+      expect(item.split(/\s+/).length).toBeLessThanOrEqual(7);
+      expect(item).not.toContain('.');
+    });
+  });
+
+  it('generates public-safe portrait alt text when technical/internal alt is provided', () => {
+    const promptOnly = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Portrait Test',
+      projectPrompt: 'Hero: Portrait Test\nServices: Individualni terapie\nPricing: Od 1500 Kc',
+    });
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Portrait Test',
+      projectDescription: 'Public website',
+      verified: promptOnly,
+      portraitImage: {
+        src: 'assets/portrait.jpg',
+        alt: 'debug metadata snapshot json payload',
+      },
+    });
+
+    expect(artifacts.indexHtml).toContain('alt="Portrét: Portrait Test"');
+    expect(artifacts.indexHtml).not.toContain('debug metadata snapshot');
+  });
+
+  it('keeps prompt-only and attachment-based facts comparably in public sections', () => {
+    const promptOnly = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Convergence Studio',
+      projectPrompt: [
+        'Hero: Convergence Studio',
+        'About: Podpora pri uzkosti a dlouhodobem stresu.',
+        'Services: Individualni terapie, Kratke krizove konzultace',
+        'Pricing: Od 1700 Kc / 50 min',
+        'Contact: hello@convergence.example, +420 777 444 333',
+        'Address: Kvetna 7, Praha 120 00',
+      ].join('\n'),
+    });
+
+    const attachmentBased = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-convergence',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Convergence Studio',
+        summary: 'Structured source',
+        extractedText: 'Structured source',
+        pages: [{ url: 'https://convergence.example', title: 'Home', summary: 'Home' }],
+        structuredData: {
+          sourceUrl: 'https://convergence.example',
+          pageTitle: 'Convergence Studio',
+          visibleTextBlocks: ['Podpora pri uzkosti a dlouhodobem stresu.'],
+          headings: ['Convergence Studio', 'Kontakt'],
+          paragraphs: ['Podpora pri uzkosti a dlouhodobem stresu.'],
+          navigationLabels: ['Domu', 'Kontakt'],
+          contactFields: {
+            emails: ['hello@convergence.example'],
+            phones: ['+420 777 444 333'],
+            addresses: ['Kvetna 7, Praha 120 00'],
+            mailtoLinks: ['mailto:hello@convergence.example'],
+            telLinks: ['tel:+420777444333'],
+          },
+          ctaTexts: ['Domluvit konzultaci'],
+          serviceNames: ['Individualni terapie', 'Kratke krizove konzultace'],
+          pricingFields: ['Od 1700 Kč / 50 min'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const promptSections = buildDeterministicWebsiteCopySections({ projectName: 'Convergence Studio', verified: promptOnly });
+    const attachmentSections = buildDeterministicWebsiteCopySections({
+      projectName: 'Convergence Studio',
+      verified: attachmentBased,
+    });
+
+    expect(promptSections.servicesPricing.pricing.join(' ')).toContain('1700');
+    expect(attachmentSections.servicesPricing.pricing.join(' ')).toContain('1700');
+    expect(promptSections.topics.items.length).toBeGreaterThan(0);
+    expect(attachmentSections.topics.items.length).toBeGreaterThan(0);
+  });
+
   it('merges ingestion and prompt-derived website facts deterministically', () => {
     const ingestion = deriveVerifiedWebsiteContent([
       {

@@ -149,6 +149,7 @@ const GENERIC_PRICING_PLACEHOLDER_PATTERNS = [
 ];
 
 const CONTENT_BEARING_TEXT_HINT = /\b(od|from|podpora|support|konzult|session|sezen|terapi|counsel|care|approach|metoda|experience|specializ|zam[eě]r|pracuji|offer|provide)\b/i;
+const GENERIC_WEBSITE_TITLE_PATTERN = /^(website|web\s*site|site|landing\s*page|home\s*page|homepage|company\s*website)$/i;
 
 function getLocalizedWebsiteLabels(language: AppLanguage): LocalizedWebsiteLabels {
   if (language === 'en') {
@@ -333,6 +334,13 @@ function humanTitle(value: string): string {
   return value.replace(/\s+/g, ' ').trim() || 'Website';
 }
 
+function isGenericWebsiteTitle(value: string | null | undefined): boolean {
+  if (!value) return true;
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return true;
+  return GENERIC_WEBSITE_TITLE_PATTERN.test(normalized);
+}
+
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -422,6 +430,65 @@ function deriveContentLikeSentences(values: string[], max: number): string[] {
     .filter((entry): entry is string => Boolean(entry))
     .filter((entry) => entry.length >= 24 || CONTENT_BEARING_TEXT_HINT.test(entry));
   return uniq(segments, max);
+}
+
+function limitSentenceLength(value: string, maxChars = 180): string {
+  const cleaned = normalizeWhitespace(value);
+  if (cleaned.length <= maxChars) return cleaned;
+  const cut = cleaned.lastIndexOf(' ', maxChars - 3);
+  return `${cleaned.slice(0, cut > 40 ? cut : maxChars - 3)}...`;
+}
+
+function normalizePublicParagraph(value: string | null | undefined, maxChars = 220): string | null {
+  const cleaned = sanitizePublicText(value);
+  if (!cleaned) return null;
+  const firstSentence = cleaned.split(/(?<=[.!?])\s+/)[0] ?? cleaned;
+  const collapsed = limitSentenceLength(firstSentence, maxChars);
+  if (!collapsed) return null;
+  return /[.!?]$/.test(collapsed) ? collapsed : `${collapsed}.`;
+}
+
+function toTopicLikeItem(value: string): string | null {
+  const cleaned = sanitizePublicText(value);
+  if (!cleaned) return null;
+
+  const firstFragment = cleaned
+    .split(/[;|]/)[0]
+    .split(/\s[-–—]\s/)[0]
+    .split(':')
+    .pop();
+
+  const normalized = normalizeWhitespace(firstFragment ?? cleaned)
+    .replace(/^[\-•*\d.\s]+/, '')
+    .replace(/^(tema|topic|oblast|focus)\s*[:\-]?\s*/i, '')
+    .trim();
+
+  if (!normalized) return null;
+  if (/\b(kontakt|contact|email|telefon|phone|pricing|price|cena|cenik|mapa|map|adresa|address)\b/i.test(normalized)) {
+    return null;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return null;
+  const concise = words.slice(0, 7).join(' ');
+  return concise.length <= 64 ? concise : concise.slice(0, 61).trimEnd() + '...';
+}
+
+function deriveTopicLikeItems(values: string[], max: number): string[] {
+  const candidates = values
+    .flatMap((entry) => entry.split(/[\n,]/))
+    .map((entry) => toTopicLikeItem(entry))
+    .filter((entry): entry is string => Boolean(entry));
+
+  return uniq(candidates, max);
+}
+
+function resolvePublicPortraitAlt(inputAlt: string | null | undefined, title: string, language: AppLanguage): string {
+  const cleaned = sanitizePublicText(inputAlt ?? '');
+  if (cleaned && cleaned.length >= 4 && !containsInternalMarker(cleaned) && !/\b(debug|metadata|snapshot|json|raw|prompt)\b/i.test(cleaned)) {
+    return limitSentenceLength(cleaned, 90);
+  }
+  return language === 'cz' ? `Portrét: ${title}` : `Portrait: ${title}`;
 }
 
 function isGenericPricingPlaceholder(value: string): boolean {
@@ -555,7 +622,15 @@ function buildPublicWebsiteViewModel(params: {
 }): PublicWebsiteViewModel {
   const language = params.language ?? 'cz';
   const labels = getLocalizedWebsiteLabels(language);
-  const title = humanTitle(sanitizePublicText(params.verified.pageTitle) || params.projectName || 'Website');
+  const verifiedTitle = sanitizePublicText(params.verified.pageTitle);
+  const fallbackProjectTitle = sanitizePublicText(params.projectName) ?? 'Website';
+  const resolvedTitle =
+    !isGenericWebsiteTitle(verifiedTitle)
+      ? verifiedTitle
+      : !isGenericWebsiteTitle(fallbackProjectTitle)
+      ? fallbackProjectTitle
+      : verifiedTitle ?? fallbackProjectTitle;
+  const title = humanTitle(resolvedTitle ?? 'Website');
 
   const sanitizedNavigationLabels = sanitizePublicList(params.verified.navigationLabels, 30, {
     rejectNavigationLabels: false,
@@ -565,7 +640,7 @@ function buildPublicWebsiteViewModel(params: {
   });
   const structuralLabels = toComparableSet([...sanitizedNavigationLabels, ...sanitizedHeadings]);
   const sanitizedBodyTextBlocks = stripStructuralLabels(params.verified.bodyTextBlocks, structuralLabels, 36);
-  const bodyFacts = deriveContentLikeSentences(sanitizedBodyTextBlocks, 16);
+  const bodyFacts = deriveContentLikeSentences(sanitizedBodyTextBlocks, 16).map((entry) => limitSentenceLength(entry, 200));
 
   const sanitizedServiceNames = sanitizePublicList(params.verified.serviceNames, 20, {
     rejectNavigationLabels: true,
@@ -577,23 +652,36 @@ function buildPublicWebsiteViewModel(params: {
   const sanitizedEmails = sanitizePublicList(params.verified.emails, 12);
   const sanitizedPhones = sanitizePublicList(params.verified.phones, 12);
   const sanitizedAddresses = sanitizePublicList(params.verified.addresses, 8);
+  const addressCandidates = uniq(
+    [
+      ...sanitizedAddresses,
+      ...bodyFacts.filter((entry) => looksLikeAddressFact(entry)),
+    ],
+    10
+  );
 
   const verifiedServices = stripStructuralLabels(sanitizedServiceNames, structuralLabels, 12);
   const services = uniq(verifiedServices, 8);
 
-  const topics = uniq(
-    deriveContentLikeSentences(sanitizedBodyTextBlocks, 16)
-      .filter((entry) => !/kontakt|contact|mapa|pricing|price|cen/i.test(entry))
-      .slice(0, 10),
+  const topics = deriveTopicLikeItems(
+    [
+      ...stripStructuralLabels(sanitizedHeadings, structuralLabels, 20),
+      ...bodyFacts,
+      ...verifiedServices,
+    ].filter((entry) => !/kontakt|contact|mapa|pricing|price|cen/i.test(entry)),
     6
   );
 
-  const verifiedPricing = normalizePricingRows(sanitizedPricingFields);
+  const verifiedPricing = normalizePricingRows([
+    ...sanitizedPricingFields,
+    ...bodyFacts,
+    ...verifiedServices,
+  ]);
 
   const contact = {
     email: extractFirstEmail(sanitizedEmails[0] ?? null),
     phone: normalizePhoneDisplay(sanitizedPhones[0] ?? null),
-    address: normalizeAddressDisplay(sanitizedAddresses[0] ?? null),
+    address: normalizeAddressDisplay(addressCandidates[0] ?? null),
   };
 
   const primaryService = services[0] ?? topics[0] ?? null;
@@ -607,8 +695,12 @@ function buildPublicWebsiteViewModel(params: {
       : primaryService
       ? `Professional support focused on ${primaryService}.`
       : 'Professional support for sustainable personal growth.');
+  const aboutSeed =
+    normalizePublicParagraph(bodyFacts[0]) ??
+    normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o mne|experience|specializ|podpora)\b/i.test(entry))) ??
+    null;
   const defaultAboutCopy =
-    bodyFacts[0] ??
+    aboutSeed ??
     language === 'cz'
       ? services.length > 0
         ? `Nabízím citlivý a praktický přístup zaměřený na ${services.slice(0, 2).join(' a ')}.`
@@ -616,8 +708,12 @@ function buildPublicWebsiteViewModel(params: {
       : services.length > 0
       ? `I offer a practical and sensitive approach focused on ${services.slice(0, 2).join(' and ')}.`
       : 'I offer a safe and practical space for long-term personal growth.';
+  const approachSeed =
+    normalizePublicParagraph(bodyFacts[1]) ??
+    normalizePublicParagraph(bodyFacts.find((entry) => /\b(pristup|approach|method|metoda|vzd[eě]l[aá]v[aá]n[ií]|education)\b/i.test(entry))) ??
+    null;
   const defaultApproachCopy =
-    bodyFacts[1] ??
+    approachSeed ??
     language === 'cz'
       ? topics.length > 0
         ? `Pracuji strukturovaně a srozumitelně. Vzdělávání a dlouhodobý rozvoj propojuji s tématy: ${topics
@@ -653,8 +749,8 @@ function buildPublicWebsiteViewModel(params: {
 
   const aboutCopy = normalizeWhitespace(aboutOverride ?? defaultAboutCopy);
   const approachCopy = normalizeWhitespace(approachOverride ?? defaultApproachCopy);
-  const topicItems = uniq(
-    stripStructuralLabels(topicsOverride.length > 0 ? topicsOverride : topics, structuralLabels, 6),
+  const topicItems = deriveTopicLikeItems(
+    stripStructuralLabels(topicsOverride.length > 0 ? topicsOverride : topics, structuralLabels, 10),
     6
   );
   const serviceItems = uniq(
@@ -787,7 +883,7 @@ function buildPublicHtml(params: {
   const portraitMarkup = portraitImage
     ? [
         '<figure class="portrait">',
-        `  <img src="${escapeHtml(portraitImage.src)}" alt="${escapeHtml(portraitImage.alt)}" loading="lazy" decoding="async" />`,
+        `  <img src="${escapeHtml(portraitImage.src)}" alt="${escapeHtml(resolvePublicPortraitAlt(portraitImage.alt, model.title, model.language))}" loading="lazy" decoding="async" />`,
         '</figure>',
       ].join('\n')
     : '';
