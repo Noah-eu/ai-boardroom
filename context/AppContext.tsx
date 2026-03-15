@@ -3808,8 +3808,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const createExecutionSnapshot = useCallback((project: Project): ExecutionSnapshot => {
-    const approvedDebateSummary = getLatestOrchestratorSummary(project) ?? '';
     const cycleNumber = project.revisionRound + 1;
+    const currentCycle = project.revisionRound + 1;
+    const approvedDebateSummary = (() => {
+      const summary = getLatestOrchestratorSummary(project) ?? '';
+      const hasCycleMessages = project.messages.some(
+        (m) =>
+          m.sender === 'orchestrator' &&
+          m.type === 'system' &&
+          (m.content.includes(`Cycle ${currentCycle}`) || m.content.includes(`kolo ${currentCycle}`))
+      );
+      return hasCycleMessages ? summary : '';
+    })();
     const attachmentContext = buildAttachmentContext(project);
     const imageInputs: ExecutionSnapshot['imageInputs'] = [];
     const pdfTexts: ExecutionSnapshot['pdfTexts'] = [];
@@ -3946,7 +3956,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       projectPrompt: project.description,
       approvedDebateSummary,
       latestStableSummary: project.latestStableBundle?.summary ?? null,
-      latestStableFiles: project.latestStableFiles,
+      latestStableFiles: project.revisionRound > 0 ? project.latestStableFiles : [],
       projectAttachments: attachmentContext.projectAttachments,
       messageAttachments: attachmentContext.messageAttachments,
       imageInputs,
@@ -4786,12 +4796,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           `Project prompt:\n${snapshot.projectPrompt}`,
           snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
           `Approved debate summary:\n${snapshot.approvedDebateSummary}`,
-          snapshot.latestStableFiles.length > 0
-            ? `Current baseline files (${snapshot.latestStableFiles.length}):\n${snapshot.latestStableFiles
+          (() => {
+            const safeBaselineFiles = snapshot.cycleNumber > 1 ? snapshot.latestStableFiles : [];
+            return safeBaselineFiles.length > 0
+              ? `Current baseline files (${safeBaselineFiles.length}):\n${safeBaselineFiles
                 .slice(0, 20)
                 .map((file) => `${file.path}\n${shorten(file.content, 800)}`)
                 .join('\n\n')}`
-            : 'Current baseline files: none (first execution cycle).',
+              : 'Current baseline files: none (first execution cycle).';
+          })(),
           `ZIP snapshots count: ${snapshot.zipSnapshots.length}`,
           `Site snapshots count: ${snapshot.siteSnapshots.length}`,
           `PDF snapshots count: ${snapshot.pdfTexts.length}`,
@@ -5033,10 +5046,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         projectPrompt: shorten(snapshot.projectPrompt, 1_800),
         approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 3_000),
         latestStableSummary: shorten(snapshot.latestStableSummary ?? '', 1_800),
-        latestStableFiles: snapshot.latestStableFiles.slice(0, 25).map((file) => ({
-          path: file.path,
-          excerpt: shorten(file.content, 800),
-        })),
+        latestStableFiles: (snapshot.cycleNumber > 1 ? snapshot.latestStableFiles : [])
+          .slice(0, 25)
+          .map((file) => ({
+            path: file.path,
+            excerpt: shorten(file.content, 800),
+          })),
         attachmentOverview: {
           project: snapshot.projectAttachments.map((item) => ({
             title: item.title,
@@ -8551,7 +8566,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const isOneRoundDescriptive = rounds === 1 && taskType === 'observational';
           const previousSummary = getLatestOrchestratorSummary(initialProject);
           const revisionFeedback = initialProject.latestRevisionFeedback;
-          const baselineFilesForDebate = initialProject.latestStableFiles;
+          const baselineFilesForDebate =
+            initialProject.revisionRound > 0 ? initialProject.latestStableFiles : [];
           const debateRunRound = initialProject.revisionRound + 1;
           const roundMessages: Array<{ round: number; agent: AgentName; content: string }> = [];
           const debateAgents: AgentName[] = ['Strategist', 'Skeptic', 'Pragmatist'];

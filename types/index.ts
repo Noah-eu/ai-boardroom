@@ -378,6 +378,7 @@ export interface Project {
   executionSnapshot?: ExecutionSnapshot | null;
   latestStableBundle: ExecutionOutputBundle | null;
   latestStableFiles: ExecutionOutputFile[];
+  latestStableSummary?: string | null;
   latestStableUpdatedAt: Date | null;
   usage: ProjectUsage;
 }
