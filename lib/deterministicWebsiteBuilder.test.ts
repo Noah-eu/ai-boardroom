@@ -386,7 +386,7 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(artifacts.indexHtml).toContain('<html lang="en">');
     expect(artifacts.indexHtml).toContain('Intro');
-    expect(artifacts.indexHtml).toContain('About');
+    expect(artifacts.indexHtml).toContain('About Company');
     expect(artifacts.indexHtml).toContain('Services and Pricing');
     expect(artifacts.indexHtml).not.toContain('<h2>O mně</h2>');
   });
@@ -789,6 +789,57 @@ describe('deterministicWebsiteBuilder', () => {
     expect(runCHtml.toLowerCase()).not.toContain('terapi');
     expect(runCHtml.toLowerCase()).not.toContain('wellness');
     expect(runCHtml).toContain('Northwind Legal Services');
+  });
+
+  it('isolates section schema per run and prevents personal-profile schema bleed into company sites', () => {
+    const runA = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Personal Therapy Profile',
+      projectPrompt: 'About: Individualni terapie a psychologicka podpora. Services: Individualni terapie.',
+    });
+    const runAHtml = buildDeterministicWebsiteArtifacts({
+      projectName: 'Personal Therapy Profile',
+      projectDescription: 'Public website',
+      verified: runA,
+    }).indexHtml;
+
+    const runB = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Cityline Hotel',
+      projectPrompt: 'Services: Ubytovani, Wellness, Snidane. Contact: reception@cityline.example',
+    });
+    const runBHtml = buildDeterministicWebsiteArtifacts({
+      projectName: 'Cityline Hotel',
+      projectDescription: 'Public website',
+      verified: runB,
+    }).indexHtml;
+
+    expect(runAHtml).toContain('<h2>O mně</h2>');
+    expect(runAHtml).toContain('<section id="pristup-vzdelavani"');
+    expect(runAHtml).toContain('<h2>Témata</h2>');
+
+    expect(runBHtml).toContain('<h2>O nás</h2>');
+    expect(runBHtml).toContain('<section id="prehled-sluzeb"');
+    expect(runBHtml).toContain('<h2>Hlavní oblasti</h2>');
+    expect(runBHtml).not.toContain('<h2>O mně</h2>');
+    expect(runBHtml).not.toContain('<h2>Přístup a vzdělávání</h2>');
+    expect(runBHtml).not.toContain('<h2>Témata</h2>');
+  });
+
+  it('falls back to neutral company/service schema when archetype is uncertain', () => {
+    const uncertain = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Neutral Public Site',
+      projectPrompt: 'Hero: Neutral Public Site\nContact: hello@neutral.example',
+    });
+
+    const html = buildDeterministicWebsiteArtifacts({
+      projectName: 'Neutral Public Site',
+      projectDescription: 'Public website',
+      verified: uncertain,
+    }).indexHtml;
+
+    expect(html).toContain('<h2>O nás</h2>');
+    expect(html).toContain('<h2>Přehled služeb</h2>');
+    expect(html).not.toContain('<h2>O mně</h2>');
+    expect(html).not.toContain('<h2>Přístup a vzdělávání</h2>');
   });
 
   it('omits uncertain semantic slots instead of injecting foreign copy', () => {

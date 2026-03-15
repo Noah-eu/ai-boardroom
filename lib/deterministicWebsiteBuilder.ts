@@ -90,16 +90,24 @@ type PricingCandidate = {
   value: number;
 };
 
+type WebsiteArchetype = 'personal-profile' | 'company-service';
+
 type LocalizedWebsiteLabels = {
   htmlLang: 'cs' | 'en';
   heroSectionLabel: string;
+  aboutSectionId: string;
   aboutHeading: string;
+  approachSectionId: string;
   approachHeading: string;
+  topicsSectionId: string;
   topicsHeading: string;
+  servicesPricingSectionId: string;
   servicesPricingHeading: string;
   servicesHeading: string;
   pricingHeading: string;
+  contactSectionId: string;
   contactHeading: string;
+  mapSectionId: string;
   mapHeading: string;
   mapLinkLabel: string;
   emptyListNote: string;
@@ -194,8 +202,8 @@ type DomainTag = 'therapy' | 'hospitality' | 'business';
 
 const DOMAIN_TOKENS: Record<DomainTag, RegExp[]> = {
   therapy: [
-    /\btherap(y|ist|eut|ie)|counsel(l?ing)?|psycholog|psychoterap|uzkost|depre(s|ss)|trauma\b/i,
-    /\bmental\s+health|krizov(a|e)\s+podpora|individualni\s+terapie\b/i,
+    /\b(therap(y|ist|eut|ie)|terapeut\w*|terapi\w*|counsel(l?ing)?|psycholog\w*|psychoterap\w*|uzkost|depre(s|ss)|trauma)\b/i,
+    /\bmental\s+health|krizov(a|e)\s+podpora|individualni\s+terapi\w*\b/i,
   ],
   hospitality: [
     /\bhotel|resort|accommodation|ubytovan(i|í)|wellness|spa|check-?in|check-?out\b/i,
@@ -215,7 +223,10 @@ function detectDomainTag(texts: string[]): DomainTag | null {
   };
 
   texts.forEach((text) => {
-    const normalized = normalizeWhitespace(text);
+    const normalized = normalizeWhitespace(text)
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
     if (!normalized) return;
     (Object.keys(DOMAIN_TOKENS) as DomainTag[]).forEach((tag) => {
       DOMAIN_TOKENS[tag].forEach((pattern) => {
@@ -286,18 +297,29 @@ function isNeutralFallbackText(value: string, language: AppLanguage): boolean {
 const CONTENT_BEARING_TEXT_HINT = /\b(od|from|podpora|support|konzult|session|sezen|terapi|counsel|care|approach|metoda|experience|specializ|zam[eě]r|pracuji|offer|provide)\b/i;
 const GENERIC_WEBSITE_TITLE_PATTERN = /^(website|web\s*site|site|landing\s*page|home\s*page|homepage|company\s*website)$/i;
 
-function getLocalizedWebsiteLabels(language: AppLanguage): LocalizedWebsiteLabels {
+function deriveWebsiteArchetype(currentDomain: DomainTag | null): WebsiteArchetype {
+  return currentDomain === 'therapy' ? 'personal-profile' : 'company-service';
+}
+
+function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArchetype): LocalizedWebsiteLabels {
   if (language === 'en') {
+    const personal = archetype === 'personal-profile';
     return {
       htmlLang: 'en',
       heroSectionLabel: 'Intro',
-      aboutHeading: 'About',
-      approachHeading: 'Approach and Education',
-      topicsHeading: 'Topics',
+      aboutSectionId: personal ? 'about-me' : 'about-company',
+      aboutHeading: personal ? 'About' : 'About Company',
+      approachSectionId: personal ? 'approach-education' : 'service-overview',
+      approachHeading: personal ? 'Approach and Education' : 'Service Overview',
+      topicsSectionId: personal ? 'topics' : 'highlights',
+      topicsHeading: personal ? 'Topics' : 'Highlights',
+      servicesPricingSectionId: 'services-pricing',
       servicesPricingHeading: 'Services and Pricing',
       servicesHeading: 'Services',
       pricingHeading: 'Pricing',
+      contactSectionId: 'contact',
       contactHeading: 'Contact',
+      mapSectionId: 'map',
       mapHeading: 'Map',
       mapLinkLabel: 'Open map',
       emptyListNote: 'Details will be added after source verification.',
@@ -305,16 +327,24 @@ function getLocalizedWebsiteLabels(language: AppLanguage): LocalizedWebsiteLabel
     };
   }
 
+  const personal = archetype === 'personal-profile';
+
   return {
     htmlLang: 'cs',
     heroSectionLabel: 'Úvod',
-    aboutHeading: 'O mně',
-    approachHeading: 'Přístup a vzdělávání',
-    topicsHeading: 'Témata',
+    aboutSectionId: personal ? 'o-mne' : 'o-nas',
+    aboutHeading: personal ? 'O mně' : 'O nás',
+    approachSectionId: personal ? 'pristup-vzdelavani' : 'prehled-sluzeb',
+    approachHeading: personal ? 'Přístup a vzdělávání' : 'Přehled služeb',
+    topicsSectionId: personal ? 'temata' : 'hlavni-oblasti',
+    topicsHeading: personal ? 'Témata' : 'Hlavní oblasti',
+    servicesPricingSectionId: 'sluzby-ceny',
     servicesPricingHeading: 'Služby a ceny',
     servicesHeading: 'Služby',
     pricingHeading: 'Ceny',
+    contactSectionId: 'kontakt',
     contactHeading: 'Kontakt',
+    mapSectionId: 'mapa',
     mapHeading: 'Mapa',
     mapLinkLabel: 'Otevřít mapu',
     emptyListNote: 'Detaily budou doplněny po ověření zdrojů.',
@@ -756,7 +786,6 @@ function buildPublicWebsiteViewModel(params: {
   language?: AppLanguage;
 }): PublicWebsiteViewModel {
   const language = params.language ?? 'cz';
-  const labels = getLocalizedWebsiteLabels(language);
   const verifiedTitle = sanitizePublicText(params.verified.pageTitle);
   const fallbackProjectTitle = sanitizePublicText(params.projectName) ?? 'Website';
   const resolvedTitle =
@@ -806,6 +835,8 @@ function buildPublicWebsiteViewModel(params: {
     ...sanitizedPricingFields,
     ...sanitizedCtaTexts,
   ]);
+  const archetype = deriveWebsiteArchetype(currentDomain);
+  const labels = getLocalizedWebsiteLabels(language, archetype);
   const bodyFacts = candidateBodyFacts.filter((entry) => !isDomainMismatch(entry, currentDomain));
   const services = uniq(verifiedServices, 8);
 
@@ -1071,22 +1102,22 @@ function buildPublicHtml(params: {
     '  </header>',
     '',
     '  <main>',
-    '    <section id="o-mne" class="card">',
+    `    <section id="${escapeHtml(model.labels.aboutSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.aboutHeading)}</h2>`,
     `      <p>${escapeHtml(model.aboutCopy)}</p>`,
     '    </section>',
     '',
-    '    <section id="pristup-vzdelavani" class="card">',
+    `    <section id="${escapeHtml(model.labels.approachSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.approachHeading)}</h2>`,
     `      <p>${escapeHtml(model.approachCopy)}</p>`,
     '    </section>',
     '',
-    '    <section id="temata" class="card">',
+    `    <section id="${escapeHtml(model.labels.topicsSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.topicsHeading)}</h2>`,
     topicsMarkup,
     '    </section>',
     '',
-    '    <section id="sluzby-ceny" class="card">',
+    `    <section id="${escapeHtml(model.labels.servicesPricingSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.servicesPricingHeading)}</h2>`,
     '      <div class="split">',
     '        <div>',
@@ -1100,13 +1131,13 @@ function buildPublicHtml(params: {
     '      </div>',
     '    </section>',
     '',
-    '    <section id="kontakt" class="card">',
+    `    <section id="${escapeHtml(model.labels.contactSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.contactHeading)}</h2>`,
     `      <p>${escapeHtml(model.contactIntro)}</p>`,
     contactMarkup,
     '    </section>',
     '',
-    '    <section id="mapa" class="card">',
+    `    <section id="${escapeHtml(model.labels.mapSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.mapHeading)}</h2>`,
     mapMarkup,
     '    </section>',
