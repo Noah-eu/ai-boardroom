@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildDeterministicWebsiteArtifacts,
+  buildDeterministicWebsiteArtifactsByLocale,
   buildDeterministicWebsiteCopySections,
+  buildDeterministicWebsiteCopySectionsByLocale,
   deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
@@ -80,9 +82,9 @@ describe('deterministicWebsiteBuilder', () => {
     expect(artifacts.indexHtml).toContain('Individual sessions for adults - uvodni text');
     expect(artifacts.indexHtml).toContain('Book appointment now');
     expect(artifacts.indexHtml).toContain('Individual sessions for adults v overenem bezpecnem prostredi.');
-    expect(artifacts.indexHtml).toContain('O mně');
-    expect(artifacts.indexHtml).toContain('Přístup a vzdělávání');
-    expect(artifacts.indexHtml).toContain('Témata');
+    expect(artifacts.indexHtml).toContain('O nás');
+    expect(artifacts.indexHtml).toContain('Přehled služeb');
+    expect(artifacts.indexHtml).toContain('Hlavní oblasti');
     expect(artifacts.indexHtml).toContain('Služby a ceny');
     expect(artifacts.indexHtml).toContain('Kontakt');
     expect(artifacts.indexHtml).toContain('Mapa');
@@ -794,7 +796,7 @@ describe('deterministicWebsiteBuilder', () => {
   it('isolates section schema per run and prevents personal-profile schema bleed into company sites', () => {
     const runA = deriveVerifiedWebsiteContentFromPrompt({
       projectName: 'Personal Therapy Profile',
-      projectPrompt: 'About: Individualni terapie a psychologicka podpora. Services: Individualni terapie.',
+      projectPrompt: 'About: Poskytuji individualni podporu a vedu osobni konzultace. Services: Individualni konzultace.',
     });
     const runAHtml = buildDeterministicWebsiteArtifacts({
       projectName: 'Personal Therapy Profile',
@@ -994,5 +996,61 @@ describe('deterministicWebsiteBuilder', () => {
     expect(noFactsSections.about.body.toLowerCase()).toContain('doplneny');
     expect(withFactsSections.about.body.toLowerCase()).toContain('podpora');
     expect(withFactsSections.about.body.toLowerCase()).not.toContain('doplneny po overeni');
+  });
+
+  it('keeps single-language output language-consistent without mixed-locale leakage', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Run B Service Site',
+      projectPrompt: [
+        'Hero: Run B Service Site',
+        'About: Poskytujeme podporu pro klientsky servis.',
+        'Services: Klientsky servis, Rezervace',
+        'CTA: Contact the team',
+        'Contact: team@runb.example, +420 777 111 333',
+      ].join('\n'),
+    });
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Run B Service Site',
+      projectDescription: 'Single-language task',
+      verified,
+      language: 'cz',
+    });
+
+    expect(artifacts.indexHtml.toLowerCase()).not.toContain('contact the team');
+    expect(artifacts.indexHtml).toContain('Kontaktovat tym');
+  });
+
+  it('builds one locale-scoped model per locale with no cross-locale text leakage', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Multilingual Service Task',
+      projectPrompt: [
+        'Hero: Multilingual Service Task',
+        'About: Poskytujeme servisni podporu pro provoz.',
+        'Services: Provozni servis, Zakaznicky servis',
+        'Pricing: Od 2500 Kc',
+        'CTA: Contact the team',
+        'Contact: info@multi.example',
+      ].join('\n'),
+    });
+
+    const perLocaleSections = buildDeterministicWebsiteCopySectionsByLocale({
+      projectName: 'Multilingual Service Task',
+      verified,
+      locales: ['cz', 'en'],
+    });
+    const perLocaleArtifacts = buildDeterministicWebsiteArtifactsByLocale({
+      projectName: 'Multilingual Service Task',
+      projectDescription: 'Multilingual task',
+      verified,
+      locales: ['cz', 'en'],
+    });
+
+    expect(perLocaleSections.cz.hero.cta).toBe('Kontaktovat tym');
+    expect(perLocaleSections.en.hero.cta).toBe('Contact the team');
+    expect(perLocaleArtifacts.cz.indexHtml).toContain('Kontaktovat tym');
+    expect(perLocaleArtifacts.cz.indexHtml.toLowerCase()).not.toContain('contact the team');
+    expect(perLocaleArtifacts.en.indexHtml).toContain('Contact the team');
+    expect(perLocaleArtifacts.en.indexHtml).toContain('<html lang="en">');
   });
 });

@@ -198,58 +198,48 @@ const NEUTRAL_FALLBACK_COPY = {
   },
 } as const;
 
-type DomainTag = 'therapy' | 'hospitality' | 'business';
+const PERSONAL_PROFILE_PATTERNS = [
+  /\b(i|me|my|myself)\b/i,
+  /\b(j[aá]|m[eě]|muj|moje|mne)\b/i,
+  /\b(i\s+(offer|provide|work)|jsem|pracuji|nabizim|poskytuji)\b/i,
+];
 
-const DOMAIN_TOKENS: Record<DomainTag, RegExp[]> = {
-  therapy: [
-    /\b(therap(y|ist|eut|ie)|terapeut\w*|terapi\w*|counsel(l?ing)?|psycholog\w*|psychoterap\w*|uzkost|depre(s|ss)|trauma)\b/i,
-    /\bmental\s+health|krizov(a|e)\s+podpora|individualni\s+terapi\w*\b/i,
-  ],
-  hospitality: [
-    /\bhotel|resort|accommodation|ubytovan(i|í)|wellness|spa|check-?in|check-?out\b/i,
-    /\broom\s+service|snidan(e|ě)|breakfast|reception|noc\b/i,
-  ],
-  business: [
-    /\bconsult(ing|ation)|agency|company|business|firm|startup|enterprise\b/i,
-    /\bsolution(s)?|product(s)?|partner(s)?|portfolio|service(s)?\b/i,
-  ],
-};
+const ORGANIZATION_PROFILE_PATTERNS = [
+  /\b(we|our|team|company|organization|business)\b/i,
+  /\b(my\s+team|our\s+team|we\s+provide|we\s+offer)\b/i,
+  /\b(my\s+company|our\s+company|spolecnost|firma|tym|nase\s+sluzby|poskytujeme|nabizime)\b/i,
+];
 
-function detectDomainTag(texts: string[]): DomainTag | null {
-  const score: Record<DomainTag, number> = {
-    therapy: 0,
-    hospitality: 0,
-    business: 0,
-  };
+function deriveWebsiteArchetype(params: {
+  projectName: string;
+  headings: string[];
+  bodyFacts: string[];
+  serviceNames: string[];
+  ctaTexts: string[];
+}): WebsiteArchetype {
+  const source = [
+    params.projectName,
+    ...params.headings,
+    ...params.bodyFacts,
+    ...params.serviceNames,
+    ...params.ctaTexts,
+  ];
 
-  texts.forEach((text) => {
-    const normalized = normalizeWhitespace(text)
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '');
-    if (!normalized) return;
-    (Object.keys(DOMAIN_TOKENS) as DomainTag[]).forEach((tag) => {
-      DOMAIN_TOKENS[tag].forEach((pattern) => {
-        if (pattern.test(normalized)) {
-          score[tag] += 1;
-        }
-      });
+  let personalHits = 0;
+  let organizationHits = 0;
+
+  source.forEach((entry) => {
+    const cleaned = normalizeWhitespace(entry);
+    if (!cleaned) return;
+    PERSONAL_PROFILE_PATTERNS.forEach((pattern) => {
+      if (pattern.test(cleaned)) personalHits += 1;
+    });
+    ORGANIZATION_PROFILE_PATTERNS.forEach((pattern) => {
+      if (pattern.test(cleaned)) organizationHits += 1;
     });
   });
 
-  const entries = (Object.entries(score) as Array<[DomainTag, number]>).sort((a, b) => b[1] - a[1]);
-  const [bestTag, bestScore] = entries[0];
-  const secondScore = entries[1]?.[1] ?? 0;
-  if (bestScore === 0) return null;
-  if (bestScore === secondScore) return null;
-  return bestTag;
-}
-
-function isDomainMismatch(candidate: string, currentDomain: DomainTag | null): boolean {
-  if (!currentDomain) return false;
-  const candidateDomain = detectDomainTag([candidate]);
-  if (!candidateDomain) return false;
-  return candidateDomain !== currentDomain;
+  return personalHits > organizationHits && personalHits > 0 ? 'personal-profile' : 'company-service';
 }
 
 function tokenizeForProvenance(value: string): string[] {
@@ -296,10 +286,6 @@ function isNeutralFallbackText(value: string, language: AppLanguage): boolean {
 
 const CONTENT_BEARING_TEXT_HINT = /\b(od|from|podpora|support|konzult|session|sezen|terapi|counsel|care|approach|metoda|experience|specializ|zam[eě]r|pracuji|offer|provide)\b/i;
 const GENERIC_WEBSITE_TITLE_PATTERN = /^(website|web\s*site|site|landing\s*page|home\s*page|homepage|company\s*website)$/i;
-
-function deriveWebsiteArchetype(currentDomain: DomainTag | null): WebsiteArchetype {
-  return currentDomain === 'therapy' ? 'personal-profile' : 'company-service';
-}
 
 function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArchetype): LocalizedWebsiteLabels {
   if (language === 'en') {
@@ -866,19 +852,15 @@ function buildPublicWebsiteViewModel(params: {
   );
 
   const verifiedServices = stripStructuralLabels(sanitizedServiceNames, structuralLabels, 12);
-  const currentDomain = detectDomainTag([
-    title,
-    ...sanitizedHeadings,
-    ...verifiedServices,
-    ...sanitizedBodyTextBlocks,
-    ...sanitizedPricingFields,
-    ...sanitizedCtaTexts,
-  ]);
-  const archetype = deriveWebsiteArchetype(currentDomain);
+  const archetype = deriveWebsiteArchetype({
+    projectName: title,
+    headings: sanitizedHeadings,
+    bodyFacts: candidateBodyFacts,
+    serviceNames: verifiedServices,
+    ctaTexts: sanitizedCtaTexts,
+  });
   const labels = getLocalizedWebsiteLabels(language, archetype);
-  const bodyFacts = candidateBodyFacts.filter(
-    (entry) => !isDomainMismatch(entry, currentDomain) && isLocaleConsistentText(entry, language)
-  );
+  const bodyFacts = candidateBodyFacts.filter((entry) => isLocaleConsistentText(entry, language));
   const localeCtaTexts = sanitizedCtaTexts.filter((entry) => isLocaleConsistentText(entry, language));
   const services = uniq(verifiedServices, 8);
 
@@ -921,7 +903,6 @@ function buildPublicWebsiteViewModel(params: {
 
   const isProvenanceSafeOverride = (value: string | null | undefined): boolean => {
     if (!value?.trim()) return false;
-    if (isDomainMismatch(value, currentDomain)) return false;
     return isNeutralFallbackText(value, language) || hasProvenanceOverlap(value, provenanceFacts);
   };
 
@@ -1109,6 +1090,42 @@ export function buildDeterministicWebsiteCopySections(params: {
       body: model.mapCopy,
     },
   };
+}
+
+function buildLocaleScopedVerifiedContent(content: VerifiedWebsiteContent, language: AppLanguage): VerifiedWebsiteContent {
+  const localeText = (values: string[], max: number): string[] =>
+    uniq(values.filter((entry) => isLocaleConsistentText(entry, language)), max);
+
+  return {
+    ...content,
+    pageTitle: sanitizePublicText(content.pageTitle) ?? 'Website',
+    headings: localeText(content.headings, 30),
+    bodyTextBlocks: localeText(content.bodyTextBlocks, 40),
+    serviceNames: localeText(content.serviceNames, 24),
+    pricingFields: localeText(content.pricingFields, 24),
+    ctaTexts: localeText(content.ctaTexts, 20),
+    // Contact/address identifiers are locale-agnostic business facts and remain shared.
+    emails: uniq(content.emails, 12),
+    phones: uniq(content.phones, 12),
+    addresses: uniq(content.addresses, 12),
+  };
+}
+
+export function buildDeterministicWebsiteCopySectionsByLocale(params: {
+  projectName: string;
+  verified: VerifiedWebsiteContent;
+  locales: AppLanguage[];
+}): Record<AppLanguage, WebsiteCopySections> {
+  const output = {} as Record<AppLanguage, WebsiteCopySections>;
+  params.locales.forEach((locale) => {
+    const localeVerified = buildLocaleScopedVerifiedContent(params.verified, locale);
+    output[locale] = buildDeterministicWebsiteCopySections({
+      projectName: params.projectName,
+      verified: localeVerified,
+      language: locale,
+    });
+  });
+  return output;
 }
 
 function buildPublicHtml(params: {
@@ -1542,4 +1559,27 @@ export function buildDeterministicWebsiteArtifacts(params: {
     stylesCss,
     scriptJs,
   };
+}
+
+export function buildDeterministicWebsiteArtifactsByLocale(params: {
+  projectName: string;
+  projectDescription: string;
+  verified: VerifiedWebsiteContent;
+  locales: AppLanguage[];
+  portraitImage?: WebsitePortraitImage | null;
+  copySectionsByLocale?: Partial<Record<AppLanguage, Partial<WebsiteCopySections>>>;
+}): Record<AppLanguage, DeterministicWebsiteArtifacts> {
+  const output = {} as Record<AppLanguage, DeterministicWebsiteArtifacts>;
+  params.locales.forEach((locale) => {
+    const localeVerified = buildLocaleScopedVerifiedContent(params.verified, locale);
+    output[locale] = buildDeterministicWebsiteArtifacts({
+      projectName: params.projectName,
+      projectDescription: params.projectDescription,
+      verified: localeVerified,
+      portraitImage: params.portraitImage,
+      copySections: params.copySectionsByLocale?.[locale],
+      language: locale,
+    });
+  });
+  return output;
 }
