@@ -707,7 +707,7 @@ describe('deterministicWebsiteBuilder', () => {
     expect(hotelArtifacts.indexHtml.toLowerCase()).not.toContain('uzkost');
   });
 
-  it('uses domain-neutral fallback copy when about and approach facts are missing', () => {
+  it('omits about and approach copy when source facts are missing', () => {
     const hotelVerified = deriveVerifiedWebsiteContentFromPrompt({
       projectName: 'Harbor View Hotel',
       projectPrompt: [
@@ -721,9 +721,8 @@ describe('deterministicWebsiteBuilder', () => {
       verified: hotelVerified,
     });
 
-    const mergedCopy = `${sections.about.body} ${sections.approach.body}`.toLowerCase();
-    expect(mergedCopy).toContain('overeni aktualnich podkladu');
-    expect(mergedCopy).toContain('potvrzeni overenych podkladu');
+    const mergedCopy = `${sections.about.body} ${sections.approach.body}`.toLowerCase().trim();
+    expect(mergedCopy).toBe('');
     expect(mergedCopy).not.toContain('terapi');
     expect(mergedCopy).not.toContain('personal growth');
   });
@@ -815,18 +814,16 @@ describe('deterministicWebsiteBuilder', () => {
     }).indexHtml;
 
     expect(runAHtml).toContain('<h2>O mně</h2>');
-    expect(runAHtml).toContain('<section id="pristup-vzdelavani"');
     expect(runAHtml).toContain('<h2>Témata</h2>');
+    expect(runAHtml).not.toContain('<h2>Přehled služeb</h2>');
 
     expect(runBHtml).toContain('<h2>O nás</h2>');
-    expect(runBHtml).toContain('<section id="prehled-sluzeb"');
-    expect(runBHtml).toContain('<h2>Hlavní oblasti</h2>');
     expect(runBHtml).not.toContain('<h2>O mně</h2>');
     expect(runBHtml).not.toContain('<h2>Přístup a vzdělávání</h2>');
     expect(runBHtml).not.toContain('<h2>Témata</h2>');
   });
 
-  it('falls back to neutral company/service schema when archetype is uncertain', () => {
+  it('keeps uncertain archetype output free of personal schema labels', () => {
     const uncertain = deriveVerifiedWebsiteContentFromPrompt({
       projectName: 'Neutral Public Site',
       projectPrompt: 'Hero: Neutral Public Site\nContact: hello@neutral.example',
@@ -838,8 +835,7 @@ describe('deterministicWebsiteBuilder', () => {
       verified: uncertain,
     }).indexHtml;
 
-    expect(html).toContain('<h2>O nás</h2>');
-    expect(html).toContain('<h2>Přehled služeb</h2>');
+    expect(html).toContain('<h2>Kontakt</h2>');
     expect(html).not.toContain('<h2>O mně</h2>');
     expect(html).not.toContain('<h2>Přístup a vzdělávání</h2>');
   });
@@ -858,8 +854,8 @@ describe('deterministicWebsiteBuilder', () => {
     expect(sections.topics.items).toEqual([]);
     expect(sections.servicesPricing.services).toEqual([]);
     expect(sections.servicesPricing.pricing).toEqual([]);
-    const combined = `${sections.about.body} ${sections.approach.body}`.toLowerCase();
-    expect(combined).toContain('overeni');
+    const combined = `${sections.about.body} ${sections.approach.body}`.toLowerCase().trim();
+    expect(combined).toBe('');
     expect(combined).not.toContain('therapy');
     expect(combined).not.toContain('hotel');
   });
@@ -967,7 +963,7 @@ describe('deterministicWebsiteBuilder', () => {
     expect(sections.approach.body.toLowerCase()).not.toContain('book now');
   });
 
-  it('uses placeholders only when verified facts are truly unavailable', () => {
+  it('keeps placeholders empty and uses verified facts when available', () => {
     const noFacts = deriveVerifiedWebsiteContentFromPrompt({
       projectName: 'Empty Service Site',
       projectPrompt: 'Hero: Empty Service Site',
@@ -993,7 +989,7 @@ describe('deterministicWebsiteBuilder', () => {
       language: 'cz',
     });
 
-    expect(noFactsSections.about.body.toLowerCase()).toContain('doplneny');
+    expect(noFactsSections.about.body).toBe('');
     expect(withFactsSections.about.body.toLowerCase()).toContain('podpora');
     expect(withFactsSections.about.body.toLowerCase()).not.toContain('doplneny po overeni');
   });

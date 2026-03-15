@@ -22,6 +22,13 @@ export type DeterministicWebsiteArtifacts = {
   scriptJs: string;
 };
 
+export type BilingualWebsiteArtifacts = {
+  indexCzHtml: string;
+  indexEnHtml: string;
+  stylesCss: string;
+  scriptJs: string;
+};
+
 export type WebsitePortraitImage = {
   src: string;
   alt: string;
@@ -186,16 +193,8 @@ const PROVENANCE_STOPWORDS = new Set([
 ]);
 
 const NEUTRAL_FALLBACK_COPY = {
-  cz: {
-    heroSubtitle: 'Overene informace o tomto webu budou doplneny po finalizaci podkladu.',
-    about: 'Informace o projektu budou doplneny po overeni aktualnich podkladu.',
-    approach: 'Postup realizace bude upresnen po potvrzeni overenych podkladu.',
-  },
-  en: {
-    heroSubtitle: 'Verified website information will be added after the current source review is complete.',
-    about: 'Project details will be added after current source verification is complete.',
-    approach: 'Implementation details will be added after the verified source review is complete.',
-  },
+  cz: { heroSubtitle: '', about: '', approach: '' },
+  en: { heroSubtitle: '', about: '', approach: '' },
 } as const;
 
 const PERSONAL_PROFILE_PATTERNS = [
@@ -308,8 +307,8 @@ function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArch
       mapSectionId: 'map',
       mapHeading: 'Map',
       mapLinkLabel: 'Open map',
-      emptyListNote: 'Details will be added after source verification.',
-      noContactNote: 'Contact details are not publicly listed yet.',
+      emptyListNote: '',
+      noContactNote: '',
     };
   }
 
@@ -333,8 +332,8 @@ function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArch
     mapSectionId: 'mapa',
     mapHeading: 'Mapa',
     mapLinkLabel: 'Otevřít mapu',
-    emptyListNote: 'Detaily budou doplněny po ověření zdrojů.',
-    noContactNote: 'Kontaktní údaje zatím nejsou veřejně uvedeny.',
+    emptyListNote: '',
+    noContactNote: '',
   };
 }
 
@@ -1021,10 +1020,10 @@ function buildPublicWebsiteViewModel(params: {
       (language === 'cz'
         ? contact.email || contact.phone
           ? 'Pro rezervaci nebo dotazy pouzijte uvedene kontaktni udaje.'
-          : 'Kontaktni udaje budou doplneny po overeni zdroju.'
+          : ''
         : contact.email || contact.phone
         ? 'Use the listed contact details for reservations or inquiries.'
-        : 'Contact details will be added after source verification.')
+        : '')
   );
   const mapCopy = normalizeWhitespace(
     mapOverride ??
@@ -1128,11 +1127,18 @@ export function buildDeterministicWebsiteCopySectionsByLocale(params: {
   return output;
 }
 
+function sectionHasContent(copy: string | null | undefined, items?: string[]): boolean {
+  const hasCopy = Boolean(copy && copy.trim());
+  const hasItems = Boolean(items && items.length > 0);
+  return hasCopy || hasItems;
+}
+
 function buildPublicHtml(params: {
   model: PublicWebsiteViewModel;
   portraitImage?: WebsitePortraitImage | null;
+  altLangHref?: string | null;
 }): string {
-  const { model, portraitImage } = params;
+  const { model, portraitImage, altLangHref } = params;
   const contactRows = [
     model.contact.email
       ? `<p><strong>E-mail:</strong> <a href="mailto:${escapeHtml(model.contact.email)}">${escapeHtml(model.contact.email)}</a></p>`
@@ -1185,6 +1191,15 @@ function buildPublicHtml(params: {
     '  <link rel="stylesheet" href="styles.css" />',
     '</head>',
     '<body>',
+    ...(altLangHref
+      ? [
+          '  <nav class="lang-switcher" aria-label="Language">',
+          model.language === 'cz'
+            ? `    <span class="lang-btn lang-active">CZ</span><a class="lang-btn" href="${escapeHtml(altLangHref)}">EN</a>`
+            : `    <a class="lang-btn" href="${escapeHtml(altLangHref)}">CZ</a><span class="lang-btn lang-active">EN</span>`,
+          '  </nav>',
+        ]
+      : []),
     '  <header id="hero" class="hero">',
     `    <p class="section-label">${escapeHtml(model.labels.heroSectionLabel)}</p>`,
     `    <h1>${escapeHtml(model.heroTitle)}</h1>`,
@@ -1196,45 +1211,65 @@ function buildPublicHtml(params: {
     '  </header>',
     '',
     '  <main>',
-    `    <section id="${escapeHtml(model.labels.aboutSectionId)}" class="card">`,
-    `      <h2>${escapeHtml(model.labels.aboutHeading)}</h2>`,
-    `      <p>${escapeHtml(model.aboutCopy)}</p>`,
-    '    </section>',
-    '',
-    `    <section id="${escapeHtml(model.labels.approachSectionId)}" class="card">`,
-    `      <h2>${escapeHtml(model.labels.approachHeading)}</h2>`,
-    `      <p>${escapeHtml(model.approachCopy)}</p>`,
-    '    </section>',
-    '',
-    `    <section id="${escapeHtml(model.labels.topicsSectionId)}" class="card">`,
-    `      <h2>${escapeHtml(model.labels.topicsHeading)}</h2>`,
-    topicsMarkup,
-    '    </section>',
-    '',
-    `    <section id="${escapeHtml(model.labels.servicesPricingSectionId)}" class="card">`,
-    `      <h2>${escapeHtml(model.labels.servicesPricingHeading)}</h2>`,
-    '      <div class="split">',
-    '        <div>',
-    `          <h3>${escapeHtml(model.labels.servicesHeading)}</h3>`,
-    servicesMarkup,
-    '        </div>',
-    '        <div>',
-    `          <h3>${escapeHtml(model.labels.pricingHeading)}</h3>`,
-    pricingMarkup,
-    '        </div>',
-    '      </div>',
-    '    </section>',
-    '',
+    ...(sectionHasContent(model.aboutCopy)
+      ? [
+          `    <section id="${escapeHtml(model.labels.aboutSectionId)}" class="card">`,
+          `      <h2>${escapeHtml(model.labels.aboutHeading)}</h2>`,
+          `      <p>${escapeHtml(model.aboutCopy)}</p>`,
+          '    </section>',
+          '',
+        ]
+      : []),
+    ...(sectionHasContent(model.approachCopy)
+      ? [
+          `    <section id="${escapeHtml(model.labels.approachSectionId)}" class="card">`,
+          `      <h2>${escapeHtml(model.labels.approachHeading)}</h2>`,
+          `      <p>${escapeHtml(model.approachCopy)}</p>`,
+          '    </section>',
+          '',
+        ]
+      : []),
+    ...(sectionHasContent(null, model.topics)
+      ? [
+          `    <section id="${escapeHtml(model.labels.topicsSectionId)}" class="card">`,
+          `      <h2>${escapeHtml(model.labels.topicsHeading)}</h2>`,
+          topicsMarkup,
+          '    </section>',
+          '',
+        ]
+      : []),
+    ...(sectionHasContent(null, model.services) || sectionHasContent(null, model.pricing)
+      ? [
+          `    <section id="${escapeHtml(model.labels.servicesPricingSectionId)}" class="card">`,
+          `      <h2>${escapeHtml(model.labels.servicesPricingHeading)}</h2>`,
+          '      <div class="split">',
+          '        <div>',
+          `          <h3>${escapeHtml(model.labels.servicesHeading)}</h3>`,
+          servicesMarkup,
+          '        </div>',
+          '        <div>',
+          `          <h3>${escapeHtml(model.labels.pricingHeading)}</h3>`,
+          pricingMarkup,
+          '        </div>',
+          '      </div>',
+          '    </section>',
+          '',
+        ]
+      : []),
     `    <section id="${escapeHtml(model.labels.contactSectionId)}" class="card">`,
     `      <h2>${escapeHtml(model.labels.contactHeading)}</h2>`,
-    `      <p>${escapeHtml(model.contactIntro)}</p>`,
+    ...(model.contactIntro ? [`      <p>${escapeHtml(model.contactIntro)}</p>`] : []),
     contactMarkup,
     '    </section>',
     '',
-    `    <section id="${escapeHtml(model.labels.mapSectionId)}" class="card">`,
-    `      <h2>${escapeHtml(model.labels.mapHeading)}</h2>`,
-    mapMarkup,
-    '    </section>',
+    ...(model.mapUrl || sectionHasContent(model.mapCopy)
+      ? [
+          `    <section id="${escapeHtml(model.labels.mapSectionId)}" class="card">`,
+          `      <h2>${escapeHtml(model.labels.mapHeading)}</h2>`,
+          mapMarkup,
+          '    </section>',
+        ]
+      : []),
     '  </main>',
     '',
     '  <script src="script.js"></script>',
@@ -1534,6 +1569,10 @@ export function buildDeterministicWebsiteArtifacts(params: {
     '.card h2 { margin-top: 0; }',
     '.split { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }',
     '.map-link { color: var(--accent); font-weight: 600; }',
+    '.lang-switcher { text-align: right; padding: 0.5rem 1.25rem 0; max-width: 980px; margin: 0 auto; }',
+    '.lang-btn { display: inline-block; padding: 0.28rem 0.75rem; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); text-decoration: none; font-size: 0.8rem; margin-left: 0.35rem; font-family: inherit; }',
+    '.lang-btn:hover { background: var(--accent); color: #fff; }',
+    '.lang-active { background: var(--accent); color: #fff; pointer-events: none; cursor: default; }',
     '@media (max-width: 640px) {',
     '  .hero { padding-top: 1.3rem; }',
     '  .cta { width: 100%; text-align: center; }',
@@ -1582,4 +1621,54 @@ export function buildDeterministicWebsiteArtifactsByLocale(params: {
     });
   });
   return output;
+}
+
+export function buildBilingualWebsiteArtifacts(params: {
+  projectName: string;
+  projectDescription: string;
+  verified: VerifiedWebsiteContent;
+  portraitImage?: WebsitePortraitImage | null;
+  copySections?: Partial<WebsiteCopySections>;
+}): BilingualWebsiteArtifacts {
+  const czModel = buildPublicWebsiteViewModel({
+    projectName: params.projectName,
+    verified: params.verified,
+    copySections: params.copySections,
+    language: 'cz',
+  });
+
+  const enModel = buildPublicWebsiteViewModel({
+    projectName: params.projectName,
+    verified: params.verified,
+    copySections: params.copySections,
+    language: 'en',
+  });
+
+  const indexCzHtml = buildPublicHtml({
+    model: czModel,
+    portraitImage: params.portraitImage,
+    altLangHref: 'index-en.html',
+  });
+
+  const indexEnHtml = buildPublicHtml({
+    model: enModel,
+    portraitImage: params.portraitImage,
+    altLangHref: 'index.html',
+  });
+
+  const czArtifacts = buildDeterministicWebsiteArtifacts({
+    projectName: params.projectName,
+    projectDescription: params.projectDescription,
+    verified: params.verified,
+    copySections: params.copySections,
+    language: 'cz',
+    portraitImage: params.portraitImage,
+  });
+
+  return {
+    indexCzHtml,
+    indexEnHtml,
+    stylesCss: czArtifacts.stylesCss,
+    scriptJs: czArtifacts.scriptJs,
+  };
 }

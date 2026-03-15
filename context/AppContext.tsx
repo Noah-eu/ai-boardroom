@@ -70,8 +70,9 @@ import {
   stabilizeCodeExecutionBundle,
 } from '@/lib/codeBundleStabilizer';
 import {
-  buildDeterministicWebsiteArtifacts,
+  buildBilingualWebsiteArtifacts,
   buildDeterministicWebsiteCopySections,
+  type BilingualWebsiteArtifacts,
   deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
@@ -5988,12 +5989,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 websiteArtifactScope
               );
 
-              const websiteArtifacts = buildDeterministicWebsiteArtifacts({
+              const bilingualArtifacts: BilingualWebsiteArtifacts = buildBilingualWebsiteArtifacts({
                 projectName: project.name,
                 projectDescription: project.description,
                 verified: verifiedContent,
                 copySections: sectionOverrides,
-                language: project.language,
                 portraitImage: (() => {
                   const portraitPlan = buildPortraitAssetPlan(snapshot);
                   if (!portraitPlan) return null;
@@ -6006,10 +6006,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
               const selectedContent =
                 artifact.path === 'index.html'
-                  ? websiteArtifacts.indexHtml
+                  ? bilingualArtifacts.indexCzHtml
                   : artifact.path === 'styles.css'
-                  ? websiteArtifacts.stylesCss
-                  : websiteArtifacts.scriptJs;
+                  ? bilingualArtifacts.stylesCss
+                  : bilingualArtifacts.scriptJs;
 
               updatedArtifacts[index] = {
                 ...artifact,
@@ -6062,6 +6062,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 minGeneratedAtMs: new Date(snapshot.createdAt).getTime(),
               };
               const indexHtml = getLatestArtifactContent(project.tasks, 'index.html', websiteArtifactScope);
+              const enHtml = (() => {
+                const wsModel = resolveSegmentedWebsiteContentModelFromTaskArtifacts(
+                  project.tasks,
+                  { minGeneratedAtMs: new Date(snapshot.createdAt).getTime() }
+                );
+                const verified = wsModel?.verified ?? deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+                if (!hasSufficientVerifiedWebsiteContent(verified)) return null;
+                const copySections = wsModel?.copySections ?? buildDeterministicWebsiteCopySections({
+                  projectName: project.name,
+                  verified,
+                  language: 'en',
+                });
+                return buildBilingualWebsiteArtifacts({
+                  projectName: project.name,
+                  projectDescription: project.description,
+                  verified,
+                  copySections,
+                }).indexEnHtml;
+              })();
               const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css', websiteArtifactScope);
               const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js', websiteArtifactScope);
               const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
@@ -6101,6 +6120,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   `${task.agent}: ${assembled.error}`
                 );
                 return;
+              }
+
+              if (assembled.ok && enHtml) {
+                assembled.bundle.files.push({
+                  path: 'index-en.html',
+                  content: enHtml,
+                });
               }
 
               const stabilized = stabilizeCodeExecutionBundle({
