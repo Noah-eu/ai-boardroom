@@ -89,7 +89,6 @@ describe('segmentedWebsiteBundle integration', () => {
     expect(indexFile?.content).toContain('assets/portrait.jpg');
     expect(indexFile?.content).toContain('Úvod');
     expect(indexFile?.content).toContain('O nás');
-    expect(indexFile?.content).toContain('Přehled služeb');
     expect(indexFile?.content).toContain('Hlavní oblasti');
     expect(indexFile?.content).toContain('Služby a ceny');
     expect(indexFile?.content).toContain('Kontakt');

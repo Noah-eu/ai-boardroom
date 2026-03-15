@@ -283,7 +283,7 @@ function isNeutralFallbackText(value: string, language: AppLanguage): boolean {
   );
 }
 
-const CONTENT_BEARING_TEXT_HINT = /\b(od|from|podpora|support|konzult|session|sezen|terapi|counsel|care|approach|metoda|experience|specializ|zam[eě]r|pracuji|offer|provide)\b/i;
+const CONTENT_BEARING_TEXT_HINT = /\b(service|services|solution|solutions|offer|offers|support|contact|pricing|product|products|portfolio|about|team|sluzb|sluzby|nabidka|reseni|podpora|kontakt|cena|ceny|produkt|portfolio|tym)\b/i;
 const GENERIC_WEBSITE_TITLE_PATTERN = /^(website|web\s*site|site|landing\s*page|home\s*page|homepage|company\s*website)$/i;
 
 function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArchetype): LocalizedWebsiteLabels {
@@ -294,8 +294,8 @@ function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArch
       heroSectionLabel: 'Intro',
       aboutSectionId: personal ? 'about-me' : 'about-company',
       aboutHeading: personal ? 'About' : 'About Company',
-      approachSectionId: personal ? 'approach-education' : 'service-overview',
-      approachHeading: personal ? 'Approach and Education' : 'Service Overview',
+      approachSectionId: personal ? 'how-i-work' : 'how-we-work',
+      approachHeading: personal ? 'How I Work' : 'How We Work',
       topicsSectionId: personal ? 'topics' : 'highlights',
       topicsHeading: personal ? 'Topics' : 'Highlights',
       servicesPricingSectionId: 'services-pricing',
@@ -319,8 +319,8 @@ function getLocalizedWebsiteLabels(language: AppLanguage, archetype: WebsiteArch
     heroSectionLabel: 'Úvod',
     aboutSectionId: personal ? 'o-mne' : 'o-nas',
     aboutHeading: personal ? 'O mně' : 'O nás',
-    approachSectionId: personal ? 'pristup-vzdelavani' : 'prehled-sluzeb',
-    approachHeading: personal ? 'Přístup a vzdělávání' : 'Přehled služeb',
+    approachSectionId: personal ? 'jak-pracuji' : 'jak-pracujeme',
+    approachHeading: personal ? 'Jak pracuji' : 'Jak pracujeme',
     topicsSectionId: personal ? 'temata' : 'hlavni-oblasti',
     topicsHeading: personal ? 'Témata' : 'Hlavní oblasti',
     servicesPricingSectionId: 'sluzby-ceny',
@@ -417,11 +417,18 @@ function getPromptLabelValues(map: Map<string, string[]>, aliases: string[]): st
 }
 
 function looksLikeAddressFact(value: string): boolean {
-  return /\b(adresa|address|ulice|street|praha|brno|\d{3}\s?\d{2})\b/i.test(value);
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return false;
+  if (/\b(address|adresa|street|st\.?|road|rd\.?|avenue|ave\.?|ul\.?|ulice|psc|zip|postal|post code|building|suite|unit|office)\b/i.test(normalized)) {
+    return true;
+  }
+  const hasPostalPattern = /\b\d{3}\s?\d{2}\b/.test(normalized) || /\b\d{4,6}\b/.test(normalized);
+  const hasStreetLike = /\b\d+[\w/-]*\b/.test(normalized) && /[A-Za-z\u00C0-\u017F]/.test(normalized);
+  return hasPostalPattern && hasStreetLike;
 }
 
 function looksLikeServiceFact(value: string): boolean {
-  return /\b(sluzb|service|konzultac|therapy|terapie|coaching|session|sezeni)\b/i.test(value);
+  return /\b(service|services|solution|solutions|offer|offering|package|packages|product|products|portfolio|feature|features|sluzb|sluzby|nabidka|nabizime|reseni|balicek|balicky|produkt|produkty|portfolio|funkce)\b/i.test(value);
 }
 
 function looksLikePricingFact(value: string): boolean {
@@ -429,7 +436,7 @@ function looksLikePricingFact(value: string): boolean {
 }
 
 function looksLikeCtaFact(value: string): boolean {
-  return /\b(objednat|book|contact|kontakt|domluvit|rezervovat|appointment|call)\b/i.test(value);
+  return /\b(contact|get started|learn more|request|quote|buy|shop|book|reserve|call|discover|download|subscribe|kontakt|kontaktovat|zacit|zjistit|poptat|objednat|koupit|odebrat)\b/i.test(value);
 }
 
 function extractPromptFacts(lines: string[]): {
@@ -627,7 +634,7 @@ function isNoisyPublicListItem(value: string): boolean {
   if (/[{}\[\]<>]/.test(normalized)) return true;
   if (/\b(mailto:|tel:|https?:\/\/|www\.)/i.test(normalized)) return true;
   if (/\b(email|e-mail|telefon|phone|kontakt|contact|adresa|address|mapa|map)\b/i.test(normalized)) return true;
-  if (/\b(praha|prague|brno|ostrava|plzen|bratislava|vienna|berlin)\b/i.test(normalized) && /\d{3}\s?\d{2}/.test(normalized)) {
+  if (looksLikeAddressFact(normalized)) {
     return true;
   }
   if (/\b(kc|kč|czk|eur|usd|€|\$)\b/i.test(normalized)) return true;
@@ -758,8 +765,8 @@ function normalizePricingLine(value: string): PricingCandidate | null {
   const cleaned = normalizeWhitespace(value);
   if (!cleaned) return null;
 
-  // Require a pricing-like context to avoid dumping unrelated extracted numeric labels.
-  if (!/(od|from|cena|ceník|cenik|konzultac|sezen|sezení|min|za|\/)/i.test(cleaned)) {
+  // Require pricing markers/currency to avoid unrelated numeric labels.
+  if (!/(od|from|price|pricing|cena|cenik|ceník|cost|starting|starting at|per|za|\/)/i.test(cleaned) && !/(Kc|Kč|CZK|EUR|USD|€|\$)/i.test(cleaned)) {
     return null;
   }
 
@@ -919,7 +926,7 @@ function buildPublicWebsiteViewModel(params: {
       ? NEUTRAL_FALLBACK_COPY.cz.heroSubtitle
       : NEUTRAL_FALLBACK_COPY.en.heroSubtitle);
   const aboutSeed =
-    normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o mne|experience|specializ|podpora|profil|team)\b/i.test(entry))) ??
+    normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o\s+n[áa]s|o\s+mne|profil|profile|team|company|spolecnost|firma)\b/i.test(entry))) ??
     null;
   const fallbackAboutFromFacts =
     normalizePublicParagraph(retainedServiceFacts[0]) ??
@@ -928,7 +935,7 @@ function buildPublicWebsiteViewModel(params: {
   const defaultAboutCopy =
     aboutSeed ?? fallbackAboutFromFacts ?? (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.about : NEUTRAL_FALLBACK_COPY.en.about);
   const approachSeed =
-    normalizePublicParagraph(bodyFacts.find((entry) => /\b(pristup|approach|method|metoda|vzd[eě]l[aá]v[aá]n[ií]|education)\b/i.test(entry))) ??
+    normalizePublicParagraph(bodyFacts.find((entry) => /\b(pristup|approach|method|metoda|process|workflow|jak\s+pracujeme|jak\s+pracuji)\b/i.test(entry))) ??
     null;
   const fallbackApproachFromFacts =
     normalizePublicParagraph(bodyFacts.find((entry) => looksLikePricingFact(entry) || looksLikeServiceFact(entry))) ?? null;
@@ -975,10 +982,10 @@ function buildPublicWebsiteViewModel(params: {
         (language === 'cz'
           ? archetype === 'company-service'
             ? 'Kontaktovat tym'
-            : 'Domluvit konzultaci'
+            : 'Napsat zpravu'
           : archetype === 'company-service'
           ? 'Contact the team'
-          : 'Book a consultation'))
+          : 'Get in touch'))
   );
 
   const aboutCopy = normalizeWhitespace(aboutOverride ?? defaultAboutCopy);
@@ -1019,10 +1026,10 @@ function buildPublicWebsiteViewModel(params: {
     contactIntroOverride ??
       (language === 'cz'
         ? contact.email || contact.phone
-          ? 'Pro rezervaci nebo dotazy pouzijte uvedene kontaktni udaje.'
+          ? 'Pouzijte uvedene kontaktni udaje.'
           : ''
         : contact.email || contact.phone
-        ? 'Use the listed contact details for reservations or inquiries.'
+        ? 'Use the listed contact details.'
         : '')
   );
   const mapCopy = normalizeWhitespace(
@@ -1204,7 +1211,7 @@ function buildPublicHtml(params: {
     `    <p class="section-label">${escapeHtml(model.labels.heroSectionLabel)}</p>`,
     `    <h1>${escapeHtml(model.heroTitle)}</h1>`,
     `    <p class="hero-subtitle">${escapeHtml(model.heroSubtitle)}</p>`,
-    '    <a class="cta" href="#kontakt">',
+    `    <a class="cta" href="#${escapeHtml(model.labels.contactSectionId)}">`,
     `      ${escapeHtml(model.primaryCta)}`,
     '    </a>',
     portraitMarkup,

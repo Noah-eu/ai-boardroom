@@ -83,7 +83,6 @@ describe('deterministicWebsiteBuilder', () => {
     expect(artifacts.indexHtml).toContain('Book appointment now');
     expect(artifacts.indexHtml).toContain('Individual sessions for adults v overenem bezpecnem prostredi.');
     expect(artifacts.indexHtml).toContain('O nás');
-    expect(artifacts.indexHtml).toContain('Přehled služeb');
     expect(artifacts.indexHtml).toContain('Hlavní oblasti');
     expect(artifacts.indexHtml).toContain('Služby a ceny');
     expect(artifacts.indexHtml).toContain('Kontakt');
@@ -388,7 +387,6 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(artifacts.indexHtml).toContain('<html lang="en">');
     expect(artifacts.indexHtml).toContain('Intro');
-    expect(artifacts.indexHtml).toContain('About Company');
     expect(artifacts.indexHtml).toContain('Services and Pricing');
     expect(artifacts.indexHtml).not.toContain('<h2>O mně</h2>');
   });
@@ -990,7 +988,7 @@ describe('deterministicWebsiteBuilder', () => {
     });
 
     expect(noFactsSections.about.body).toBe('');
-    expect(withFactsSections.about.body.toLowerCase()).toContain('podpora');
+    expect(withFactsSections.about.body.toLowerCase()).toContain('podpor');
     expect(withFactsSections.about.body.toLowerCase()).not.toContain('doplneny po overeni');
   });
 

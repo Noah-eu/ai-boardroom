@@ -69,10 +69,10 @@ import {
   getModeLabel,
   stabilizeCodeExecutionBundle,
 } from '@/lib/codeBundleStabilizer';
+import { evaluateDeadlockObservation, type DeadlockObservation } from '@/lib/deadlockGuard';
 import {
-  buildBilingualWebsiteArtifacts,
+  buildDeterministicWebsiteArtifacts,
   buildDeterministicWebsiteCopySections,
-  type BilingualWebsiteArtifacts,
   deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
@@ -111,6 +111,8 @@ const MAX_REVISION_ROUNDS = 5;
 const MIN_EXECUTION_TASK_TIMEOUT_MS = 60_000;
 const MAX_EXECUTION_TASK_TIMEOUT_MS = 120_000;
 const DEFAULT_EXECUTION_TASK_TIMEOUT_MS = 90_000;
+const DEADLOCK_CONFIRMATION_TICKS = 3;
+const DEADLOCK_CONFIRMATION_MIN_MS = 2_000;
 const MAX_AI_ATTACHMENT_SECTIONS = 6;
 const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
@@ -3542,6 +3544,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const taskTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const checkpointHitRef = useRef<Record<string, { approval: boolean }>>({});
   const deadlockSignatureRef = useRef<Record<string, string>>({});
+  const deadlockObservationRef = useRef<Record<string, DeadlockObservation | null>>({});
   const completedSnapshotRef = useRef<Record<string, string>>({});
   const debateRunsRef = useRef<Record<string, boolean>>({});
   const debateRoundStateRef = useRef<Record<string, { isRunning: boolean; currentRound: number }>>({});
@@ -5989,11 +5992,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 websiteArtifactScope
               );
 
-              const bilingualArtifacts: BilingualWebsiteArtifacts = buildBilingualWebsiteArtifacts({
+              const websiteArtifacts = buildDeterministicWebsiteArtifacts({
                 projectName: project.name,
                 projectDescription: project.description,
                 verified: verifiedContent,
                 copySections: sectionOverrides,
+                language: project.language,
                 portraitImage: (() => {
                   const portraitPlan = buildPortraitAssetPlan(snapshot);
                   if (!portraitPlan) return null;
@@ -6006,10 +6010,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
               const selectedContent =
                 artifact.path === 'index.html'
-                  ? bilingualArtifacts.indexCzHtml
+                  ? websiteArtifacts.indexHtml
                   : artifact.path === 'styles.css'
-                  ? bilingualArtifacts.stylesCss
-                  : bilingualArtifacts.scriptJs;
+                  ? websiteArtifacts.stylesCss
+                  : websiteArtifacts.scriptJs;
 
               updatedArtifacts[index] = {
                 ...artifact,
@@ -6062,25 +6066,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 minGeneratedAtMs: new Date(snapshot.createdAt).getTime(),
               };
               const indexHtml = getLatestArtifactContent(project.tasks, 'index.html', websiteArtifactScope);
-              const enHtml = (() => {
-                const wsModel = resolveSegmentedWebsiteContentModelFromTaskArtifacts(
-                  project.tasks,
-                  { minGeneratedAtMs: new Date(snapshot.createdAt).getTime() }
-                );
-                const verified = wsModel?.verified ?? deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
-                if (!hasSufficientVerifiedWebsiteContent(verified)) return null;
-                const copySections = wsModel?.copySections ?? buildDeterministicWebsiteCopySections({
-                  projectName: project.name,
-                  verified,
-                  language: 'en',
-                });
-                return buildBilingualWebsiteArtifacts({
-                  projectName: project.name,
-                  projectDescription: project.description,
-                  verified,
-                  copySections,
-                }).indexEnHtml;
-              })();
               const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css', websiteArtifactScope);
               const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js', websiteArtifactScope);
               const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
@@ -6120,13 +6105,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   `${task.agent}: ${assembled.error}`
                 );
                 return;
-              }
-
-              if (assembled.ok && enHtml) {
-                assembled.bundle.files.push({
-                  path: 'index-en.html',
-                  content: enHtml,
-                });
               }
 
               const stabilized = stabilizeCodeExecutionBundle({
@@ -7169,6 +7147,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (scheduler) {
           clearInterval(scheduler);
           delete schedulerIntervalsRef.current[projectId];
+          delete deadlockObservationRef.current[projectId];
           setSchedulerPaused(projectId, false, false);
           dispatch({
             type: 'ADD_LOG',
@@ -7313,7 +7292,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           )
           .join(' | ');
         const signature = `${projectId}:${deadlockMessage}`;
-        if (deadlockSignatureRef.current[projectId] !== signature) {
+        const deadlockWindowMs = Math.max(
+          DEADLOCK_CONFIRMATION_MIN_MS,
+          SPEED_CONFIG[executionSpeedRef.current].tickMs * DEADLOCK_CONFIRMATION_TICKS
+        );
+        const observation = evaluateDeadlockObservation({
+          previous: deadlockObservationRef.current[projectId] ?? null,
+          signature,
+          nowMs: Date.now(),
+          confirmAfterMs: deadlockWindowMs,
+        });
+        deadlockObservationRef.current[projectId] = observation.next;
+
+        if (observation.promote && deadlockSignatureRef.current[projectId] !== signature) {
           deadlockSignatureRef.current[projectId] = signature;
           setDeadlocks((previous) => ({
             ...previous,
@@ -7333,6 +7324,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return 0;
       }
 
+      delete deadlockObservationRef.current[projectId];
       if (deadlocks[projectId]) {
         setDeadlocks((previous) => ({ ...previous, [projectId]: null }));
         delete deadlockSignatureRef.current[projectId];
@@ -7906,6 +7898,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     syncTaskAvailability(project, true);
     setDeadlocks((previous) => ({ ...previous, [project.id]: null }));
     delete deadlockSignatureRef.current[project.id];
+    delete deadlockObservationRef.current[project.id];
 
     dispatch({
       type: 'ADD_LOG',
@@ -9087,6 +9080,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     checkpointHitRef.current = {};
     completedSnapshotRef.current = {};
     deadlockSignatureRef.current = {};
+    deadlockObservationRef.current = {};
     setDeadlocks({});
     dispatch({ type: 'RESET' });
   }, []);

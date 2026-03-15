@@ -357,7 +357,9 @@ function extractPageSnapshot(html: string, pageUrl: string, depth: number): UrlP
     $('a,button')
       .map((_, element) => $(element).text())
       .get()
-      .filter((text) => /\b(contact|call|book|reserve|get started|request|quote|appointment|objednat|kontakt|rezerv|zacit|nezavazna)\b/i.test(text)),
+      .filter((text) =>
+        /\b(contact|call|book|reserve|get started|learn more|request|quote|buy|shop|subscribe|download|discover|objednat|kontakt|rezerv|zacit|poptat|koupit|odebirat|zjistit)\b/i.test(text)
+      ),
     30
   );
 
@@ -422,11 +424,17 @@ function extractAddressCandidates(lines: string[]): string[] {
 
 function extractServiceCandidates(headings: string[], paragraphs: string[]): string[] {
   const headingCandidates = headings.filter(
-    (value) => !/\b(kontakt|contact|cenik|pricing|about|o nas|reference|home|domu|blog)\b/i.test(value)
+    (value) => !/\b(kontakt|contact|cenik|pricing|about|o nas|reference|home|domu|blog|map|mapa|adresa|address|telefon|phone|email)\b/i.test(value)
   );
+
   const paragraphCandidates = paragraphs
-    .filter((value) => /\b(therapy|therap|consult|service|treatment|coaching|masaz|terapie|sluzb|poradenstvi)\b/i.test(value))
+    .filter((value) =>
+      /\b(service|services|solution|solutions|offer|offering|product|products|package|packages|support|feature|features|portfolio|sluzb|sluzby|reseni|nabidka|produkt|produkty|balicek|balicky|podpora|portfolio|funkce)\b/i.test(
+        value
+      )
+    )
     .map((value) => value.split(/[.!?]/)[0] ?? value);
+
   return uniqueList([...headingCandidates, ...paragraphCandidates], 30);
 }
 
