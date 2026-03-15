@@ -86,6 +86,11 @@ import {
 } from '@/lib/websiteArtifactWindow';
 import { normalizeArchitectureReviewInput } from '@/lib/architectureReviewInput';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
+import {
+  createWebsiteCopyTaskPlan,
+  selectWebsiteSectionSchema,
+  type WebsiteSchemaSelection,
+} from '@/lib/websiteSectionSchema';
 import { decideWebsiteGraphStrategy } from '@/lib/websiteGraphStrategy';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
@@ -1440,11 +1445,18 @@ type SegmentedWebsiteContentModel = {
   generatedAt: string;
   language: AppLanguage;
   sourceMode: 'ingestion' | 'prompt-only' | 'hybrid';
+  schema: WebsiteSchemaSelection;
   verified: VerifiedWebsiteContent;
   copySections: WebsiteCopySections;
 };
 
-function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: ExecutionSnapshot): SegmentedWebsiteContentModel | null {
+function deriveCurrentVerifiedWebsiteContent(
+  project: Project,
+  snapshot: ExecutionSnapshot
+): {
+  verified: VerifiedWebsiteContent;
+  sourceMode: SegmentedWebsiteContentModel['sourceMode'];
+} {
   const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
   const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
     projectName: project.name,
@@ -1462,22 +1474,36 @@ function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: Ex
       : ingestionVerified
     : promptVerified;
 
-  if (!hasSufficientVerifiedWebsiteContent(verified)) {
-    return null;
-  }
-
   const sourceMode: SegmentedWebsiteContentModel['sourceMode'] = hasIngestion
     ? hasPrompt
       ? 'hybrid'
       : 'ingestion'
     : 'prompt-only';
 
+  return { verified, sourceMode };
+}
+
+function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: ExecutionSnapshot): SegmentedWebsiteContentModel | null {
+  const current = deriveCurrentVerifiedWebsiteContent(project, snapshot);
+  const verified = current.verified;
+
+  if (!hasSufficientVerifiedWebsiteContent(verified)) {
+    return null;
+  }
+
+  const schema = selectWebsiteSectionSchema({
+    taskIntentText: buildWebsiteTaskIntentText(project, snapshot),
+    language: project.language,
+    verifiedFacts: verified,
+  });
+
   return {
     schemaVersion: 1,
     type: 'ai-boardroom-segmented-website-content-model',
     generatedAt: new Date().toISOString(),
     language: project.language,
-    sourceMode,
+    sourceMode: current.sourceMode,
+    schema,
     verified,
     copySections: buildDeterministicWebsiteCopySections({
       projectName: project.name,
@@ -7253,6 +7279,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
 
         if (shouldUseSegmentedWebsiteBuild(project, project.executionSnapshot ?? undefined)) {
+          const segmentedSnapshot = project.executionSnapshot ?? undefined;
+          let segmentedSchemaSelection: WebsiteSchemaSelection = selectWebsiteSectionSchema({
+            taskIntentText: buildWebsiteTaskIntentText(project, segmentedSnapshot),
+            language: project.language,
+            verifiedFacts: segmentedSnapshot
+              ? deriveCurrentVerifiedWebsiteContent(project, segmentedSnapshot).verified
+              : null,
+          });
+
+          const modelPayload =
+            segmentedSnapshot && buildSegmentedWebsiteContentModelPayload(project, segmentedSnapshot);
+          if (modelPayload?.schema) {
+            segmentedSchemaSelection = modelPayload.schema;
+          }
+
+          const copyTaskPlan = createWebsiteCopyTaskPlan(segmentedSchemaSelection);
+
           const webContentNormalizer = createTask({
             title: `WebContentNormalizer: Normalize website content model (${codeModeLabel})`,
             description:
@@ -7267,22 +7310,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             ],
           });
 
+          const schemaTaskPreview = copyTaskPlan
+            .map((entry) => `${entry.slot}:${entry.taskTitleLabel}`)
+            .join(', ');
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Builder',
+            message:
+              `Builder: website schema selection inputIntent=${JSON.stringify(
+                buildWebsiteTaskIntentText(project, segmentedSnapshot)
+              )} ` +
+              `archetype=${segmentedSchemaSelection.archetype} schema=${segmentedSchemaSelection.schemaId} ` +
+              `sections=${schemaTaskPreview}`,
+          });
+
           let latestCopyDependencyId = webContentNormalizer.id;
-          const copyTasks = SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry, sectionIndex) => {
-            const titleLabel =
-              entry.section === 'hero'
-                ? 'Hero'
-                : entry.section === 'about'
-                ? 'O mne'
-                : entry.section === 'approach'
-                ? 'Pristup a vzdelavani'
-                : entry.section === 'topics'
-                ? 'Temata'
-                : entry.section === 'servicesPricing'
-                ? 'Sluzby a ceny'
-                : entry.section === 'contact'
-                ? 'Kontakt'
-                : 'Mapa';
+          const copyTasks = copyTaskPlan.map((entry, sectionIndex) => {
+            const titleLabel = entry.taskTitleLabel;
 
             const dependencyId = latestCopyDependencyId;
             const task = createTask({
@@ -7293,7 +7339,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               model: taskModel,
               dependsOn: [dependencyId],
               status: statusFor([dependencyId]),
-              producesArtifacts: [{ path: entry.path, label: `Website Copy ${titleLabel}`, kind: 'json' }],
+              producesArtifacts: [{ path: entry.artifactPath, label: `Website Copy ${titleLabel}`, kind: 'json' }],
             });
             latestCopyDependencyId = task.id;
             return task;
