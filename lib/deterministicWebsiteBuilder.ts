@@ -613,6 +613,44 @@ function normalizePublicParagraph(value: string | null | undefined, maxChars = 2
   return /[.!?]$/.test(collapsed) ? collapsed : `${collapsed}.`;
 }
 
+function detectTextLocale(value: string): AppLanguage | 'unknown' {
+  const normalized = normalizeWhitespace(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (!normalized) return 'unknown';
+
+  const czHits =
+    (normalized.match(/\b(a|na|pro|s|v|k|od|bezpecny|sluzby|kontakt|mapa|adresa|objednat|domluvit|ceny|prehled|oblasti)\b/g)
+      ?.length ?? 0) + (/[áéěíóúůýčďňřšťž]/i.test(value) ? 2 : 0);
+  const enHits =
+    (normalized.match(/\b(the|and|with|for|from|about|services|contact|map|address|book|pricing|overview|highlights)\b/g)
+      ?.length ?? 0) + (/\b(website|company|service|team|appointment)\b/i.test(normalized) ? 1 : 0);
+
+  if (czHits === 0 && enHits === 0) return 'unknown';
+  return czHits >= enHits ? 'cz' : 'en';
+}
+
+function isLocaleConsistentText(value: string, targetLanguage: AppLanguage): boolean {
+  const detected = detectTextLocale(value);
+  return detected === 'unknown' || detected === targetLanguage;
+}
+
+function isNoisyPublicListItem(value: string): boolean {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return true;
+  if (/[{}\[\]<>]/.test(normalized)) return true;
+  if (/\b(mailto:|tel:|https?:\/\/|www\.)/i.test(normalized)) return true;
+  if (/\b(email|e-mail|telefon|phone|kontakt|contact|adresa|address|mapa|map)\b/i.test(normalized)) return true;
+  if (/\b(praha|prague|brno|ostrava|plzen|bratislava|vienna|berlin)\b/i.test(normalized) && /\d{3}\s?\d{2}/.test(normalized)) {
+    return true;
+  }
+  if (/\b(kc|kč|czk|eur|usd|€|\$)\b/i.test(normalized)) return true;
+  const digits = (normalized.match(/\d/g) ?? []).length;
+  if (digits >= 4) return true;
+  return false;
+}
+
 function toTopicLikeItem(value: string): string | null {
   const cleaned = sanitizePublicText(value);
   if (!cleaned) return null;
@@ -643,7 +681,8 @@ function deriveTopicLikeItems(values: string[], max: number): string[] {
   const candidates = values
     .flatMap((entry) => entry.split(/[\n,]/))
     .map((entry) => toTopicLikeItem(entry))
-    .filter((entry): entry is string => Boolean(entry));
+    .filter((entry): entry is string => Boolean(entry))
+    .filter((entry) => !isNoisyPublicListItem(entry));
 
   return uniq(candidates, max);
 }
@@ -837,7 +876,10 @@ function buildPublicWebsiteViewModel(params: {
   ]);
   const archetype = deriveWebsiteArchetype(currentDomain);
   const labels = getLocalizedWebsiteLabels(language, archetype);
-  const bodyFacts = candidateBodyFacts.filter((entry) => !isDomainMismatch(entry, currentDomain));
+  const bodyFacts = candidateBodyFacts.filter(
+    (entry) => !isDomainMismatch(entry, currentDomain) && isLocaleConsistentText(entry, language)
+  );
+  const localeCtaTexts = sanitizedCtaTexts.filter((entry) => isLocaleConsistentText(entry, language));
   const services = uniq(verifiedServices, 8);
 
   const topics = deriveTopicLikeItems(
@@ -854,6 +896,13 @@ function buildPublicWebsiteViewModel(params: {
     ...bodyFacts,
     ...verifiedServices,
   ]);
+
+  const retainedServiceFacts = uniq(
+    bodyFacts
+      .filter((entry) => looksLikeServiceFact(entry) && !isNoisyPublicListItem(entry))
+      .map((entry) => limitSentenceLength(entry, 90)),
+    8
+  );
 
   const provenanceFacts = uniq(
     [
@@ -892,12 +941,21 @@ function buildPublicWebsiteViewModel(params: {
   const aboutSeed =
     normalizePublicParagraph(bodyFacts.find((entry) => /\b(about|o mne|experience|specializ|podpora|profil|team)\b/i.test(entry))) ??
     null;
-  const defaultAboutCopy = aboutSeed ?? (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.about : NEUTRAL_FALLBACK_COPY.en.about);
+  const fallbackAboutFromFacts =
+    normalizePublicParagraph(retainedServiceFacts[0]) ??
+    normalizePublicParagraph(bodyFacts[0]) ??
+    null;
+  const defaultAboutCopy =
+    aboutSeed ?? fallbackAboutFromFacts ?? (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.about : NEUTRAL_FALLBACK_COPY.en.about);
   const approachSeed =
     normalizePublicParagraph(bodyFacts.find((entry) => /\b(pristup|approach|method|metoda|vzd[eě]l[aá]v[aá]n[ií]|education)\b/i.test(entry))) ??
     null;
+  const fallbackApproachFromFacts =
+    normalizePublicParagraph(bodyFacts.find((entry) => looksLikePricingFact(entry) || looksLikeServiceFact(entry))) ?? null;
   const defaultApproachCopy =
-    approachSeed ?? (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.approach : NEUTRAL_FALLBACK_COPY.en.approach);
+    approachSeed ??
+    fallbackApproachFromFacts ??
+    (language === 'cz' ? NEUTRAL_FALLBACK_COPY.cz.approach : NEUTRAL_FALLBACK_COPY.en.approach);
 
   const sectionOverrides = params.copySections ?? {};
 
@@ -932,7 +990,15 @@ function buildPublicWebsiteViewModel(params: {
   const heroTitle = normalizeWhitespace(heroOverrideTitle ?? title);
   const heroSubtitle = normalizeWhitespace(heroOverrideSubtitle ?? defaultHeroSubtitle);
   const primaryCta = normalizeWhitespace(
-    heroOverrideCta ?? (sanitizedCtaTexts[0] ?? (language === 'cz' ? 'Domluvit konzultaci' : 'Book a consultation'))
+    heroOverrideCta ??
+      (localeCtaTexts[0] ??
+        (language === 'cz'
+          ? archetype === 'company-service'
+            ? 'Kontaktovat tym'
+            : 'Domluvit konzultaci'
+          : archetype === 'company-service'
+          ? 'Contact the team'
+          : 'Book a consultation'))
   );
 
   const aboutCopy = normalizeWhitespace(aboutOverride ?? defaultAboutCopy);
@@ -940,19 +1006,21 @@ function buildPublicWebsiteViewModel(params: {
   const topicItems = deriveTopicLikeItems(
     stripStructuralLabels(topicsOverride.length > 0 ? topicsOverride : topics, structuralLabels, 10),
     6
-  );
+  ).filter((entry) => isLocaleConsistentText(entry, language));
   const serviceItems = uniq(
     stripStructuralLabels(
       verifiedServices.length > 0
         ? [...verifiedServices, ...servicesOverride]
         : servicesOverride.length > 0
         ? servicesOverride
-        : services,
+        : [...services, ...retainedServiceFacts],
       structuralLabels,
       8
     ),
     8
-  );
+  )
+    .filter((entry) => !isNoisyPublicListItem(entry))
+    .filter((entry) => isLocaleConsistentText(entry, language));
   const filteredPricingOverride = pricingOverride.filter((entry) => !isGenericPricingPlaceholder(entry));
   const pricingItems = uniq(
     verifiedPricing.length > 0
@@ -962,17 +1030,26 @@ function buildPublicWebsiteViewModel(params: {
       : pricingOverride,
     8
   );
+  const cleanPricingItems = pricingItems.filter((entry) => isLocaleConsistentText(entry, language));
+  const mapFact =
+    normalizePublicParagraph(bodyFacts.find((entry) => looksLikeAddressFact(entry))) ??
+    normalizePublicParagraph(contact.address) ??
+    null;
   const contactIntro = normalizeWhitespace(
     contactIntroOverride ??
       (language === 'cz'
-        ? 'Pro objednání termínu mě prosím kontaktujte e-mailem nebo telefonicky.'
-        : 'Please contact me by email or phone to book an appointment.')
+        ? contact.email || contact.phone
+          ? 'Pro rezervaci nebo dotazy pouzijte uvedene kontaktni udaje.'
+          : 'Kontaktni udaje budou doplneny po overeni zdroju.'
+        : contact.email || contact.phone
+        ? 'Use the listed contact details for reservations or inquiries.'
+        : 'Contact details will be added after source verification.')
   );
   const mapCopy = normalizeWhitespace(
     mapOverride ??
       (language === 'cz'
-        ? 'Setkání probíhá po domluvě na adrese uvedené níže.'
-        : 'Sessions take place at the address below by appointment.')
+        ? mapFact ?? 'Adresa provozovny je uvedena nize.'
+        : mapFact ?? 'The business address is listed below.')
   );
 
   return {
@@ -985,7 +1062,7 @@ function buildPublicWebsiteViewModel(params: {
     approachCopy,
     topics: topicItems,
     services: serviceItems,
-    pricing: pricingItems,
+    pricing: cleanPricingItems,
     contact,
     primaryCta,
     sourceUrl: params.verified.sourceUrl,

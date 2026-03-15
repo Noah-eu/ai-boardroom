@@ -861,4 +861,138 @@ describe('deterministicWebsiteBuilder', () => {
     expect(combined).not.toContain('therapy');
     expect(combined).not.toContain('hotel');
   });
+
+  it('retains company contact, address, and map facts when verified facts exist', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Grand River Hotel',
+      projectPrompt: [
+        'Hero: Grand River Hotel',
+        'Services: Ubytovani, Wellness centrum, Snidane formou bufetu',
+        'Pricing: Od 3900 Kc / noc',
+        'Contact: reservations@grandriver.example, +420 777 333 222',
+        'Address: Riverside 21, Brno 602 00',
+        'CTA: Rezervovat pobyt',
+      ].join('\n'),
+    });
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Grand River Hotel',
+      projectDescription: 'Public website',
+      verified,
+      language: 'cz',
+    });
+
+    expect(artifacts.indexHtml).toContain('reservations@grandriver.example');
+    expect(artifacts.indexHtml).toContain('+420 777 333 222');
+    expect(artifacts.indexHtml).toContain('Riverside 21, Brno 602 00');
+    expect(artifacts.indexHtml).toContain('google.com/maps/search');
+    expect(artifacts.indexHtml).toContain('Rezervovat pobyt');
+  });
+
+  it('filters noisy scrape fragments from public list items', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-noise',
+        title: 'Noise source',
+        source: 'project',
+        pageTitle: 'Harbor Suites',
+        summary: 'Structured source',
+        extractedText: 'services and pricing',
+        pages: [{ url: 'https://harbor.example', title: 'Home', summary: 'Home' }],
+        structuredData: {
+          sourceUrl: 'https://harbor.example',
+          pageTitle: 'Harbor Suites',
+          visibleTextBlocks: [
+            'mailto:hello@harbor.example',
+            'Praha 120 00',
+            'Od 3500 Kc / noc',
+            'Snídaně formou bufetu a wellness',
+          ],
+          headings: ['Home', 'Services'],
+          paragraphs: ['Business hotel services pro kratkodobe i dlouhodobe pobyty.'],
+          navigationLabels: ['Home', 'Services', 'Contact'],
+          contactFields: {
+            emails: ['hello@harbor.example'],
+            phones: ['+420777123123'],
+            addresses: ['Trida 4, Praha 120 00'],
+            mailtoLinks: ['mailto:hello@harbor.example'],
+            telLinks: ['tel:+420777123123'],
+          },
+          ctaTexts: ['Book now'],
+          serviceNames: ['Wellness', 'mailto:hello@harbor.example', 'Praha 120 00'],
+          pricingFields: ['Od 3500 Kc / noc'],
+          extractedLinks: [],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const sections = buildDeterministicWebsiteCopySections({
+      projectName: 'Harbor Suites',
+      verified,
+      language: 'cz',
+    });
+
+    const topics = sections.topics.items.join(' ').toLowerCase();
+    const services = sections.servicesPricing.services.join(' ').toLowerCase();
+    expect(topics).not.toContain('mailto:');
+    expect(topics).not.toContain('praha 120 00');
+    expect(topics).not.toContain('3500');
+    expect(services).not.toContain('mailto:');
+    expect(services).not.toContain('praha 120 00');
+  });
+
+  it('keeps locale-consistent hero, cta and section content for target language', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Cityline Services',
+      projectPrompt: [
+        'Hero: Cityline Services',
+        'About: Poskytujeme moderni servis pro firemni klienty.',
+        'Services: Firemni podpora, Provozni servis',
+        'CTA: Book now',
+      ].join('\n'),
+    });
+
+    const sections = buildDeterministicWebsiteCopySections({
+      projectName: 'Cityline Services',
+      verified,
+      language: 'cz',
+    });
+
+    expect(sections.hero.cta).toBe('Kontaktovat tym');
+    expect(sections.about.body.toLowerCase()).not.toContain('book now');
+    expect(sections.approach.body.toLowerCase()).not.toContain('book now');
+  });
+
+  it('uses placeholders only when verified facts are truly unavailable', () => {
+    const noFacts = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Empty Service Site',
+      projectPrompt: 'Hero: Empty Service Site',
+    });
+
+    const withFacts = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Active Service Site',
+      projectPrompt: [
+        'Hero: Active Service Site',
+        'About: Poskytujeme podporu pro provoz sluzeb a rezervaci.',
+        'Services: Podpora rezervaci, Zakaznicky servis',
+      ].join('\n'),
+    });
+
+    const noFactsSections = buildDeterministicWebsiteCopySections({
+      projectName: 'Empty Service Site',
+      verified: noFacts,
+      language: 'cz',
+    });
+    const withFactsSections = buildDeterministicWebsiteCopySections({
+      projectName: 'Active Service Site',
+      verified: withFacts,
+      language: 'cz',
+    });
+
+    expect(noFactsSections.about.body.toLowerCase()).toContain('doplneny');
+    expect(withFactsSections.about.body.toLowerCase()).toContain('podpora');
+    expect(withFactsSections.about.body.toLowerCase()).not.toContain('doplneny po overeni');
+  });
 });
