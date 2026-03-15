@@ -72,6 +72,7 @@ import {
 import {
   buildDeterministicWebsiteArtifacts,
   buildDeterministicWebsiteCopySections,
+  buildDeterministicWebsiteRenderDiagnostics,
   deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
@@ -79,6 +80,10 @@ import {
   type VerifiedWebsiteContent,
   type WebsiteCopySections,
 } from '@/lib/deterministicWebsiteBuilder';
+import {
+  getLatestArtifactContentWithinWindow,
+  hasArtifactContentOutsideWindow,
+} from '@/lib/websiteArtifactWindow';
 import { normalizeArchitectureReviewInput } from '@/lib/architectureReviewInput';
 import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
 import { decideWebsiteGraphStrategy } from '@/lib/websiteGraphStrategy';
@@ -1482,8 +1487,13 @@ function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: Ex
   };
 }
 
-function resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks: Task[]): SegmentedWebsiteContentModel | null {
-  const raw = getLatestArtifactContent(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH);
+function resolveSegmentedWebsiteContentModelFromTaskArtifacts(
+  tasks: Task[],
+  snapshot?: ExecutionSnapshot
+): SegmentedWebsiteContentModel | null {
+  const raw = getLatestArtifactContentWithinWindow(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, {
+    minGeneratedAt: snapshot?.createdAt,
+  });
   if (!raw?.trim()) return null;
 
   try {
@@ -1497,8 +1507,11 @@ function resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks: Task[]): Se
   }
 }
 
-function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<WebsiteCopySections> {
-  const model = resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks);
+function resolveWebsiteCopySectionsFromTaskArtifacts(
+  tasks: Task[],
+  snapshot?: ExecutionSnapshot
+): Partial<WebsiteCopySections> {
+  const model = resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks, snapshot);
   if (model?.copySections) {
     return model.copySections;
   }
@@ -1506,7 +1519,9 @@ function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<Web
   const output: Partial<WebsiteCopySections> = {};
 
   SEGMENTED_WEBSITE_COPY_ARTIFACTS.forEach((entry) => {
-    const raw = getLatestArtifactContent(tasks, entry.path);
+    const raw = getLatestArtifactContentWithinWindow(tasks, entry.path, {
+      minGeneratedAt: snapshot?.createdAt,
+    });
     if (!raw?.trim()) return;
     try {
       const parsed = JSON.parse(raw);
@@ -1543,6 +1558,22 @@ function resolveWebsiteCopySectionsFromTaskArtifacts(tasks: Task[]): Partial<Web
   });
 
   return output;
+}
+
+function hasSegmentedWebsiteCrossRunRisk(tasks: Task[], snapshot: ExecutionSnapshot): boolean {
+  if (
+    hasArtifactContentOutsideWindow(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, {
+      minGeneratedAt: snapshot.createdAt,
+    })
+  ) {
+    return true;
+  }
+
+  return SEGMENTED_WEBSITE_COPY_ARTIFACTS.some((entry) =>
+    hasArtifactContentOutsideWindow(tasks, entry.path, {
+      minGeneratedAt: snapshot.createdAt,
+    })
+  );
 }
 
 function hasWebsiteAttachmentSignals(project: Project): boolean {
@@ -5878,7 +5909,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 isSegmentedWebsiteSourceArtifactPath(artifact.path))
             ) {
               const websiteModel =
-                resolveSegmentedWebsiteContentModelFromTaskArtifacts(project.tasks) ??
+                resolveSegmentedWebsiteContentModelFromTaskArtifacts(project.tasks, snapshot) ??
                 buildSegmentedWebsiteContentModelPayload(project, snapshot);
               const verifiedContent = websiteModel?.verified ?? deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
               if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
@@ -5927,7 +5958,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 continue;
               }
 
-              const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(project.tasks);
+              const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(project.tasks, snapshot);
+              const crossRunRisk = hasSegmentedWebsiteCrossRunRisk(project.tasks, snapshot);
+
+              if (artifact.path === 'index.html') {
+                const diagnostics = buildDeterministicWebsiteRenderDiagnostics({
+                  projectName: project.name,
+                  verified: verifiedContent,
+                  copySections: sectionOverrides,
+                  language: project.language,
+                  crossRunContamination: crossRunRisk,
+                });
+
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: diagnostics.firstCorruptionPoint ? 'warning' : 'info',
+                  agent: task.agent,
+                  message:
+                    `${task.agent}: website pipeline diagnostics (` +
+                    `firstCorruptionPoint=${diagnostics.firstCorruptionPoint ?? 'none'}) ` +
+                    `${JSON.stringify(diagnostics.phases)}`,
+                });
+              }
 
               const websiteArtifacts = buildDeterministicWebsiteArtifacts({
                 projectName: project.name,

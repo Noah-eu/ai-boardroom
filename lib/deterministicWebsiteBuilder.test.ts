@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDeterministicWebsiteArtifacts,
   buildDeterministicWebsiteCopySections,
+  buildDeterministicWebsiteRenderDiagnostics,
   deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
@@ -516,5 +517,63 @@ describe('deterministicWebsiteBuilder', () => {
 
     expect(errors.join(' | ')).toContain('internal marker: project prompt:');
     expect(errors.join(' | ')).toContain('unresolved template tokens');
+  });
+
+  it('emits full deterministic website pipeline diagnostics across all render phases', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Aster Studio',
+      projectPrompt: [
+        'Hero: Aster Studio',
+        'About: Structured support for long-term wellbeing and practical personal growth.',
+        'Services: Individual sessions, Relationship coaching',
+        'Pricing: From 80 EUR / 50 min',
+        'Contact: hello@aster.example, +420 777 111 222',
+        'Address: Main Street 1, Prague',
+      ].join('\n'),
+    });
+
+    const diagnostics = buildDeterministicWebsiteRenderDiagnostics({
+      projectName: 'Aster Studio',
+      verified,
+      language: 'en',
+    });
+
+    expect(diagnostics.phases.map((phase) => phase.phase)).toEqual([
+      'raw-extracted-source-facts',
+      'locale-filtered-facts',
+      'normalized-website-content-model',
+      'selected-archetype-section-schema',
+      'slot-candidates',
+      'final-section-labels-items',
+    ]);
+    expect(
+      diagnostics.phases.every(
+        (phase) => typeof phase.expectedShape === 'string' && Boolean(phase.actualShape) && Boolean(phase.issues)
+      )
+    ).toBe(true);
+  });
+
+  it('flags first corruption point when raw facts contain internal payload leakage', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Leak Probe',
+      projectPrompt: [
+        'Hero: Leak Probe',
+        'About: Project prompt: do not expose internal debug payload.',
+        '{"debug": true, "note": "raw extracted"}',
+        'Services: Consultation',
+        'Pricing: From 120 USD',
+      ].join('\n'),
+    });
+
+    const diagnostics = buildDeterministicWebsiteRenderDiagnostics({
+      projectName: 'Leak Probe',
+      verified,
+      language: 'en',
+      crossRunContamination: true,
+    });
+
+    expect(diagnostics.firstCorruptionPoint).toBe('raw-extracted-source-facts');
+    expect(diagnostics.phases[0].issues.crossRunContamination).toBe(true);
+    expect(Object.values(diagnostics.phases[0].issues).some(Boolean)).toBe(true);
   });
 });

@@ -62,6 +62,35 @@ export type PromptWebsiteExtractionInput = {
   debateSummary?: string | null;
 };
 
+export type WebsitePipelineIssueFlags = {
+  mixedLanguageLeakage: boolean;
+  wrongSchemaArchetype: boolean;
+  noisyFragmentInclusion: boolean;
+  factLoss: boolean;
+  crossSlotContamination: boolean;
+  crossRunContamination: boolean;
+};
+
+export type WebsitePipelinePhaseName =
+  | 'raw-extracted-source-facts'
+  | 'locale-filtered-facts'
+  | 'normalized-website-content-model'
+  | 'selected-archetype-section-schema'
+  | 'slot-candidates'
+  | 'final-section-labels-items';
+
+export type WebsitePipelinePhaseSnapshot = {
+  phase: WebsitePipelinePhaseName;
+  expectedShape: string;
+  actualShape: Record<string, unknown>;
+  issues: WebsitePipelineIssueFlags;
+};
+
+export type WebsiteRenderDiagnostics = {
+  phases: WebsitePipelinePhaseSnapshot[];
+  firstCorruptionPoint: WebsitePipelinePhaseName | null;
+};
+
 type PublicWebsiteViewModel = {
   language: AppLanguage;
   labels: LocalizedWebsiteLabels;
@@ -545,6 +574,76 @@ function normalizePricingRows(rows: string[]): string[] {
 function buildMapUrl(address: string | null): string | null {
   if (!address) return null;
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+}
+
+function emptyIssues(crossRunContamination = false): WebsitePipelineIssueFlags {
+  return {
+    mixedLanguageLeakage: false,
+    wrongSchemaArchetype: false,
+    noisyFragmentInclusion: false,
+    factLoss: false,
+    crossSlotContamination: false,
+    crossRunContamination,
+  };
+}
+
+function hasIssue(flags: WebsitePipelineIssueFlags): boolean {
+  return Object.values(flags).some(Boolean);
+}
+
+function summarizeListShape(values: string[], previewMax = 5): { count: number; preview: string[] } {
+  return {
+    count: values.length,
+    preview: values.slice(0, previewMax),
+  };
+}
+
+function hasNoisyFragments(values: string[]): boolean {
+  return values.some((value) => containsInternalMarker(value) || looksLikeSerializedPayload(value));
+}
+
+function inferScripts(values: string[]): Set<string> {
+  const scripts = new Set<string>();
+  const combined = values.join(' ');
+  if (/[A-Za-z\u00C0-\u024F]/.test(combined)) scripts.add('latin');
+  if (/[\u0400-\u04FF]/.test(combined)) scripts.add('cyrillic');
+  if (/[\u0370-\u03FF]/.test(combined)) scripts.add('greek');
+  if (/[\u0600-\u06FF]/.test(combined)) scripts.add('arabic');
+  if (/[\u0590-\u05FF]/.test(combined)) scripts.add('hebrew');
+  if (/[\u0900-\u097F]/.test(combined)) scripts.add('devanagari');
+  if (/[\u4E00-\u9FFF]/.test(combined)) scripts.add('han');
+  if (/[\u3040-\u30FF]/.test(combined)) scripts.add('kana');
+  if (/[\uAC00-\uD7AF]/.test(combined)) scripts.add('hangul');
+  return scripts;
+}
+
+function hasMixedLanguageSignal(values: string[]): boolean {
+  return inferScripts(values).size > 1;
+}
+
+function hasFactLoss(previousCount: number, currentCount: number): boolean {
+  if (previousCount < 6) return false;
+  return currentCount < Math.ceil(previousCount * 0.5);
+}
+
+function detectCrossSlotContamination(input: {
+  topics: string[];
+  services: string[];
+  pricing: string[];
+  contact: Array<string | null>;
+}): boolean {
+  const topicsSet = toComparableSet(input.topics);
+  const servicesSet = toComparableSet(input.services);
+  const hasTopicServiceOverlap = Array.from(topicsSet).some((key) => servicesSet.has(key));
+
+  const pricingJoined = input.pricing.join(' ');
+  const pricingContainsContact = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(pricingJoined) ||
+    /\+?[0-9][0-9\s().-]{7,}/.test(pricingJoined);
+
+  const contactJoined = input.contact.filter(Boolean).join(' ');
+  const contactContainsPrice = /([0-9][0-9\s.,]{0,20})(?:\s*)(Kc|Kč|CZK|EUR|USD|€|\$)/i.test(contactJoined);
+
+  return hasTopicServiceOverlap || pricingContainsContact || contactContainsPrice;
 }
 
 function buildPublicWebsiteViewModel(params: {
@@ -1112,6 +1211,238 @@ export function hasSufficientVerifiedWebsiteContent(content: VerifiedWebsiteCont
       content.phones.length > 0 ||
       content.addresses.length > 0
   );
+}
+
+export function buildDeterministicWebsiteRenderDiagnostics(params: {
+  projectName: string;
+  verified: VerifiedWebsiteContent;
+  copySections?: Partial<WebsiteCopySections>;
+  language?: AppLanguage;
+  crossRunContamination?: boolean;
+}): WebsiteRenderDiagnostics {
+  const language = params.language ?? 'cz';
+  const model = buildPublicWebsiteViewModel({
+    projectName: params.projectName,
+    verified: params.verified,
+    copySections: params.copySections,
+    language,
+  });
+
+  const rawFacts = [
+    params.verified.pageTitle,
+    ...params.verified.navigationLabels,
+    ...params.verified.headings,
+    ...params.verified.bodyTextBlocks,
+    ...params.verified.serviceNames,
+    ...params.verified.pricingFields,
+    ...params.verified.ctaTexts,
+    ...params.verified.emails,
+    ...params.verified.phones,
+    ...params.verified.addresses,
+  ].filter(Boolean);
+
+  const filteredFacts = [
+    ...sanitizePublicList(params.verified.navigationLabels, 30, { rejectNavigationLabels: false }),
+    ...sanitizePublicList(params.verified.headings, 30, { rejectNavigationLabels: true }),
+    ...sanitizePublicList(params.verified.bodyTextBlocks, 40, { rejectNavigationLabels: true }),
+    ...sanitizePublicList(params.verified.serviceNames, 20, { rejectNavigationLabels: true }),
+    ...sanitizePublicList(params.verified.pricingFields, 20),
+    ...sanitizePublicList(params.verified.ctaTexts, 20, { rejectNavigationLabels: true }),
+    ...sanitizePublicList(params.verified.emails, 12),
+    ...sanitizePublicList(params.verified.phones, 12),
+    ...sanitizePublicList(params.verified.addresses, 8),
+  ];
+
+  const slotCandidates = {
+    hero: [model.heroTitle, model.heroSubtitle, model.primaryCta],
+    about: [model.aboutCopy],
+    approach: [model.approachCopy],
+    topics: model.topics,
+    services: model.services,
+    contact: [model.contactIntro, model.contact.email, model.contact.phone, model.contact.address].filter(
+      (entry): entry is string => Boolean(entry)
+    ),
+    map: [model.mapCopy, model.mapUrl].filter((entry): entry is string => Boolean(entry)),
+    pricing: model.pricing,
+  };
+
+  const normalizedFacts = [
+    model.title,
+    model.heroTitle,
+    model.heroSubtitle,
+    model.aboutCopy,
+    model.approachCopy,
+    ...model.topics,
+    ...model.services,
+    ...model.pricing,
+    model.contactIntro,
+    model.mapCopy,
+    model.contact.email ?? '',
+    model.contact.phone ?? '',
+    model.contact.address ?? '',
+  ].filter(Boolean);
+
+  const sections = ['hero', 'about', 'approach', 'topics', 'servicesPricing', 'contact', 'map'];
+  const crossRun = Boolean(params.crossRunContamination);
+
+  const rawIssues = emptyIssues(crossRun);
+  rawIssues.mixedLanguageLeakage = hasMixedLanguageSignal(rawFacts);
+  rawIssues.noisyFragmentInclusion = hasNoisyFragments(rawFacts);
+
+  const filteredIssues = emptyIssues(crossRun);
+  filteredIssues.mixedLanguageLeakage = hasMixedLanguageSignal(filteredFacts);
+  filteredIssues.noisyFragmentInclusion = hasNoisyFragments(filteredFacts);
+  filteredIssues.factLoss = hasFactLoss(rawFacts.length, filteredFacts.length);
+
+  const normalizedIssues = emptyIssues(crossRun);
+  normalizedIssues.mixedLanguageLeakage = hasMixedLanguageSignal(normalizedFacts);
+  normalizedIssues.noisyFragmentInclusion = hasNoisyFragments(normalizedFacts);
+  normalizedIssues.factLoss = hasFactLoss(filteredFacts.length, normalizedFacts.length);
+  normalizedIssues.wrongSchemaArchetype = !model.heroTitle || !model.aboutCopy || !model.approachCopy;
+
+  const schemaIssues = emptyIssues(crossRun);
+  schemaIssues.wrongSchemaArchetype = sections.length !== 7;
+
+  const slotIssues = emptyIssues(crossRun);
+  slotIssues.crossSlotContamination = detectCrossSlotContamination({
+    topics: slotCandidates.topics,
+    services: slotCandidates.services,
+    pricing: slotCandidates.pricing,
+    contact: [model.contact.email, model.contact.phone, model.contact.address],
+  });
+  slotIssues.factLoss = slotCandidates.topics.length === 0 && slotCandidates.services.length === 0;
+
+  const finalIssues = emptyIssues(crossRun);
+  finalIssues.mixedLanguageLeakage = hasMixedLanguageSignal([
+    model.labels.heroSectionLabel,
+    model.labels.aboutHeading,
+    model.labels.approachHeading,
+    model.labels.topicsHeading,
+    model.labels.servicesPricingHeading,
+    model.labels.contactHeading,
+    model.labels.mapHeading,
+    ...model.topics,
+    ...model.services,
+    ...model.pricing,
+  ]);
+  finalIssues.crossSlotContamination = slotIssues.crossSlotContamination;
+  finalIssues.wrongSchemaArchetype =
+    !model.labels.aboutHeading ||
+    !model.labels.approachHeading ||
+    !model.labels.topicsHeading ||
+    !model.labels.servicesPricingHeading ||
+    !model.labels.contactHeading ||
+    !model.labels.mapHeading;
+
+  const phases: WebsitePipelinePhaseSnapshot[] = [
+    {
+      phase: 'raw-extracted-source-facts',
+      expectedShape:
+        'Canonical source-facts object with arrays for headings/body/services/pricing/cta/contact and scalar pageTitle/sourceUrl.',
+      actualShape: {
+        sourceUrlPresent: Boolean(params.verified.sourceUrl),
+        pageTitlePresent: Boolean(params.verified.pageTitle),
+        headings: summarizeListShape(params.verified.headings),
+        bodyTextBlocks: summarizeListShape(params.verified.bodyTextBlocks),
+        serviceNames: summarizeListShape(params.verified.serviceNames),
+        pricingFields: summarizeListShape(params.verified.pricingFields),
+        ctaTexts: summarizeListShape(params.verified.ctaTexts),
+        emails: summarizeListShape(params.verified.emails),
+        phones: summarizeListShape(params.verified.phones),
+        addresses: summarizeListShape(params.verified.addresses),
+      },
+      issues: rawIssues,
+    },
+    {
+      phase: 'locale-filtered-facts',
+      expectedShape:
+        'Sanitized fact collections without internal/debug payloads, with stable de-duplication and bounded list sizes.',
+      actualShape: {
+        filteredFacts: summarizeListShape(filteredFacts, 8),
+      },
+      issues: filteredIssues,
+    },
+    {
+      phase: 'normalized-website-content-model',
+      expectedShape:
+        'Normalized content model with hero/about/approach/topics/services/pricing/contact/map fields ready for deterministic rendering.',
+      actualShape: {
+        title: model.title,
+        heroTitle: model.heroTitle,
+        heroSubtitle: model.heroSubtitle,
+        aboutLength: model.aboutCopy.length,
+        approachLength: model.approachCopy.length,
+        topics: summarizeListShape(model.topics),
+        services: summarizeListShape(model.services),
+        pricing: summarizeListShape(model.pricing),
+        contact: {
+          email: Boolean(model.contact.email),
+          phone: Boolean(model.contact.phone),
+          address: Boolean(model.contact.address),
+        },
+      },
+      issues: normalizedIssues,
+    },
+    {
+      phase: 'selected-archetype-section-schema',
+      expectedShape:
+        'Single deterministic archetype with stable section schema: hero/about/approach/topics/servicesPricing/contact/map.',
+      actualShape: {
+        archetype: 'deterministic-single-page-profile-v1',
+        sections,
+      },
+      issues: schemaIssues,
+    },
+    {
+      phase: 'slot-candidates',
+      expectedShape:
+        'Per-slot candidate pools with bounded text items and no cross-slot collisions between topics/services/pricing/contact.',
+      actualShape: {
+        hero: summarizeListShape(slotCandidates.hero),
+        about: summarizeListShape(slotCandidates.about),
+        approach: summarizeListShape(slotCandidates.approach),
+        topics: summarizeListShape(slotCandidates.topics),
+        services: summarizeListShape(slotCandidates.services),
+        pricing: summarizeListShape(slotCandidates.pricing),
+        contact: summarizeListShape(slotCandidates.contact),
+        map: summarizeListShape(slotCandidates.map),
+      },
+      issues: slotIssues,
+    },
+    {
+      phase: 'final-section-labels-items',
+      expectedShape:
+        'Localized section labels and final section items frozen immediately before HTML rendering.',
+      actualShape: {
+        labels: {
+          hero: model.labels.heroSectionLabel,
+          about: model.labels.aboutHeading,
+          approach: model.labels.approachHeading,
+          topics: model.labels.topicsHeading,
+          servicesPricing: model.labels.servicesPricingHeading,
+          services: model.labels.servicesHeading,
+          pricing: model.labels.pricingHeading,
+          contact: model.labels.contactHeading,
+          map: model.labels.mapHeading,
+        },
+        finalItems: {
+          heroTitle: model.heroTitle,
+          heroSubtitle: model.heroSubtitle,
+          about: model.aboutCopy,
+          approach: model.approachCopy,
+          topics: summarizeListShape(model.topics),
+          services: summarizeListShape(model.services),
+          pricing: summarizeListShape(model.pricing),
+          contactIntro: model.contactIntro,
+          mapCopy: model.mapCopy,
+        },
+      },
+      issues: finalIssues,
+    },
+  ];
+
+  const firstCorruptionPoint = phases.find((phase) => hasIssue(phase.issues))?.phase ?? null;
+  return { phases, firstCorruptionPoint };
 }
 
 export function buildDeterministicWebsiteArtifacts(params: {
