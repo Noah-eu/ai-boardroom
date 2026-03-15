@@ -29,6 +29,124 @@ export type BilingualWebsiteArtifacts = {
   scriptJs: string;
 };
 
+export type WebsitePipelineDiagnostics = {
+  language: AppLanguage;
+  rawExtractedSourceFacts: {
+    pageTitle: string;
+    headings: string[];
+    bodyTextBlocks: string[];
+    serviceNames: string[];
+    pricingFields: string[];
+    ctaTexts: string[];
+    emails: string[];
+    phones: string[];
+    addresses: string[];
+  };
+  localeFilteredFacts: {
+    headings: string[];
+    bodyFacts: string[];
+    serviceFacts: string[];
+    pricingFacts: string[];
+    ctaFacts: string[];
+  };
+  normalizedContentModel: {
+    title: string;
+    heroTitle: string;
+    heroSubtitle: string;
+    aboutCopy: string;
+    approachCopy: string;
+    topics: string[];
+    services: string[];
+    pricing: string[];
+    contact: {
+      email: string | null;
+      phone: string | null;
+      address: string | null;
+    };
+    mapCopy: string;
+    mapUrl: string | null;
+  };
+  selectedSchema: {
+    archetype: WebsiteArchetype;
+    labels: {
+      aboutHeading: string;
+      approachHeading: string;
+      topicsHeading: string;
+      servicesPricingHeading: string;
+      contactHeading: string;
+      mapHeading: string;
+    };
+  };
+  slotInputs: {
+    hero: { title: string; supportingFact: string | null; ctaCandidates: string[] };
+    about: { seed: string | null; fallback: string | null; override: string | null };
+    approach: { seed: string | null; fallback: string | null; override: string | null };
+    topics: { candidates: string[]; override: string[] };
+    servicesPricing: { verifiedServices: string[]; retainedServiceFacts: string[]; verifiedPricing: string[]; overrideServices: string[]; overridePricing: string[] };
+    contact: { introOverride: string | null; email: string | null; phone: string | null; address: string | null };
+    map: { fact: string | null; override: string | null };
+  };
+  finalRenderedSections: {
+    about: { shown: boolean; heading: string; items: string[] };
+    approach: { shown: boolean; heading: string; items: string[] };
+    topics: { shown: boolean; heading: string; items: string[] };
+    servicesPricing: { shown: boolean; heading: string; items: string[] };
+    contact: { shown: boolean; heading: string; items: string[] };
+    map: { shown: boolean; heading: string; items: string[] };
+  };
+  phaseIssues: {
+    rawExtractedSourceFacts: {
+      mixedLanguageLeakage: boolean;
+      wrongSchemaOrArchetype: boolean;
+      noisyFragmentInclusion: boolean;
+      factLossToPlaceholder: boolean;
+      crossSlotContamination: boolean;
+    };
+    localeFilteredFacts: {
+      mixedLanguageLeakage: boolean;
+      wrongSchemaOrArchetype: boolean;
+      noisyFragmentInclusion: boolean;
+      factLossToPlaceholder: boolean;
+      crossSlotContamination: boolean;
+    };
+    normalizedWebsiteContentModel: {
+      mixedLanguageLeakage: boolean;
+      wrongSchemaOrArchetype: boolean;
+      noisyFragmentInclusion: boolean;
+      factLossToPlaceholder: boolean;
+      crossSlotContamination: boolean;
+    };
+    selectedArchetypeSchema: {
+      mixedLanguageLeakage: boolean;
+      wrongSchemaOrArchetype: boolean;
+      noisyFragmentInclusion: boolean;
+      factLossToPlaceholder: boolean;
+      crossSlotContamination: boolean;
+    };
+    slotInputs: {
+      mixedLanguageLeakage: boolean;
+      wrongSchemaOrArchetype: boolean;
+      noisyFragmentInclusion: boolean;
+      factLossToPlaceholder: boolean;
+      crossSlotContamination: boolean;
+    };
+    finalRenderedSections: {
+      mixedLanguageLeakage: boolean;
+      wrongSchemaOrArchetype: boolean;
+      noisyFragmentInclusion: boolean;
+      factLossToPlaceholder: boolean;
+      crossSlotContamination: boolean;
+    };
+  };
+  firstCorruptionPoint:
+    | 'locale-filtered facts'
+    | 'normalized website content model'
+    | 'selected archetype/schema'
+    | 'slot inputs'
+    | 'final rendered sections'
+    | null;
+};
+
 export type WebsitePortraitImage = {
   src: string;
   alt: string;
@@ -119,6 +237,13 @@ type LocalizedWebsiteLabels = {
   mapLinkLabel: string;
   emptyListNote: string;
   noContactNote: string;
+};
+
+type WebsiteBuildDebugCollector = {
+  rawExtractedSourceFacts?: WebsitePipelineDiagnostics['rawExtractedSourceFacts'];
+  localeFilteredFacts?: WebsitePipelineDiagnostics['localeFilteredFacts'];
+  selectedSchema?: WebsitePipelineDiagnostics['selectedSchema'];
+  slotInputs?: WebsitePipelineDiagnostics['slotInputs'];
 };
 
 const INTERNAL_TEXT_MARKERS = [
@@ -606,26 +731,121 @@ function normalizePublicParagraph(value: string | null | undefined, maxChars = 2
 }
 
 function detectTextLocale(value: string): AppLanguage | 'unknown' {
-  const normalized = normalizeWhitespace(value)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+  const normalized = normalizeWhitespace(value).toLowerCase();
   if (!normalized) return 'unknown';
 
-  const czHits =
-    (normalized.match(/\b(a|na|pro|s|v|k|od|bezpecny|sluzby|kontakt|mapa|adresa|objednat|domluvit|ceny|prehled|oblasti)\b/g)
-      ?.length ?? 0) + (/[áéěíóúůýčďňřšťž]/i.test(value) ? 2 : 0);
-  const enHits =
-    (normalized.match(/\b(the|and|with|for|from|about|services|contact|map|address|book|pricing|overview|highlights)\b/g)
-      ?.length ?? 0) + (/\b(website|company|service|team|appointment)\b/i.test(normalized) ? 1 : 0);
+  const normalizedAscii = normalized
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const tokens = normalizedAscii.match(/[a-z]+/g) ?? [];
+  if (tokens.length === 0) return 'unknown';
+
+  const czHints = new Set([
+    'a',
+    'na',
+    'pro',
+    's',
+    'v',
+    'k',
+    'od',
+    'sluzby',
+    'sluzba',
+    'kontakt',
+    'mapa',
+    'adresa',
+    'cena',
+    'ceny',
+    'nabidka',
+    'tym',
+    'spolecnost',
+    'firma',
+    'zakaznik',
+    'podpora',
+    'reseni',
+    'produkty',
+    'sluzeb',
+    'rezervace',
+    'ubytovani',
+    'snidane',
+    'pobyt',
+    'zakaznicky',
+    'provozni',
+  ]);
+
+  const enHints = new Set([
+    'the',
+    'and',
+    'with',
+    'for',
+    'from',
+    'about',
+    'services',
+    'service',
+    'contact',
+    'map',
+    'address',
+    'book',
+    'pricing',
+    'overview',
+    'highlights',
+    'team',
+    'company',
+    'support',
+    'solution',
+    'solutions',
+    'product',
+    'products',
+    'request',
+    'quote',
+    'learn',
+    'more',
+    'individual',
+    'sessions',
+  ]);
+
+  let czHits = /[áéěíóúůýčďňřšťž]/i.test(value) ? 2 : 0;
+  let enHits = 0;
+
+  tokens.forEach((token) => {
+    if (czHints.has(token)) czHits += 1;
+    if (enHints.has(token)) enHits += 1;
+  });
 
   if (czHits === 0 && enHits === 0) return 'unknown';
-  return czHits >= enHits ? 'cz' : 'en';
+  if (czHits === enHits) return 'unknown';
+  return czHits > enHits ? 'cz' : 'en';
 }
 
 function isLocaleConsistentText(value: string, targetLanguage: AppLanguage): boolean {
   const detected = detectTextLocale(value);
-  return detected === 'unknown' || detected === targetLanguage;
+  if (detected === targetLanguage) return true;
+  if (detected !== 'unknown') return false;
+
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return true;
+  if (!/[A-Za-z\u00C0-\u017F]/.test(normalized)) return true;
+  if (/\b(mailto:|tel:|https?:\/\/|www\.)/i.test(normalized)) return true;
+
+  const normalizedAscii = normalized
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const czMarker =
+    /\b(a|na|pro|s|v|k|od|sluzby|sluzba|kontakt|mapa|adresa|cena|ceny|nabidka|tym|spolecnost|firma|zakaznik|podpora|reseni|produkty|sluzeb|rezervace|ubytovani|snidane|wellness|pobyt|zakaznicky|provozni)\b/i.test(
+      normalizedAscii
+    ) || /[áéěíóúůýčďňřšťž]/i.test(normalized);
+  const enMarker =
+    /\b(the|and|with|for|from|about|services?|contact|map|address|book|pricing|overview|highlights|team|company|support|solution|solutions|product|products|request|quote|learn|more|individual|sessions|call|reserve|buy|shop|download|subscribe)\b/i.test(
+      normalizedAscii
+    );
+
+  if (targetLanguage === 'cz') {
+    return !(enMarker && !czMarker);
+  }
+
+  return !(czMarker && !enMarker);
 }
 
 function isNoisyPublicListItem(value: string): boolean {
@@ -815,6 +1035,7 @@ function buildPublicWebsiteViewModel(params: {
   verified: VerifiedWebsiteContent;
   copySections?: Partial<WebsiteCopySections>;
   language?: AppLanguage;
+  debugCollector?: WebsiteBuildDebugCollector;
 }): PublicWebsiteViewModel {
   const language = params.language ?? 'cz';
   const verifiedTitle = sanitizePublicText(params.verified.pageTitle);
@@ -866,15 +1087,42 @@ function buildPublicWebsiteViewModel(params: {
     ctaTexts: sanitizedCtaTexts,
   });
   const labels = getLocalizedWebsiteLabels(language, archetype);
+
+  params.debugCollector &&
+    (params.debugCollector.rawExtractedSourceFacts = {
+      pageTitle: params.verified.pageTitle,
+      headings: [...params.verified.headings],
+      bodyTextBlocks: [...params.verified.bodyTextBlocks],
+      serviceNames: [...params.verified.serviceNames],
+      pricingFields: [...params.verified.pricingFields],
+      ctaTexts: [...params.verified.ctaTexts],
+      emails: [...params.verified.emails],
+      phones: [...params.verified.phones],
+      addresses: [...params.verified.addresses],
+    });
+
+  params.debugCollector &&
+    (params.debugCollector.selectedSchema = {
+      archetype,
+      labels: {
+        aboutHeading: labels.aboutHeading,
+        approachHeading: labels.approachHeading,
+        topicsHeading: labels.topicsHeading,
+        servicesPricingHeading: labels.servicesPricingHeading,
+        contactHeading: labels.contactHeading,
+        mapHeading: labels.mapHeading,
+      },
+    });
   const bodyFacts = candidateBodyFacts.filter((entry) => isLocaleConsistentText(entry, language));
   const localeCtaTexts = sanitizedCtaTexts.filter((entry) => isLocaleConsistentText(entry, language));
-  const services = uniq(verifiedServices, 8);
+  const localeVerifiedServices = verifiedServices.filter((entry) => isLocaleConsistentText(entry, language));
+  const services = uniq(localeVerifiedServices, 8);
 
   const topics = deriveTopicLikeItems(
     [
       ...stripStructuralLabels(sanitizedHeadings, structuralLabels, 20),
       ...bodyFacts,
-      ...verifiedServices,
+      ...localeVerifiedServices,
     ].filter((entry) => !/kontakt|contact|mapa|pricing|price|cen/i.test(entry)),
     6
   );
@@ -882,7 +1130,7 @@ function buildPublicWebsiteViewModel(params: {
   const verifiedPricing = normalizePricingRows([
     ...sanitizedPricingFields,
     ...bodyFacts,
-    ...verifiedServices,
+    ...localeVerifiedServices,
   ]);
 
   const retainedServiceFacts = uniq(
@@ -892,12 +1140,21 @@ function buildPublicWebsiteViewModel(params: {
     8
   );
 
+  params.debugCollector &&
+    (params.debugCollector.localeFilteredFacts = {
+      headings: sanitizedHeadings.filter((entry) => isLocaleConsistentText(entry, language)),
+      bodyFacts,
+      serviceFacts: verifiedServices.filter((entry) => isLocaleConsistentText(entry, language)),
+      pricingFacts: verifiedPricing.filter((entry) => isLocaleConsistentText(entry, language)),
+      ctaFacts: localeCtaTexts,
+    });
+
   const provenanceFacts = uniq(
     [
       title,
       ...sanitizedHeadings,
       ...bodyFacts,
-      ...verifiedServices,
+      ...localeVerifiedServices,
       ...verifiedPricing,
       ...sanitizedCtaTexts,
       ...sanitizedEmails,
@@ -997,7 +1254,7 @@ function buildPublicWebsiteViewModel(params: {
   const serviceItems = uniq(
     stripStructuralLabels(
       verifiedServices.length > 0
-        ? [...verifiedServices, ...servicesOverride]
+        ? [...localeVerifiedServices, ...servicesOverride]
         : servicesOverride.length > 0
         ? servicesOverride
         : [...services, ...retainedServiceFacts],
@@ -1038,6 +1295,46 @@ function buildPublicWebsiteViewModel(params: {
         ? mapFact ?? 'Adresa provozovny je uvedena nize.'
         : mapFact ?? 'The business address is listed below.')
   );
+
+  params.debugCollector &&
+    (params.debugCollector.slotInputs = {
+      hero: {
+        title,
+        supportingFact: heroSupportingFact,
+        ctaCandidates: localeCtaTexts,
+      },
+      about: {
+        seed: aboutSeed,
+        fallback: fallbackAboutFromFacts,
+        override: aboutOverride,
+      },
+      approach: {
+        seed: approachSeed,
+        fallback: fallbackApproachFromFacts,
+        override: approachOverride,
+      },
+      topics: {
+        candidates: topics,
+        override: topicsOverride,
+      },
+      servicesPricing: {
+        verifiedServices: localeVerifiedServices,
+        retainedServiceFacts,
+        verifiedPricing,
+        overrideServices: servicesOverride,
+        overridePricing: pricingOverride,
+      },
+      contact: {
+        introOverride: contactIntroOverride,
+        email: contact.email,
+        phone: contact.phone,
+        address: contact.address,
+      },
+      map: {
+        fact: mapFact,
+        override: mapOverride,
+      },
+    });
 
   return {
     language,
@@ -1604,6 +1901,244 @@ export function buildDeterministicWebsiteArtifacts(params: {
     indexHtml,
     stylesCss,
     scriptJs,
+  };
+}
+
+export function diagnoseDeterministicWebsiteRun(params: {
+  projectName: string;
+  projectDescription: string;
+  verified: VerifiedWebsiteContent;
+  portraitImage?: WebsitePortraitImage | null;
+  copySections?: Partial<WebsiteCopySections>;
+  language?: AppLanguage;
+}): WebsitePipelineDiagnostics {
+  const language = params.language ?? 'cz';
+  const debugCollector: WebsiteBuildDebugCollector = {};
+
+  const model = buildPublicWebsiteViewModel({
+    projectName: params.projectName,
+    verified: params.verified,
+    copySections: params.copySections,
+    language,
+    debugCollector,
+  });
+
+  const mixedLanguage = (values: string[]): boolean =>
+    values.some((entry) => !isLocaleConsistentText(entry, language) && !looksLikeAddressFact(entry));
+  const noisyFragments = (values: string[]): boolean => values.some((entry) => isNoisyPublicListItem(entry));
+  const schemaMismatch = (() => {
+    const schema = debugCollector.selectedSchema;
+    if (!schema) return false;
+    if (schema.archetype === 'personal-profile') {
+      return /company|nas/i.test(schema.labels.aboutHeading);
+    }
+    return /about me|o mne/i.test(schema.labels.aboutHeading);
+  })();
+
+  const contactLike = (value: string): boolean => /\b(contact|kontakt|email|e-mail|phone|telefon|map|mapa|address|adresa)\b/i.test(value);
+  const hasFactSource =
+    params.verified.headings.length > 0 ||
+    params.verified.bodyTextBlocks.length > 0 ||
+    params.verified.serviceNames.length > 0 ||
+    params.verified.pricingFields.length > 0;
+
+  const finalRenderedSections: WebsitePipelineDiagnostics['finalRenderedSections'] = {
+    about: {
+      shown: sectionHasContent(model.aboutCopy),
+      heading: model.labels.aboutHeading,
+      items: model.aboutCopy ? [model.aboutCopy] : [],
+    },
+    approach: {
+      shown: sectionHasContent(model.approachCopy),
+      heading: model.labels.approachHeading,
+      items: model.approachCopy ? [model.approachCopy] : [],
+    },
+    topics: {
+      shown: sectionHasContent(null, model.topics),
+      heading: model.labels.topicsHeading,
+      items: model.topics,
+    },
+    servicesPricing: {
+      shown: sectionHasContent(null, model.services) || sectionHasContent(null, model.pricing),
+      heading: model.labels.servicesPricingHeading,
+      items: [...model.services, ...model.pricing],
+    },
+    contact: {
+      shown: true,
+      heading: model.labels.contactHeading,
+      items: [model.contactIntro, model.contact.email ?? '', model.contact.phone ?? '', model.contact.address ?? ''].filter(Boolean),
+    },
+    map: {
+      shown: model.mapUrl || sectionHasContent(model.mapCopy) ? true : false,
+      heading: model.labels.mapHeading,
+      items: [model.mapCopy, model.mapUrl ?? ''].filter(Boolean),
+    },
+  };
+
+  const phaseIssues: WebsitePipelineDiagnostics['phaseIssues'] = {
+    rawExtractedSourceFacts: {
+      mixedLanguageLeakage: mixedLanguage([
+        ...(debugCollector.rawExtractedSourceFacts?.headings ?? []),
+        ...(debugCollector.rawExtractedSourceFacts?.bodyTextBlocks ?? []),
+        ...(debugCollector.rawExtractedSourceFacts?.serviceNames ?? []),
+      ]),
+      wrongSchemaOrArchetype: false,
+      noisyFragmentInclusion: noisyFragments([
+        ...(debugCollector.rawExtractedSourceFacts?.headings ?? []),
+        ...(debugCollector.rawExtractedSourceFacts?.bodyTextBlocks ?? []),
+      ]),
+      factLossToPlaceholder: false,
+      crossSlotContamination: false,
+    },
+    localeFilteredFacts: {
+      mixedLanguageLeakage: mixedLanguage([
+        ...(debugCollector.localeFilteredFacts?.headings ?? []),
+        ...(debugCollector.localeFilteredFacts?.bodyFacts ?? []),
+        ...(debugCollector.localeFilteredFacts?.serviceFacts ?? []),
+        ...(debugCollector.localeFilteredFacts?.pricingFacts ?? []),
+        ...(debugCollector.localeFilteredFacts?.ctaFacts ?? []),
+      ]),
+      wrongSchemaOrArchetype: false,
+      noisyFragmentInclusion: noisyFragments([
+        ...(debugCollector.localeFilteredFacts?.bodyFacts ?? []),
+        ...(debugCollector.localeFilteredFacts?.serviceFacts ?? []),
+      ]),
+      factLossToPlaceholder: false,
+      crossSlotContamination: false,
+    },
+    normalizedWebsiteContentModel: {
+      mixedLanguageLeakage: mixedLanguage([
+        model.heroSubtitle,
+        model.aboutCopy,
+        model.approachCopy,
+        ...model.topics,
+        ...model.services,
+        model.contactIntro,
+        model.mapCopy,
+      ]),
+      wrongSchemaOrArchetype: false,
+      noisyFragmentInclusion: noisyFragments([...model.topics, ...model.services]),
+      factLossToPlaceholder: hasFactSource && !model.aboutCopy && !model.approachCopy,
+      crossSlotContamination: model.topics.some((entry) => contactLike(entry)) || model.services.some((entry) => contactLike(entry)),
+    },
+    selectedArchetypeSchema: {
+      mixedLanguageLeakage: false,
+      wrongSchemaOrArchetype: schemaMismatch,
+      noisyFragmentInclusion: false,
+      factLossToPlaceholder: false,
+      crossSlotContamination: false,
+    },
+    slotInputs: {
+      mixedLanguageLeakage: mixedLanguage([
+        ...(debugCollector.slotInputs?.topics.candidates ?? []),
+        ...(debugCollector.slotInputs?.servicesPricing.verifiedServices ?? []),
+      ]),
+      wrongSchemaOrArchetype: false,
+      noisyFragmentInclusion: noisyFragments([
+        ...(debugCollector.slotInputs?.topics.candidates ?? []),
+        ...(debugCollector.slotInputs?.servicesPricing.verifiedServices ?? []),
+      ]),
+      factLossToPlaceholder: false,
+      crossSlotContamination:
+        (debugCollector.slotInputs?.topics.candidates ?? []).some((entry) => contactLike(entry)) ||
+        (debugCollector.slotInputs?.servicesPricing.verifiedServices ?? []).some((entry) => contactLike(entry)),
+    },
+    finalRenderedSections: {
+      mixedLanguageLeakage: mixedLanguage([
+        ...finalRenderedSections.about.items,
+        ...finalRenderedSections.approach.items,
+        ...finalRenderedSections.topics.items,
+        ...finalRenderedSections.servicesPricing.items,
+      ]),
+      wrongSchemaOrArchetype: schemaMismatch,
+      noisyFragmentInclusion: noisyFragments([
+        ...finalRenderedSections.topics.items,
+        ...model.services,
+      ]),
+      factLossToPlaceholder: hasFactSource && !finalRenderedSections.about.shown && !finalRenderedSections.approach.shown,
+      crossSlotContamination:
+        finalRenderedSections.topics.items.some((entry) => contactLike(entry)) ||
+        finalRenderedSections.servicesPricing.items.some((entry) => contactLike(entry)),
+    },
+  };
+
+  const hasIssue = (phase: keyof WebsitePipelineDiagnostics['phaseIssues']): boolean =>
+    Object.values(phaseIssues[phase]).some(Boolean);
+
+  const firstCorruptionPoint = hasIssue('localeFilteredFacts')
+    ? 'locale-filtered facts'
+    : hasIssue('normalizedWebsiteContentModel')
+    ? 'normalized website content model'
+    : hasIssue('selectedArchetypeSchema')
+    ? 'selected archetype/schema'
+    : hasIssue('slotInputs')
+    ? 'slot inputs'
+    : hasIssue('finalRenderedSections')
+    ? 'final rendered sections'
+    : null;
+
+  return {
+    language,
+    rawExtractedSourceFacts: debugCollector.rawExtractedSourceFacts ?? {
+      pageTitle: params.verified.pageTitle,
+      headings: [],
+      bodyTextBlocks: [],
+      serviceNames: [],
+      pricingFields: [],
+      ctaTexts: [],
+      emails: [],
+      phones: [],
+      addresses: [],
+    },
+    localeFilteredFacts: debugCollector.localeFilteredFacts ?? {
+      headings: [],
+      bodyFacts: [],
+      serviceFacts: [],
+      pricingFacts: [],
+      ctaFacts: [],
+    },
+    normalizedContentModel: {
+      title: model.title,
+      heroTitle: model.heroTitle,
+      heroSubtitle: model.heroSubtitle,
+      aboutCopy: model.aboutCopy,
+      approachCopy: model.approachCopy,
+      topics: model.topics,
+      services: model.services,
+      pricing: model.pricing,
+      contact: model.contact,
+      mapCopy: model.mapCopy,
+      mapUrl: model.mapUrl,
+    },
+    selectedSchema: debugCollector.selectedSchema ?? {
+      archetype: 'company-service',
+      labels: {
+        aboutHeading: model.labels.aboutHeading,
+        approachHeading: model.labels.approachHeading,
+        topicsHeading: model.labels.topicsHeading,
+        servicesPricingHeading: model.labels.servicesPricingHeading,
+        contactHeading: model.labels.contactHeading,
+        mapHeading: model.labels.mapHeading,
+      },
+    },
+    slotInputs: debugCollector.slotInputs ?? {
+      hero: { title: model.title, supportingFact: null, ctaCandidates: [] },
+      about: { seed: null, fallback: null, override: null },
+      approach: { seed: null, fallback: null, override: null },
+      topics: { candidates: [], override: [] },
+      servicesPricing: {
+        verifiedServices: [],
+        retainedServiceFacts: [],
+        verifiedPricing: [],
+        overrideServices: [],
+        overridePricing: [],
+      },
+      contact: { introOverride: null, email: model.contact.email, phone: model.contact.phone, address: model.contact.address },
+      map: { fact: null, override: null },
+    },
+    finalRenderedSections,
+    phaseIssues,
+    firstCorruptionPoint,
   };
 }
 

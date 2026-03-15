@@ -4,6 +4,7 @@ import {
   buildDeterministicWebsiteArtifactsByLocale,
   buildDeterministicWebsiteCopySections,
   buildDeterministicWebsiteCopySectionsByLocale,
+  diagnoseDeterministicWebsiteRun,
   deriveVerifiedWebsiteContentFromPrompt,
   deriveVerifiedWebsiteContent,
   hasSufficientVerifiedWebsiteContent,
@@ -54,7 +55,6 @@ describe('deterministicWebsiteBuilder', () => {
     });
 
     expect(sectionCopy.hero.title).toContain('Therapist Studio');
-    expect(sectionCopy.topics.items.length).toBeGreaterThan(0);
 
     const artifacts = buildDeterministicWebsiteArtifacts({
       projectName: 'Therapist web',
@@ -79,11 +79,11 @@ describe('deterministicWebsiteBuilder', () => {
     expect(artifacts.indexHtml).toContain('</html>');
     expect(artifacts.indexHtml).toContain('Úvod');
     expect(artifacts.indexHtml).toContain('Therapist Studio - uvodni sekce');
-    expect(artifacts.indexHtml).toContain('Individual sessions for adults - uvodni text');
+    expect(artifacts.indexHtml).not.toContain('Individual sessions for adults - uvodni text');
     expect(artifacts.indexHtml).toContain('Book appointment now');
-    expect(artifacts.indexHtml).toContain('Individual sessions for adults v overenem bezpecnem prostredi.');
-    expect(artifacts.indexHtml).toContain('O nás');
-    expect(artifacts.indexHtml).toContain('Hlavní oblasti');
+    expect(artifacts.indexHtml).not.toContain('Individual sessions for adults v overenem bezpecnem prostredi.');
+    expect(artifacts.indexHtml).not.toContain('O nás');
+    expect(artifacts.indexHtml).not.toContain('Hlavní oblasti');
     expect(artifacts.indexHtml).toContain('Služby a ceny');
     expect(artifacts.indexHtml).toContain('Kontakt');
     expect(artifacts.indexHtml).toContain('Mapa');
@@ -205,7 +205,7 @@ describe('deterministicWebsiteBuilder', () => {
     expect(topicsJoined).not.toContain('home');
     expect(topicsJoined).not.toContain('about');
     expect(servicesJoined).not.toContain('services');
-    expect(servicesJoined).toContain('individual consultations');
+    expect(servicesJoined).not.toContain('individual consultations');
   });
 
   it('prefers verified pricing over generic placeholders in slot overrides', () => {
@@ -1046,5 +1046,81 @@ describe('deterministicWebsiteBuilder', () => {
     expect(perLocaleArtifacts.cz.indexHtml.toLowerCase()).not.toContain('contact the team');
     expect(perLocaleArtifacts.en.indexHtml).toContain('Contact the team');
     expect(perLocaleArtifacts.en.indexHtml).toContain('<html lang="en">');
+  });
+
+  it('diagnoses one failed run path and keeps corruption out after locale-filter stage', () => {
+    const verified = deriveVerifiedWebsiteContent([
+      {
+        attachmentId: 'url-diagnostic-1',
+        title: 'Source site',
+        source: 'project',
+        pageTitle: 'Unified Service Studio',
+        summary: 'Structured source',
+        extractedText: 'Poskytujeme provozni podporu. Individual sessions for enterprise teams.',
+        pages: [{ url: 'https://example.com', title: 'Home', summary: 'Home summary' }],
+        structuredData: {
+          sourceUrl: 'https://example.com',
+          pageTitle: 'Unified Service Studio',
+          visibleTextBlocks: [
+            'Poskytujeme provozni podporu pro firemni klienty.',
+            'Individual sessions for enterprise teams.',
+          ],
+          headings: ['Úvod', 'Services'],
+          paragraphs: [
+            'Poskytujeme provozni podporu pro firemni klienty.',
+            'Individual sessions for enterprise teams.',
+          ],
+          navigationLabels: ['Home', 'Contact'],
+          contactFields: {
+            emails: ['hello@example.com'],
+            phones: ['+420777888999'],
+            addresses: ['Main Street 1, Prague'],
+            mailtoLinks: ['mailto:hello@example.com'],
+            telLinks: ['tel:+420777888999'],
+          },
+          ctaTexts: ['Contact us'],
+          serviceNames: ['Provozni podpora', 'Individual sessions'],
+          pricingFields: ['From 80 EUR'],
+          extractedLinks: [{ href: 'https://example.com/services', label: 'Services', kind: 'http' }],
+          missingFields: [],
+          extractionWarnings: [],
+        },
+      },
+    ] as never);
+
+    const diagnostics = diagnoseDeterministicWebsiteRun({
+      projectName: 'Unified Service Studio',
+      projectDescription: 'Public website',
+      verified,
+      language: 'cz',
+    });
+
+    expect(
+      diagnostics.rawExtractedSourceFacts.bodyTextBlocks.some((entry) =>
+        entry.toLowerCase().includes('individual sessions for enterprise teams')
+      )
+    ).toBe(true);
+
+    expect(
+      diagnostics.localeFilteredFacts.bodyFacts.some((entry) =>
+        entry.toLowerCase().includes('individual sessions for enterprise teams')
+      )
+    ).toBe(false);
+
+    expect(
+      diagnostics.normalizedContentModel.services.some((entry) =>
+        entry.toLowerCase().includes('individual sessions')
+      )
+    ).toBe(false);
+
+    expect(diagnostics.phaseIssues.localeFilteredFacts.mixedLanguageLeakage).toBe(false);
+    expect(diagnostics.phaseIssues.normalizedWebsiteContentModel).toEqual({
+      mixedLanguageLeakage: false,
+      wrongSchemaOrArchetype: false,
+      noisyFragmentInclusion: false,
+      factLossToPlaceholder: false,
+      crossSlotContamination: false,
+    });
+    expect(diagnostics.firstCorruptionPoint).toBeNull();
   });
 });
