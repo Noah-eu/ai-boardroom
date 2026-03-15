@@ -244,6 +244,31 @@ export interface AttachmentIngestion {
     depth: number;
     rendered?: boolean;
   }>;
+  urlStructuredData?: {
+    sourceUrl: string;
+    pageTitle: string;
+    visibleTextBlocks: string[];
+    headings: string[];
+    paragraphs: string[];
+    navigationLabels: string[];
+    contactFields: {
+      emails: string[];
+      phones: string[];
+      addresses: string[];
+      mailtoLinks: string[];
+      telLinks: string[];
+    };
+    ctaTexts: string[];
+    serviceNames: string[];
+    pricingFields: string[];
+    extractedLinks: Array<{
+      href: string;
+      label: string;
+      kind: 'http' | 'mailto' | 'tel';
+    }>;
+    missingFields: string[];
+    extractionWarnings: string[];
+  };
   zipFileTree?: string[];
   zipKeyFiles?: Array<{ path: string; content: string }>;
   zipPdfFiles?: Array<{
@@ -353,6 +378,7 @@ export interface Project {
   executionSnapshot?: ExecutionSnapshot | null;
   latestStableBundle: ExecutionOutputBundle | null;
   latestStableFiles: ExecutionOutputFile[];
+  latestStableSummary?: string | null;
   latestStableUpdatedAt: Date | null;
   usage: ProjectUsage;
 }
@@ -403,6 +429,7 @@ export interface ExecutionSnapshot {
     summary?: string;
     extractedText?: string;
     pages?: Array<{ url: string; title: string; summary?: string; excerpt?: string }>;
+    structuredData?: AttachmentIngestion['urlStructuredData'];
   }>;
   missingInputNotes: string[];
 }

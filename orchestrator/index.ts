@@ -255,6 +255,7 @@ export function createProject(
     executionSnapshot: null,
     latestStableBundle: null,
     latestStableFiles: [],
+    latestStableSummary: null,
     latestStableUpdatedAt: null,
     usage: initialUsage,
   };

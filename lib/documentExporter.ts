@@ -572,7 +572,16 @@ function buildInvoiceXlsxBase64(result: InvoiceSummaryResult): string {
 }
 
 export function isBase64EncodedBundleFileContent(filePath: string, content: string): boolean {
-  return filePath.toLowerCase().endsWith('.xlsx') && content.startsWith(XLSX_BASE64_PREFIX);
+  if (!content.startsWith(XLSX_BASE64_PREFIX)) return false;
+  const lower = filePath.toLowerCase();
+  return (
+    lower.endsWith('.xlsx') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.webp') ||
+    lower.endsWith('.gif')
+  );
 }
 
 export function decodeBase64BundleFileContent(content: string): string {
