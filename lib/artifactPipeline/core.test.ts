@@ -445,3 +445,157 @@ describe('artifactPipeline core invariants', () => {
     expect(result.bundle.files.some((file) => file.path === 'summary.md')).toBe(false);
   });
 });
+
+describe('website public renderer isolation', () => {
+  it('suppresses URL attachment metadata labels from public website HTML sections', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'url-website-labels',
+        prompt: 'Create a product website.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        attachments: [
+          {
+            id: 'url-1',
+            kind: 'url',
+            title: 'Source page',
+            text: [
+              'Page title: Product API docs',
+              'Summary: This page explains endpoints and rate limits.',
+              'Pages: /about /contact',
+              'Site snapshot source URL: https://example.com',
+              'Pages visited: 3',
+            ].join('\n'),
+          },
+        ],
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+
+    expect(result.family).toBe('website');
+    // Internal metadata labels must not be section headings
+    expect(html).not.toContain('<h2>Page title</h2>');
+    expect(html).not.toContain('<h2>Summary</h2>');
+    expect(html).not.toContain('<h2>Pages</h2>');
+    expect(html).not.toContain('Site snapshot source URL');
+    expect(html).not.toContain('Pages visited');
+    expect(html).not.toMatch(/<h2>fact_\d+<\/h2>/);
+  });
+
+  it('does not expose Run ID in public website HTML or script.js', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'website-run-id-check',
+        prompt: 'Create a website.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+    const script = result.bundle.files.find((file) => file.path === 'script.js')?.content ?? '';
+    const metadata = result.bundle.files.find((file) => file.path === 'artifact-pipeline-metadata.json')?.content ?? '';
+
+    // Run ID must not appear in any public-facing file
+    expect(html).not.toContain('Run ID');
+    expect(html).not.toContain('website-run-id-check');
+    expect(script).not.toContain('website-run-id-check');
+    // But run ID must still be in internal diagnostics
+    expect(metadata).toContain('website-run-id-check');
+  });
+
+  it('maps structured prompt key-value pairs to user-facing section headings', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'structured-website',
+        prompt: 'About: We are a software company. Services: Web development and design. Contact: info@example.com.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+
+    expect(result.family).toBe('website');
+    expect(html).toContain('About');
+    expect(html).toContain('We are a software company');
+    expect(html).toContain('Services');
+    // No internal labels
+    expect(html).not.toMatch(/fact_\d+/);
+    expect(html).not.toContain('Page title');
+    expect(html).not.toContain('Run ID');
+  });
+
+  it('wraps unstructured prompt into a user-facing Overview section without fact labels', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'unstructured-website',
+        prompt: 'Create a company website for the new product launch.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+
+    expect(result.family).toBe('website');
+    // Content from prompt is present
+    expect(html).toContain('Create a company website for the new product launch');
+    // No raw fact label headings
+    expect(html).not.toMatch(/<h2>fact_\d+<\/h2>/);
+    expect(html).not.toContain('<h2>fact_1</h2>');
+  });
+
+  it('internal diagnostics are isolated to artifact-pipeline-metadata.json, not public HTML', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'diagnostics-separation',
+        prompt: 'Build a company website.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+    const metadata = result.bundle.files.find((file) => file.path === 'artifact-pipeline-metadata.json')?.content ?? '';
+
+    // runId, schemaId, family must NOT appear in visitor-facing HTML
+    expect(html).not.toContain('diagnostics-separation');
+    expect(html).not.toContain('schemaId');
+    expect(html).not.toContain('runId');
+    // But they must be present in the internal metadata artifact
+    expect(metadata).toContain('diagnostics-separation');
+    expect(metadata).toContain('schemaId');
+    expect(metadata).toContain('family');
+  });
+
+  it('URL attachment content supplements website without exposing attachment source URL', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'url-supplement',
+        prompt: 'Overview: Landing page for API product.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        attachments: [
+          {
+            id: 'url-2',
+            kind: 'url',
+            title: 'API docs',
+            text: 'Page title: API Docs\nSummary: Endpoints and limits\nSource URL: https://api.example.com\nPages visited: 2',
+          },
+        ],
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+
+    expect(result.family).toBe('website');
+    // Prompt-driven section must be present
+    expect(html).toContain('Landing page for API product');
+    // Attachment source metadata must not leak into HTML
+    expect(html).not.toContain('https://api.example.com');
+    expect(html).not.toContain('Pages visited');
+    expect(html).not.toContain('Source URL');
+  });
+});

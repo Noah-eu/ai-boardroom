@@ -346,6 +346,110 @@ function buildSchemaId(runId: string, family: ArtifactFamily, facts: VerifiedFac
   return `${family}:${runId}:${facts.length}:${Date.now().toString(36)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Website section builder — public-facing content only, no internal metadata
+// ---------------------------------------------------------------------------
+
+/**
+ * Patterns for fact keys that are internal metadata labels generated from URL
+ * snapshot text parsing. These must never appear as public website section headings.
+ */
+const WEBSITE_INTERNAL_HEADING_PATTERNS: RegExp[] = [
+  /^fact_\d+$/,
+  /^page\s*title$/i,
+  /^pages?\s*visited$/i,
+  /^pages?$/i,
+  /^summary$/i,
+  /^source\s*url/i,
+  /^site\s*snapshot/i,
+  /^url/i,
+  /^attachment/i,
+  /^run\s*id$/i,
+  /^jazyk$/i,
+  /^lang(uage)?$/i,
+  /^excerpt$/i,
+  /^description$/i,
+];
+
+function isWebsiteInternalHeading(key: string): boolean {
+  const normalized = key.trim().toLowerCase();
+  return WEBSITE_INTERNAL_HEADING_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function resolveWebsiteLanguageLabel(localeMode: LocaleMode): 'en' | 'cz' {
+  if (localeMode.type === 'single') return localeMode.targetLanguage;
+  return localeMode.locales[0] ?? 'en';
+}
+
+/**
+ * Builds public-facing website sections from verified facts.
+ *
+ * Strategy:
+ *  1. Use only PROMPT-derived facts to define section headings/bodies — these
+ *     reflect user intent.
+ *  2. If the prompt yields named key-value pairs (e.g. "About: We build…"),
+ *     map them to section heading + body directly.
+ *  3. If the prompt is unstructured (no explicit key-value pairs), aggregate
+ *     all prompt content into a single "Overview" section.
+ *  4. URL attachment metadata facts ("Page title", "Summary", "Source URL",
+ *     "Pages visited", "fact_N"…) are completely excluded from section
+ *     headings. They exist only in the internal artifact-pipeline-metadata.json.
+ */
+function buildWebsiteSections(
+  allFacts: VerifiedFact[],
+  localeMode: LocaleMode
+): { title: string; sections: Array<{ id: string; heading: string; body: string }> } {
+  const lang = resolveWebsiteLanguageLabel(localeMode);
+
+  const promptFacts = allFacts.filter((fact) => fact.source === 'prompt');
+
+  // Named facts: prompt facts with explicit structural key (not fact_N, not internal)
+  const namedPromptFacts = promptFacts.filter(
+    (fact) => !/^fact_\d+$/.test(fact.key) && !isWebsiteInternalHeading(fact.key)
+  );
+
+  // Aggregate all prompt content for unstructured fallback
+  const allPromptContent = promptFacts.map((fact) => fact.value).join(' ').trim();
+
+  let sections: Array<{ id: string; heading: string; body: string }>;
+
+  if (namedPromptFacts.length >= 1) {
+    // Well-structured prompt: key = section heading, value = body
+    sections = namedPromptFacts.slice(0, 6).map((fact, index) => ({
+      id: `section-${index + 1}`,
+      heading: fact.key,
+      body: fact.value,
+    }));
+  } else if (allPromptContent) {
+    // Unstructured prompt: wrap full prompt text into a single Overview section
+    sections = [
+      {
+        id: 'section-1',
+        heading: lang === 'cz' ? 'Přehled' : 'Overview',
+        body: allPromptContent,
+      },
+    ];
+  } else {
+    sections = [
+      {
+        id: 'section-1',
+        heading: lang === 'cz' ? 'Obsah' : 'Content',
+        body: lang === 'cz' ? 'Obsah webu bude doplněn.' : 'Website content will be added.',
+      },
+    ];
+  }
+
+  // Title: first named prompt fact VALUE, or first prompt fact VALUE, or generic label
+  const title =
+    namedPromptFacts[0]?.value ||
+    promptFacts[0]?.value ||
+    (lang === 'cz' ? 'Webová stránka' : 'Website');
+
+  return { title, sections };
+}
+
+// ---------------------------------------------------------------------------
+
 function resolveDocumentIntent(params: {
   promptFacts: VerifiedFact[];
   runtimeIntentHint?: DocumentArtifactIntent;
@@ -392,17 +496,13 @@ export function buildStructuredModel(params: {
   const schemaId = buildSchemaId(params.runId, params.family, facts);
 
   if (params.family === 'website') {
-    const sections = facts.slice(0, 6).map((fact, index) => ({
-      id: `section-${index + 1}`,
-      heading: fact.key,
-      body: fact.value,
-    }));
+    const { title, sections } = buildWebsiteSections(facts, params.localeMode);
     return {
       family: 'website',
       runId: params.runId,
       schemaId,
       localeMode: params.localeMode,
-      title: facts[0]?.value ?? 'Website',
+      title,
       sections,
     };
   }

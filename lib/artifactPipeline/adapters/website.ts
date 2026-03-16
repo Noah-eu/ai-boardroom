@@ -34,7 +34,7 @@ export function renderWebsiteArtifact(input: RenderWebsiteInput): ExecutionOutpu
     '<body>',
     `  <header><h1>${input.model.title}</h1></header>`,
     `  <main>${sectionHtml}</main>`,
-    `  <footer>Run ID: ${input.runId}</footer>`,
+    '  <footer><small>Powered by AI Boardroom</small></footer>',
     '  <script src="script.js"></script>',
     '</body>',
     '</html>',
@@ -54,10 +54,7 @@ export function renderWebsiteArtifact(input: RenderWebsiteInput): ExecutionOutpu
     'h1, h2 { margin: 0 0 0.4rem 0; }',
   ].join('\n');
 
-  const scriptJs = [
-    'const runId = ' + JSON.stringify(input.runId) + ';',
-    "console.info('[artifact-pipeline] website bundle ready', { runId });",
-  ].join('\n');
+  const scriptJs = "console.info('[artifact-pipeline] website bundle ready');";
 
   const readmeMd = [
     `# ${input.model.title}`,
