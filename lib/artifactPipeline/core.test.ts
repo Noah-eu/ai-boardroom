@@ -353,4 +353,89 @@ describe('artifactPipeline core invariants', () => {
     expect(planText).not.toContain('attached invoices only');
     expect(appText).not.toContain('implementation plan with milestones');
   });
+
+  it('routes website creation task to website adapter contract', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'intent-website-creation',
+        prompt: 'Create a company website with hero and contact section.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    expect(result.family).toBe('website');
+    expect(result.bundle.files.some((file) => file.path === 'index.html')).toBe(true);
+    expect(result.bundle.files.some((file) => file.path === 'app-manifest.json')).toBe(true);
+    expect(result.bundle.files.some((file) => file.path === 'invoice-summary.csv')).toBe(false);
+  });
+
+  it('routes URL description task to document summary adapter, not invoice exporter', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'intent-url-description',
+        prompt: 'Describe the content of attached URL page.',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        attachments: [
+          {
+            id: 'url-1',
+            kind: 'url',
+            title: 'Source page',
+            text: 'Page title: Product API docs. Summary: This page explains endpoints and limits.',
+          },
+        ],
+      },
+    });
+
+    expect(result.family).toBe('document');
+    expect(result.bundle.files.some((file) => file.path === 'summary.md')).toBe(true);
+    expect(result.bundle.files.some((file) => file.path === 'invoice-summary.csv')).toBe(false);
+    expect(result.bundle.files.some((file) => file.path === 'requested-table.csv')).toBe(false);
+  });
+
+  it('routes invoice extraction task to deterministic invoice exporter', () => {
+    const validatedRowsRaw = JSON.stringify({
+      rows: [
+        {
+          sourceFileName: 'invoice-1.pdf',
+          invoiceNumber: 'INV-001',
+          variableSymbol: '2026001',
+          currency: 'CZK',
+          amountInInvoiceCurrency: 1500,
+          amountType: 'overpayment',
+        },
+      ],
+    });
+
+    const summaryMetadataRaw = JSON.stringify({
+      invoiceCount: 1,
+      uniqueVariableSymbolCount: 1,
+      duplicateVariableSymbolCount: 0,
+      totalOverpayment: 1500,
+      totalUnderpayment: 0,
+      netTotal: 1500,
+      warnings: [],
+      duplicateVariableSymbols: [],
+      filesProcessed: ['invoice-1.pdf'],
+      filesFailed: [],
+    });
+
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'intent-invoice-extraction',
+        prompt: 'Extract invoice rows and export CSV/XLSX summary for accounting.',
+        outputTypeHint: 'document',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        sourceArtifacts: {
+          validatedRowsRaw,
+          summaryMetadataRaw,
+        },
+      },
+    });
+
+    expect(result.family).toBe('document');
+    expect(result.bundle.files.some((file) => file.path === 'invoice-summary.csv')).toBe(true);
+    expect(result.bundle.files.some((file) => file.path === 'invoice-summary.xlsx')).toBe(true);
+    expect(result.bundle.files.some((file) => file.path === 'summary.md')).toBe(false);
+  });
 });

@@ -6,6 +6,8 @@ interface DocumentStructuredModel {
   runId: string;
   schemaId: string;
   localeMode: { type: 'single'; targetLanguage: AppLanguage } | { type: 'multilingual'; locales: AppLanguage[] };
+  intent: 'summary-description' | 'invoice-extraction';
+  outputContract: 'document-summary-bundle' | 'invoice-export-bundle';
   title: string;
   summary: string;
   factsTable: Array<{ key: string; value: string }>;
@@ -49,21 +51,22 @@ function buildFallbackDocumentBundle(input: RenderDocumentInput): ExecutionOutpu
 
   return {
     status: 'success',
-    summary: `Document fallback bundle emitted from schema ${input.model.schemaId}.`,
+    summary: `Document summary bundle emitted from schema ${input.model.schemaId}.`,
     files: [
       { path: 'index.html', content: html },
+      { path: 'summary.md', content: `# ${input.model.title}\n\n${input.model.summary}` },
       { path: 'facts.json', content: JSON.stringify(input.model.factsTable, null, 2) },
     ],
-    notes: ['Document adapter fallback used fact table rendering.'],
+    notes: ['Document summary adapter rendered from current-run structured model only.'],
     removePaths: [],
   };
 }
 
 export function renderDocumentArtifact(input: RenderDocumentInput): ExecutionOutputBundle {
   const language = resolvePrimaryLanguage(input.localeMode);
-  const sourceArtifacts = input.model.sourceArtifacts;
+  const sourceArtifacts = input.model.sourceArtifacts ?? {};
 
-  if (sourceArtifacts?.validatedRowsRaw !== undefined || sourceArtifacts?.summaryMetadataRaw !== undefined) {
+  if (input.model.intent === 'invoice-extraction') {
     const deterministic = buildDeterministicDocumentExecutionBundle({
       validatedRowsRaw: sourceArtifacts.validatedRowsRaw,
       summaryMetadataRaw: sourceArtifacts.summaryMetadataRaw,

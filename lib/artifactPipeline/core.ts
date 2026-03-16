@@ -5,6 +5,7 @@ import { renderPlanArtifact } from './adapters/plan';
 import { renderWebsiteArtifact } from './adapters/website';
 
 export type ArtifactFamily = 'website' | 'app' | 'document' | 'plan';
+export type DocumentArtifactIntent = 'summary-description' | 'invoice-extraction';
 
 export type LocaleMode =
   | { type: 'single'; targetLanguage: AppLanguage }
@@ -89,6 +90,8 @@ interface DocumentStructuredModel {
   runId: string;
   schemaId: string;
   localeMode: LocaleMode;
+  intent: DocumentArtifactIntent;
+  outputContract: 'document-summary-bundle' | 'invoice-export-bundle';
   title: string;
   summary: string;
   factsTable: Array<{ key: string; value: string }>;
@@ -193,10 +196,23 @@ export function selectArtifactFamily(input: {
     /\bdokument\b/,
     /\btabulk\w*/,
   ];
+  const descriptionSignals = [
+    /\bdescribe\b/,
+    /\bdescription\b/,
+    /\bsummarize\b/,
+    /\bsummary of\b/,
+    /\bpage summary\b/,
+    /\bwebsite summary\b/,
+    /\bpopi[sš]\b/,
+    /\bpopis\b/,
+    /\bshrn\w*/,
+    /\bobsah\b/,
+  ];
   const planSignals = [/\bplan\b/, /\broadmap\b/, /\bexecution\b/, /\bimplementation\b/, /\breview notes\b/];
   const websiteSignals = [/\bwebsite\b/, /\blanding page\b/, /\bhomepage\b/, /\bsite\b/];
   const appSignals = [/\bapp\b/, /\bdashboard\b/, /\btool\b/, /\bmvp\b/, /\binternal\b/];
 
+  if (includesToken(normalized, descriptionSignals) && attachmentKinds.includes('url')) return 'document';
   if (includesToken(normalized, documentSignals)) return 'document';
   if (includesToken(normalized, planSignals)) return 'plan';
   if (includesToken(normalized, websiteSignals)) return 'website';
@@ -316,6 +332,41 @@ function buildSchemaId(runId: string, family: ArtifactFamily, facts: VerifiedFac
   return `${family}:${runId}:${facts.length}:${Date.now().toString(36)}`;
 }
 
+function resolveDocumentIntent(params: {
+  promptFacts: VerifiedFact[];
+  sourceArtifacts?: ArtifactPipelineInput['sourceArtifacts'];
+}): DocumentArtifactIntent {
+  const promptText = params.promptFacts
+    .map((fact) => `${fact.key} ${fact.value}`)
+    .join(' ')
+    .toLowerCase();
+
+  const extractionSignals = [
+    /\binvoice\b/,
+    /\binvoices\b/,
+    /\bfaktur\w*/,
+    /\baccounting\b/,
+    /\bextract\b/,
+    /\bextraction\b/,
+    /\bcsv\b/,
+    /\bxlsx\b/,
+    /\btabul\w*/,
+    /\bledger\b/,
+  ];
+
+  const hasExtractionSignal = extractionSignals.some((pattern) => pattern.test(promptText));
+  const hasStructuredArtifacts = Boolean(
+    (params.sourceArtifacts?.validatedRowsRaw ?? '').trim() ||
+      (params.sourceArtifacts?.summaryMetadataRaw ?? '').trim()
+  );
+
+  if (hasExtractionSignal || hasStructuredArtifacts) {
+    return 'invoice-extraction';
+  }
+
+  return 'summary-description';
+}
+
 export function buildStructuredModel(params: {
   runId: string;
   family: ArtifactFamily;
@@ -360,11 +411,19 @@ export function buildStructuredModel(params: {
   }
 
   if (params.family === 'document') {
+    const promptFacts = facts.filter((fact) => fact.source === 'prompt');
+    const intent = resolveDocumentIntent({
+      promptFacts,
+      sourceArtifacts: params.sourceArtifacts,
+    });
     return {
       family: 'document',
       runId: params.runId,
       schemaId,
       localeMode: params.localeMode,
+      intent,
+      outputContract:
+        intent === 'invoice-extraction' ? 'invoice-export-bundle' : 'document-summary-bundle',
       title: facts[0]?.value ?? 'Generated Document',
       summary: facts.map((fact) => `${fact.key}: ${fact.value}`).join(' | '),
       factsTable: facts.map((fact) => ({ key: fact.key, value: fact.value })),
