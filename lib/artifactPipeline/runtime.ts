@@ -12,6 +12,24 @@ function shorten(value: string, maxChars: number): string {
   return `${normalized.slice(0, maxChars)}...`;
 }
 
+function resolveCurrentRunPrompt(snapshot: Pick<ExecutionSnapshot, 'projectPrompt' | 'revisionPrompt'>): {
+  prompt: string;
+  source: 'projectPrompt' | 'revisionPrompt';
+} {
+  const revisionPrompt = snapshot.revisionPrompt?.trim();
+  if (revisionPrompt) {
+    return {
+      prompt: revisionPrompt,
+      source: 'revisionPrompt',
+    };
+  }
+
+  return {
+    prompt: snapshot.projectPrompt.trim(),
+    source: 'projectPrompt',
+  };
+}
+
 function buildSnapshotAttachments(snapshot: ExecutionSnapshot): ArtifactPipelineAttachmentInput[] {
   const pdfAttachments = snapshot.pdfTexts.map((entry) => ({
     id: entry.attachmentId,
@@ -90,25 +108,16 @@ export function buildArtifactPipelineExecutionInput(params: {
     summaryMetadataRaw?: string | null;
   };
 }): ArtifactPipelineInput {
+  const currentRunPrompt = resolveCurrentRunPrompt(params.snapshot);
+
   const family = params.family ?? selectArtifactFamily({
-    prompt: [params.project.name, params.project.description, params.project.latestRevisionFeedback ?? '', params.snapshot.projectPrompt].join(' '),
+    prompt: currentRunPrompt.prompt,
     outputTypeHint: params.project.outputType,
   });
 
-  const promptSections = [
-    `Project: ${params.project.name}`,
-    `Requested artifact family: ${family}`,
-    `Project prompt: ${params.snapshot.projectPrompt}`,
-    params.snapshot.revisionPrompt ? `Revision request: ${params.snapshot.revisionPrompt}` : '',
-    params.snapshot.approvedDebateSummary ? `Approved debate summary: ${params.snapshot.approvedDebateSummary}` : '',
-    params.snapshot.missingInputNotes.length > 0
-      ? `Missing inputs:\n${params.snapshot.missingInputNotes.map((note) => `- ${note}`).join('\n')}`
-      : '',
-  ].filter(Boolean);
-
   return {
     runId: `${params.project.id}-cycle-${params.snapshot.cycleNumber}-${family}`,
-    prompt: promptSections.join('\n\n'),
+    prompt: currentRunPrompt.prompt,
     outputTypeHint: params.project.outputType,
     localeMode: { type: 'single', targetLanguage: params.project.language as AppLanguage },
     attachments: buildSnapshotAttachments(params.snapshot as ExecutionSnapshot),
@@ -116,6 +125,15 @@ export function buildArtifactPipelineExecutionInput(params: {
     packaging: {
       mode: 'replace',
       previousFilePaths: params.project.latestStableFiles.map((file) => file.path),
+    },
+    runtimeMetadata: {
+      promptSource: currentRunPrompt.source,
+      cycleNumber: params.snapshot.cycleNumber,
+      requestedFamily: family,
+      orchestration: {
+        approvedDebateSummary: params.snapshot.approvedDebateSummary,
+        missingInputNotes: params.snapshot.missingInputNotes,
+      },
     },
   };
 }

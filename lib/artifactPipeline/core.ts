@@ -33,6 +33,15 @@ export interface ArtifactPipelineInput {
     mode?: 'replace' | 'patch';
     previousFilePaths?: string[];
   };
+  runtimeMetadata?: {
+    promptSource?: 'projectPrompt' | 'revisionPrompt';
+    cycleNumber?: number;
+    requestedFamily?: ArtifactFamily;
+    orchestration?: {
+      approvedDebateSummary?: string;
+      missingInputNotes?: string[];
+    };
+  };
 }
 
 export interface VerifiedFact {
@@ -54,6 +63,7 @@ interface NormalizedInput {
   attachments: Array<ArtifactPipelineAttachmentInput & { text: string }>;
   sourceArtifacts?: ArtifactPipelineInput['sourceArtifacts'];
   packaging?: ArtifactPipelineInput['packaging'];
+  runtimeMetadata?: ArtifactPipelineInput['runtimeMetadata'];
 }
 
 interface WebsiteStructuredModel {
@@ -209,6 +219,7 @@ export function normalizeInput(input: ArtifactPipelineInput): NormalizedInput {
     })),
     sourceArtifacts: input.sourceArtifacts,
     packaging: input.packaging,
+    runtimeMetadata: input.runtimeMetadata,
   };
 }
 
@@ -457,6 +468,7 @@ function packageArtifactBundle(params: {
   schemaId: string;
   factCount: number;
   packaging?: ArtifactPipelineInput['packaging'];
+  runtimeMetadata?: ArtifactPipelineInput['runtimeMetadata'];
   validationWarnings: string[];
 }): ExecutionOutputBundle {
   const baseFiles = params.bundle.files.map((file) => ({
@@ -475,6 +487,7 @@ function packageArtifactBundle(params: {
         factCount: params.factCount,
         validationWarnings: params.validationWarnings,
         packagingMode: params.packaging?.mode ?? 'patch',
+        runtimeMetadata: params.runtimeMetadata ?? null,
       },
       null,
       2
@@ -584,6 +597,7 @@ export function runArtifactPipeline(params: {
     schemaId: structuredModel.schemaId,
     factCount: facts.length,
     packaging: normalizedInput.packaging,
+    runtimeMetadata: normalizedInput.runtimeMetadata,
     validationWarnings,
   });
 

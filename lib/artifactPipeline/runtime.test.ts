@@ -106,6 +106,8 @@ describe('artifactPipeline runtime routing', () => {
     expect(input.localeMode).toEqual({ type: 'single', targetLanguage: 'cz' });
     expect(input.packaging).toEqual({ mode: 'replace', previousFilePaths: ['old.html'] });
     expect(input.attachments?.[0]?.kind).toBe('url');
-    expect(input.prompt).toContain('Requested artifact family: website');
+    expect(input.prompt).toBe('Uprav copy pro aktualni launch.');
+    expect(input.runtimeMetadata?.promptSource).toBe('revisionPrompt');
+    expect(input.runtimeMetadata?.orchestration?.approvedDebateSummary).toContain('Pouzit fakta z priloh');
   });
 });

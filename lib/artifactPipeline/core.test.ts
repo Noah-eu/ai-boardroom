@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runArtifactPipeline, selectArtifactFamily } from './core';
+import { buildArtifactPipelineExecutionInput } from './runtime';
 
 describe('artifactPipeline core invariants', () => {
   it('enforces run isolation and emits run-scoped metadata', () => {
@@ -230,5 +231,126 @@ describe('artifactPipeline core invariants', () => {
 
     expect(website.bundle.files.some((file) => file.path === 'execution-plan.md')).toBe(false);
     expect(plan.bundle.files.some((file) => file.path === 'app.js')).toBe(false);
+  });
+
+  it('prevents stale prompt leakage between run A website and run B URL description', () => {
+    const runA = runArtifactPipeline({
+      input: {
+        runId: 'leak-run-A',
+        prompt: 'Create a website for launch with hero CTA.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const runB = runArtifactPipeline({
+      input: {
+        runId: 'leak-run-B',
+        prompt: 'Describe the content of attached URL page.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        attachments: [
+          {
+            id: 'url-1',
+            kind: 'url',
+            title: 'URL snapshot',
+            text: 'Page title: Product docs. Summary: This page documents API limits.',
+          },
+        ],
+      },
+    });
+
+    const runAText = JSON.stringify(runA.structuredModel).toLowerCase();
+    const runBText = JSON.stringify(runB.structuredModel).toLowerCase();
+
+    expect(runAText).toContain('create a website');
+    expect(runBText).toContain('describe the content of attached url page');
+    expect(runBText).not.toContain('create a website for launch with hero cta');
+  });
+
+  it('keeps debate/planning text out of source facts while preserving runtime metadata', () => {
+    const pipelineInput = buildArtifactPipelineExecutionInput({
+      project: {
+        id: 'proj-iso',
+        outputType: 'website',
+        language: 'en',
+        name: 'Old project title',
+        description: 'Create a website',
+        latestRevisionFeedback: null,
+        latestStableFiles: [],
+      },
+      snapshot: {
+        cycleNumber: 5,
+        projectPrompt: 'Create a website',
+        revisionPrompt: 'Describe only URL content facts.',
+        approvedDebateSummary: 'Debate summary: prioritize conversion funnel and hero CTA.',
+        missingInputNotes: ['planning note: update sprint board'],
+        pdfTexts: [],
+        siteSnapshots: [
+          {
+            attachmentId: 'url-1',
+            title: 'URL',
+            source: 'project',
+            pageTitle: 'Docs',
+            summary: 'Reference docs',
+            extractedText: 'API rate limits and examples',
+            pages: [],
+          },
+        ],
+        zipSnapshots: [],
+        imageInputs: [],
+      },
+      family: 'website',
+    });
+
+    const result = runArtifactPipeline({ input: pipelineInput });
+    const factsText = result.facts.map((fact) => `${fact.key} ${fact.value}`).join(' ').toLowerCase();
+    const metadataFile = result.bundle.files.find((file) => file.path === 'artifact-pipeline-metadata.json')?.content ?? '';
+
+    expect(factsText).toContain('describe only url content facts');
+    expect(factsText).not.toContain('debate summary');
+    expect(factsText).not.toContain('hero cta');
+    expect(metadataFile).toContain('Debate summary');
+  });
+
+  it('preserves current-run prompt isolation across app/document/plan families', () => {
+    const app = runArtifactPipeline({
+      input: {
+        runId: 'isolation-app',
+        prompt: 'Build internal dashboard for finance team.',
+        outputTypeHint: 'app',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const document = runArtifactPipeline({
+      input: {
+        runId: 'isolation-document',
+        prompt: 'Extract document rows from attached invoices only.',
+        outputTypeHint: 'document',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const plan = runArtifactPipeline({
+      input: {
+        runId: 'isolation-plan',
+        prompt: 'Prepare implementation plan with milestones.',
+        outputTypeHint: 'plan',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const appText = JSON.stringify(app.structuredModel).toLowerCase();
+    const documentText = JSON.stringify(document.structuredModel).toLowerCase();
+    const planText = JSON.stringify(plan.structuredModel).toLowerCase();
+
+    expect(appText).toContain('build internal dashboard for finance team');
+    expect(documentText).toContain('extract document rows from attached invoices only');
+    expect(planText).toContain('prepare implementation plan with milestones');
+
+    expect(documentText).not.toContain('internal dashboard for finance team');
+    expect(planText).not.toContain('attached invoices only');
+    expect(appText).not.toContain('implementation plan with milestones');
   });
 });
