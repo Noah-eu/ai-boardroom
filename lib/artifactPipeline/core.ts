@@ -29,6 +29,10 @@ export interface ArtifactPipelineInput {
     validatedRowsRaw?: string | null;
     summaryMetadataRaw?: string | null;
   };
+  packaging?: {
+    mode?: 'replace' | 'patch';
+    previousFilePaths?: string[];
+  };
 }
 
 export interface VerifiedFact {
@@ -49,6 +53,7 @@ interface NormalizedInput {
   localeMode: LocaleMode;
   attachments: Array<ArtifactPipelineAttachmentInput & { text: string }>;
   sourceArtifacts?: ArtifactPipelineInput['sourceArtifacts'];
+  packaging?: ArtifactPipelineInput['packaging'];
 }
 
 interface WebsiteStructuredModel {
@@ -203,6 +208,7 @@ export function normalizeInput(input: ArtifactPipelineInput): NormalizedInput {
       text: normalizeWhitespace(attachment.text ?? ''),
     })),
     sourceArtifacts: input.sourceArtifacts,
+    packaging: input.packaging,
   };
 }
 
@@ -409,6 +415,95 @@ export function validateInvariants(params: {
   return warnings;
 }
 
+function validateStructuredModel(structuredModel: ArtifactStructuredModel, family: ArtifactFamily): string[] {
+  const warnings: string[] = [];
+
+  if (structuredModel.family !== family) {
+    warnings.push('structured_model_family_mismatch');
+  }
+
+  if (family === 'website') {
+    const model = structuredModel as WebsiteStructuredModel;
+    if (model.sections.length === 0) warnings.push('website_schema_empty');
+  }
+
+  if (family === 'app') {
+    const model = structuredModel as AppStructuredModel;
+    if (model.screens.length === 0) warnings.push('app_schema_empty');
+  }
+
+  if (family === 'document') {
+    const model = structuredModel as DocumentStructuredModel;
+    if (model.factsTable.length === 0 && !model.sourceArtifacts) warnings.push('document_schema_empty');
+  }
+
+  if (family === 'plan') {
+    const model = structuredModel as PlanStructuredModel;
+    if (model.phases.length === 0) warnings.push('plan_schema_empty');
+  }
+
+  return warnings;
+}
+
+function normalizeBundlePath(filePath: string): string {
+  return filePath.replace(/^\.\//, '').replace(/^\/+/, '').trim();
+}
+
+function packageArtifactBundle(params: {
+  bundle: ExecutionOutputBundle;
+  runId: string;
+  family: ArtifactFamily;
+  localeMode: LocaleMode;
+  schemaId: string;
+  factCount: number;
+  packaging?: ArtifactPipelineInput['packaging'];
+  validationWarnings: string[];
+}): ExecutionOutputBundle {
+  const baseFiles = params.bundle.files.map((file) => ({
+    path: normalizeBundlePath(file.path),
+    content: file.content,
+  }));
+
+  const metadataFile = {
+    path: 'artifact-pipeline-metadata.json',
+    content: JSON.stringify(
+      {
+        runId: params.runId,
+        family: params.family,
+        schemaId: params.schemaId,
+        localeMode: params.localeMode,
+        factCount: params.factCount,
+        validationWarnings: params.validationWarnings,
+        packagingMode: params.packaging?.mode ?? 'patch',
+      },
+      null,
+      2
+    ),
+  };
+
+  const files = [...baseFiles.filter((file) => file.path !== metadataFile.path), metadataFile];
+  const currentPaths = new Set(files.map((file) => file.path));
+  const inheritedRemovePaths = (params.bundle.removePaths ?? []).map((filePath) => normalizeBundlePath(filePath));
+  const replaceRemovePaths =
+    params.packaging?.mode === 'replace'
+      ? (params.packaging.previousFilePaths ?? [])
+          .map((filePath) => normalizeBundlePath(filePath))
+          .filter((filePath) => !currentPaths.has(filePath))
+      : [];
+
+  return {
+    ...params.bundle,
+    files,
+    notes: Array.from(
+      new Set([
+        ...(params.bundle.notes ?? []),
+        'Artifact pipeline packaging metadata emitted by common core.',
+      ])
+    ),
+    removePaths: Array.from(new Set([...inheritedRemovePaths, ...replaceRemovePaths])),
+  };
+}
+
 function renderFamilyBundle(params: {
   family: ArtifactFamily;
   model: ArtifactStructuredModel;
@@ -472,11 +567,24 @@ export function runArtifactPipeline(params: {
     previousRunIds: params.previousRunIds,
   });
 
-  const bundle = renderFamilyBundle({
+  validationWarnings.push(...validateStructuredModel(structuredModel, family));
+
+  const renderedBundle = renderFamilyBundle({
     family,
     model: structuredModel,
     localeMode: normalizedInput.localeMode,
     runId: normalizedInput.runId,
+  });
+
+  const bundle = packageArtifactBundle({
+    bundle: renderedBundle,
+    runId: normalizedInput.runId,
+    family,
+    localeMode: normalizedInput.localeMode,
+    schemaId: structuredModel.schemaId,
+    factCount: facts.length,
+    packaging: normalizedInput.packaging,
+    validationWarnings,
   });
 
   const planningSummary =

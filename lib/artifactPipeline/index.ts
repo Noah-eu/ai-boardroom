@@ -13,3 +13,9 @@ export {
   type LocaleMode,
   type VerifiedFact,
 } from './core';
+
+export {
+  buildArtifactPipelineExecutionInput,
+  resolveProjectArtifactFamily,
+  shouldRouteGeneratedFilesThroughArtifactPipeline,
+} from './runtime';

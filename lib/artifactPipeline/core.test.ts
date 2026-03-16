@@ -24,8 +24,27 @@ describe('artifactPipeline core invariants', () => {
 
     expect(runA.runId).toBe('run-A');
     expect(runB.runId).toBe('run-B');
-    expect(runB.bundle.files.find((file) => file.path === 'artifact-meta.json')?.content).toContain('run-B');
+    expect(runB.bundle.files.find((file) => file.path === 'artifact-pipeline-metadata.json')?.content).toContain('run-B');
     expect(runB.metadata.validationWarnings).not.toContain('cross_run_fact_contamination');
+  });
+
+  it('emits shared packaging metadata and removes stale files in replace mode', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'replace-mode',
+        prompt: 'Title: Replace mode website. Section: Fresh content.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        packaging: {
+          mode: 'replace',
+          previousFilePaths: ['old.html', 'styles.css'],
+        },
+      },
+    });
+
+    expect(result.bundle.files.some((file) => file.path === 'artifact-pipeline-metadata.json')).toBe(true);
+    expect(result.bundle.removePaths).toContain('old.html');
+    expect(result.bundle.removePaths).not.toContain('styles.css');
   });
 
   it('flags stale run reuse attempts', () => {

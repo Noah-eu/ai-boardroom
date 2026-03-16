@@ -42,19 +42,6 @@ export function renderPlanArtifact(input: RenderPlanInput): ExecutionOutputBundl
     files: [
       { path: 'execution-plan.md', content: planMd },
       { path: 'review-notes.md', content: reviewMd },
-      {
-        path: 'artifact-meta.json',
-        content: JSON.stringify(
-          {
-            family: 'plan',
-            runId: input.runId,
-            schemaId: input.model.schemaId,
-            localeMode: input.localeMode,
-          },
-          null,
-          2
-        ),
-      },
     ],
     notes: ['Plan adapter rendered from current-run structured model only.'],
     removePaths: [],

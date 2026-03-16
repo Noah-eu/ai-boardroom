@@ -53,19 +53,6 @@ function buildFallbackDocumentBundle(input: RenderDocumentInput): ExecutionOutpu
     files: [
       { path: 'index.html', content: html },
       { path: 'facts.json', content: JSON.stringify(input.model.factsTable, null, 2) },
-      {
-        path: 'artifact-meta.json',
-        content: JSON.stringify(
-          {
-            family: 'document',
-            runId: input.runId,
-            schemaId: input.model.schemaId,
-            localeMode: input.localeMode,
-          },
-          null,
-          2
-        ),
-      },
     ],
     notes: ['Document adapter fallback used fact table rendering.'],
     removePaths: [],

@@ -55,7 +55,12 @@ import {
 } from '@/orchestrator';
 import { createTask, patchTask } from '@/tasks';
 import { Language, TranslationKey, translate, translateWithVars } from '@/i18n';
-import { runArtifactPipeline, selectArtifactFamily } from '@/lib/artifactPipeline';
+import { runArtifactPipeline } from '@/lib/artifactPipeline';
+import {
+  buildArtifactPipelineExecutionInput,
+  resolveProjectArtifactFamily,
+  shouldRouteGeneratedFilesThroughArtifactPipeline,
+} from '@/lib/artifactPipeline/runtime';
 import {
   deriveDocumentTableIntent,
   isDocumentColumnValueMissing,
@@ -1476,6 +1481,16 @@ function artifactCanBeGeneratedLocally(
   task: Task,
   artifact: Task['producesArtifacts'][number]
 ): boolean {
+  if (
+    shouldRouteGeneratedFilesThroughArtifactPipeline({
+      project,
+      task,
+      artifactPath: artifact.path,
+      documentGeneratedFilesStage: isDocumentGeneratedFilesStage(project, task, artifact.path),
+    })
+  ) {
+    return true;
+  }
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
   if (decideExecutionPipeline(project) !== 'code') return false;
   if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') return true;
@@ -2191,11 +2206,7 @@ function isFailureTerminalStatus(status: Task['status']): boolean {
 type ExecutionPipelineKind = 'document' | 'code';
 
 function decideExecutionPipeline(project: Project): ExecutionPipelineKind {
-  const family = selectArtifactFamily({
-    prompt: [project.name, project.description, project.latestRevisionFeedback ?? ''].join(' '),
-    outputTypeHint: project.outputType,
-    attachmentKinds: (project.attachments ?? []).map((attachment) => attachment.kind),
-  });
+  const family = resolveProjectArtifactFamily(project);
 
   if (family === 'document') return 'document';
   return 'code';
@@ -5103,6 +5114,62 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           if (artifactCanBeGeneratedLocally(project, task, artifact)) {
             const builderBundle = findBuilderExecutionBundle(project.tasks);
 
+            if (
+              shouldRouteGeneratedFilesThroughArtifactPipeline({
+                project,
+                task,
+                artifactPath: artifact.path,
+                documentGeneratedFilesStage: isDocumentGeneratedFilesStage(project, task, artifact.path),
+              })
+            ) {
+              const family = isDocumentGeneratedFilesStage(project, task, artifact.path)
+                ? 'document'
+                : resolveProjectArtifactFamily(project);
+              const validatedRowsRaw = getLatestArtifactContent(project.tasks, 'validated-rows.json');
+              const summaryMetadataRaw = getLatestArtifactContent(project.tasks, 'summary-metadata.json');
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: generating ${artifact.path} through artifact-pipeline-v2 core (${family})`,
+              });
+
+              const generatedArtifact = runArtifactPipeline({
+                input: buildArtifactPipelineExecutionInput({
+                  project,
+                  snapshot,
+                  family,
+                  sourceArtifacts:
+                    family === 'document'
+                      ? {
+                          validatedRowsRaw,
+                          summaryMetadataRaw,
+                        }
+                      : undefined,
+                }),
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: generatedArtifact.bundle.summary,
+                rawContent: JSON.stringify(generatedArtifact.bundle, null, 2),
+                executionOutput: generatedArtifact.bundle,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: task.agent,
+                message:
+                  `${task.agent}: artifact-pipeline-v2 bundle ready ` +
+                  `(${generatedArtifact.family}, ${generatedArtifact.metadata.factCount} verified fact(s), ${generatedArtifact.bundle.files.length} file(s)).`,
+              });
+              continue;
+            }
+
             if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') {
               const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
               const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
@@ -5199,56 +5266,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
             failLiveTask(task.agent, `${task.agent}: unsupported local artifact generation target ${artifact.path}.`);
             return;
-          }
-
-          const isDeterministicDocumentExporterStage = isDocumentGeneratedFilesStage(
-            project,
-            task,
-            artifact.path
-          );
-
-          if (isDeterministicDocumentExporterStage) {
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              agent: task.agent,
-              message: `${task.agent}: generating deterministic document export bundle (no OpenAI call).`,
-            });
-
-            const validatedRowsRaw = getLatestArtifactContent(project.tasks, 'validated-rows.json');
-            const summaryMetadataRaw = getLatestArtifactContent(project.tasks, 'summary-metadata.json');
-
-            const deterministicExport = runArtifactPipeline({
-              input: {
-                runId: `${project.id}-cycle-${snapshot.cycleNumber}-builder`,
-                prompt: snapshot.projectPrompt,
-                outputTypeHint: 'document',
-                localeMode: { type: 'single', targetLanguage: project.language },
-                sourceArtifacts: {
-                  validatedRowsRaw,
-                  summaryMetadataRaw,
-                },
-              },
-            });
-
-            updatedArtifacts[index] = {
-              ...artifact,
-              content: deterministicExport.bundle.summary,
-              rawContent: JSON.stringify(deterministicExport.bundle, null, 2),
-              executionOutput: deterministicExport.bundle,
-              producedBy: task.agent,
-              generatedAt: new Date(),
-            };
-
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'success',
-              agent: task.agent,
-              message:
-                `${task.agent}: deterministic export bundle ready ` +
-                `(${deterministicExport.metadata.factCount} verified fact(s), ${deterministicExport.bundle.files.length} file(s)).`,
-            });
-            continue;
           }
 
           dispatch({

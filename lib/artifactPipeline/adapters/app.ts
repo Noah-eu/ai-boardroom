@@ -59,19 +59,6 @@ export function renderAppArtifact(input: RenderAppInput): ExecutionOutputBundle 
       { path: 'index.html', content: indexHtml },
       { path: 'styles.css', content: stylesCss },
       { path: 'app.js', content: appJs },
-      {
-        path: 'artifact-meta.json',
-        content: JSON.stringify(
-          {
-            family: 'app',
-            runId: input.runId,
-            schemaId: input.model.schemaId,
-            localeMode: input.localeMode,
-          },
-          null,
-          2
-        ),
-      },
     ],
     notes: ['App adapter rendered from current-run structured model only.'],
     removePaths: [],
