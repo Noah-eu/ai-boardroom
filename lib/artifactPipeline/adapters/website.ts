@@ -5,6 +5,10 @@ interface WebsiteStructuredModel {
   runId: string;
   schemaId: string;
   title: string;
+  contentProvenance?: {
+    titleSource: string;
+    sectionSources: string[];
+  };
   sections: Array<{ id: string; heading: string; body: string }>;
 }
 
@@ -86,6 +90,7 @@ export function renderWebsiteArtifact(input: RenderWebsiteInput): ExecutionOutpu
       runId: input.runId,
       entryPoint: 'index.html',
       sectionCount: input.model.sections.length,
+      contentProvenance: input.model.contentProvenance ?? null,
     },
     null,
     2

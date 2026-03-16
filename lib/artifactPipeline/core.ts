@@ -7,6 +7,14 @@ import { renderWebsiteArtifact } from './adapters/website';
 export type ArtifactFamily = 'website' | 'app' | 'document' | 'plan';
 export type DocumentArtifactIntent = 'summary-description' | 'invoice-extraction';
 
+export type WebsiteSectionProvenance = 'source-fact' | 'source-attachment' | 'neutral-fallback';
+export type WebsiteTitleProvenance = 'source-page-title' | 'source-named-fact' | 'neutral-fallback';
+
+export interface WebsiteContentProvenance {
+  titleSource: WebsiteTitleProvenance;
+  sectionSources: WebsiteSectionProvenance[];
+}
+
 export type LocaleMode =
   | { type: 'single'; targetLanguage: AppLanguage }
   | { type: 'multilingual'; locales: AppLanguage[] };
@@ -78,6 +86,7 @@ interface WebsiteStructuredModel {
   runId: string;
   schemaId: string;
   localeMode: LocaleMode;
+  contentProvenance: WebsiteContentProvenance;
   title: string;
   sections: Array<{ id: string; heading: string; body: string }>;
 }
@@ -351,8 +360,9 @@ function buildSchemaId(runId: string, family: ArtifactFamily, facts: VerifiedFac
 // ---------------------------------------------------------------------------
 
 /**
- * Patterns for fact keys that are internal metadata labels generated from URL
- * snapshot text parsing. These must never appear as public website section headings.
+ * Patterns for fact keys that encode URL snapshot internal metadata labels.
+ * These KEYS must never become public section headings. Their VALUES however
+ * are often useful content (e.g. "Page title" value → site title).
  */
 const WEBSITE_INTERNAL_HEADING_PATTERNS: RegExp[] = [
   /^fact_\d+$/,
@@ -371,9 +381,26 @@ const WEBSITE_INTERNAL_HEADING_PATTERNS: RegExp[] = [
   /^description$/i,
 ];
 
+/**
+ * Patterns for fact keys whose VALUES are URL paths, counts, or other
+ * non-copywriting metadata — excluded from section body content.
+ */
+const WEBSITE_URL_METADATA_KEY_PATTERNS: RegExp[] = [
+  /^source\s*(url|website)?$/i,
+  /^pages?\s*visited$/i,
+  /^pages?$/i,
+  /^url$/i,
+  /^site\s*snapshot/i,
+  /^attachment/i,
+];
+
 function isWebsiteInternalHeading(key: string): boolean {
   const normalized = key.trim().toLowerCase();
   return WEBSITE_INTERNAL_HEADING_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isUrlMetadataKey(key: string): boolean {
+  return WEBSITE_URL_METADATA_KEY_PATTERNS.some((pattern) => pattern.test(key.trim()));
 }
 
 function resolveWebsiteLanguageLabel(localeMode: LocaleMode): 'en' | 'cz' {
@@ -384,68 +411,152 @@ function resolveWebsiteLanguageLabel(localeMode: LocaleMode): 'en' | 'cz' {
 /**
  * Builds public-facing website sections from verified facts.
  *
- * Strategy:
- *  1. Use only PROMPT-derived facts to define section headings/bodies — these
- *     reflect user intent.
- *  2. If the prompt yields named key-value pairs (e.g. "About: We build…"),
- *     map them to section heading + body directly.
- *  3. If the prompt is unstructured (no explicit key-value pairs), aggregate
- *     all prompt content into a single "Overview" section.
- *  4. URL attachment metadata facts ("Page title", "Summary", "Source URL",
- *     "Pages visited", "fact_N"…) are completely excluded from section
- *     headings. They exist only in the internal artifact-pipeline-metadata.json.
+ * Priority 1 — User-structured prompt KV pairs:
+ *   Prompt contains explicit "Key: value" section definitions.
+ *   Site title comes from attachment page-title value if present, otherwise
+ *   from the first named prompt fact value.
+ *
+ * Priority 2 — Attachment-derived content (URL/PDF page facts):
+ *   Title from "Page title" attachment fact value.
+ *   Overview section from "Summary" attachment fact value.
+ *   Additional sections from other non-metadata attachment facts using their keys.
+ *   PROMPT TEXT IS NEVER USED AS PUBLIC COPY IN THIS PATH.
+ *
+ * Priority 3 — Neutral placeholder:
+ *   No structured prompt, no attachment content → generic placeholder copy.
+ *   PROMPT TEXT IS NEVER ECHOED AS PUBLIC WEBSITE COPY.
+ *
+ * Internal inspection fields (Run ID, schemaId, fact keys, source URLs…) are
+ * written only to artifact-pipeline-metadata.json and never to public HTML.
  */
 function buildWebsiteSections(
   allFacts: VerifiedFact[],
   localeMode: LocaleMode
-): { title: string; sections: Array<{ id: string; heading: string; body: string }> } {
+): {
+  title: string;
+  sections: Array<{ id: string; heading: string; body: string }>;
+  contentProvenance: WebsiteContentProvenance;
+} {
   const lang = resolveWebsiteLanguageLabel(localeMode);
-
   const promptFacts = allFacts.filter((fact) => fact.source === 'prompt');
+  const attachmentFacts = allFacts.filter((fact) => fact.source === 'attachment');
 
-  // Named facts: prompt facts with explicit structural key (not fact_N, not internal)
+  // Named prompt facts: user explicitly defined section KV pairs.
+  // fact_N keys and internal metadata labels are excluded.
   const namedPromptFacts = promptFacts.filter(
     (fact) => !/^fact_\d+$/.test(fact.key) && !isWebsiteInternalHeading(fact.key)
   );
 
-  // Aggregate all prompt content for unstructured fallback
-  const allPromptContent = promptFacts.map((fact) => fact.value).join(' ').trim();
+  // Attachment fact whose VALUE is the page/brand/site title
+  const attachmentTitleFact = attachmentFacts.find((fact) =>
+    /^page\s*title$/i.test(fact.key.trim())
+  );
 
-  let sections: Array<{ id: string; heading: string; body: string }>;
+  // Attachment fact whose VALUE is the page overview/summary text
+  const attachmentSummaryFact = attachmentFacts.find((fact) =>
+    /^summary$/i.test(fact.key.trim())
+  );
 
+  // Content-bearing attachment facts: VALUES are real copywriting content,
+  // not URL paths, page counts, or other non-copy metadata.
+  const contentAttachmentFacts = attachmentFacts.filter(
+    (fact) =>
+      !isWebsiteInternalHeading(fact.key) &&
+      !isUrlMetadataKey(fact.key) &&
+      fact.value.trim().length > 12
+  );
+
+  // ----------------------------------------------------------------
+  // Priority 1: User-structured prompt with explicit KV sections
+  // ----------------------------------------------------------------
   if (namedPromptFacts.length >= 1) {
-    // Well-structured prompt: key = section heading, value = body
-    sections = namedPromptFacts.slice(0, 6).map((fact, index) => ({
+    const title = attachmentTitleFact?.value || namedPromptFacts[0].value;
+    const titleSource: WebsiteTitleProvenance = attachmentTitleFact
+      ? 'source-page-title'
+      : 'source-named-fact';
+
+    const sections = namedPromptFacts.slice(0, 6).map((fact, index) => ({
       id: `section-${index + 1}`,
       heading: fact.key,
       body: fact.value,
     }));
-  } else if (allPromptContent) {
-    // Unstructured prompt: wrap full prompt text into a single Overview section
-    sections = [
-      {
+
+    return {
+      title,
+      sections,
+      contentProvenance: {
+        titleSource,
+        sectionSources: sections.map(() => 'source-fact' as WebsiteSectionProvenance),
+      },
+    };
+  }
+
+  // ----------------------------------------------------------------
+  // Priority 2: Attachment-derived content (URL/PDF page facts).
+  // Prompt text is NEVER used as public copy here.
+  // ----------------------------------------------------------------
+  if (attachmentTitleFact || attachmentSummaryFact || contentAttachmentFacts.length > 0) {
+    const title = attachmentTitleFact?.value || (lang === 'cz' ? 'Webová stránka' : 'Website');
+    const titleSource: WebsiteTitleProvenance = attachmentTitleFact
+      ? 'source-page-title'
+      : 'neutral-fallback';
+
+    const sections: Array<{ id: string; heading: string; body: string }> = [];
+    const sectionSources: WebsiteSectionProvenance[] = [];
+    const usedValues = new Set<string>();
+
+    if (attachmentSummaryFact) {
+      sections.push({
         id: 'section-1',
         heading: lang === 'cz' ? 'Přehled' : 'Overview',
-        body: allPromptContent,
-      },
-    ];
-  } else {
-    sections = [
+        body: attachmentSummaryFact.value,
+      });
+      sectionSources.push('source-attachment');
+      usedValues.add(attachmentSummaryFact.value);
+    }
+
+    for (const fact of contentAttachmentFacts) {
+      if (sections.length >= 4) break;
+      if (usedValues.has(fact.value)) continue;
+      usedValues.add(fact.value);
+      sections.push({
+        id: `section-${sections.length + 1}`,
+        heading: fact.key,
+        body: fact.value,
+      });
+      sectionSources.push('source-attachment');
+    }
+
+    if (sections.length === 0) {
+      sections.push({
+        id: 'section-1',
+        heading: lang === 'cz' ? 'Obsah' : 'Content',
+        body: lang === 'cz' ? 'Obsah webu bude doplněn.' : 'Website content will be added.',
+      });
+      sectionSources.push('neutral-fallback');
+    }
+
+    return { title, sections, contentProvenance: { titleSource, sectionSources } };
+  }
+
+  // ----------------------------------------------------------------
+  // Priority 3: No source facts — neutral placeholder.
+  // Prompt text is NEVER echoed as public website copy.
+  // ----------------------------------------------------------------
+  return {
+    title: lang === 'cz' ? 'Webová stránka' : 'Website',
+    sections: [
       {
         id: 'section-1',
         heading: lang === 'cz' ? 'Obsah' : 'Content',
         body: lang === 'cz' ? 'Obsah webu bude doplněn.' : 'Website content will be added.',
       },
-    ];
-  }
-
-  // Title: first named prompt fact VALUE, or first prompt fact VALUE, or generic label
-  const title =
-    namedPromptFacts[0]?.value ||
-    promptFacts[0]?.value ||
-    (lang === 'cz' ? 'Webová stránka' : 'Website');
-
-  return { title, sections };
+    ],
+    contentProvenance: {
+      titleSource: 'neutral-fallback',
+      sectionSources: ['neutral-fallback'],
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -496,12 +607,13 @@ export function buildStructuredModel(params: {
   const schemaId = buildSchemaId(params.runId, params.family, facts);
 
   if (params.family === 'website') {
-    const { title, sections } = buildWebsiteSections(facts, params.localeMode);
+    const { title, sections, contentProvenance } = buildWebsiteSections(facts, params.localeMode);
     return {
       family: 'website',
       runId: params.runId,
       schemaId,
       localeMode: params.localeMode,
+      contentProvenance,
       title,
       sections,
     };

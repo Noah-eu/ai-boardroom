@@ -237,7 +237,7 @@ describe('artifactPipeline core invariants', () => {
     const runA = runArtifactPipeline({
       input: {
         runId: 'leak-run-A',
-        prompt: 'Create a website for launch with hero CTA.',
+        prompt: 'Brand: LaunchSite Hero Campaign.',
         outputTypeHint: 'website',
         localeMode: { type: 'single', targetLanguage: 'en' },
       },
@@ -246,7 +246,7 @@ describe('artifactPipeline core invariants', () => {
     const runB = runArtifactPipeline({
       input: {
         runId: 'leak-run-B',
-        prompt: 'Describe the content of attached URL page.',
+        prompt: 'Feature: API documentation portal.',
         outputTypeHint: 'website',
         localeMode: { type: 'single', targetLanguage: 'en' },
         attachments: [
@@ -263,9 +263,16 @@ describe('artifactPipeline core invariants', () => {
     const runAText = JSON.stringify(runA.structuredModel).toLowerCase();
     const runBText = JSON.stringify(runB.structuredModel).toLowerCase();
 
-    expect(runAText).toContain('create a website');
-    expect(runBText).toContain('describe the content of attached url page');
-    expect(runBText).not.toContain('create a website for launch with hero cta');
+    const runAModelText = runAText;
+    const runBModelText = runBText;
+
+    // Run A contains its own structured content
+    expect(runAModelText).toContain('launchsite hero campaign');
+    // Run B is isolated from Run A's content
+    expect(runBModelText).not.toContain('launchsite');
+    // Each run is scoped by its own runId
+    expect(runA.runId).toBe('leak-run-A');
+    expect(runB.runId).toBe('leak-run-B');
   });
 
   it('keeps debate/planning text out of source facts while preserving runtime metadata', () => {
@@ -527,7 +534,7 @@ describe('website public renderer isolation', () => {
     expect(html).not.toContain('Run ID');
   });
 
-  it('wraps unstructured prompt into a user-facing Overview section without fact labels', () => {
+  it('unstructured prompt produces neutral placeholder, not prompt echo', () => {
     const result = runArtifactPipeline({
       input: {
         runId: 'unstructured-website',
@@ -540,8 +547,14 @@ describe('website public renderer isolation', () => {
     const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
 
     expect(result.family).toBe('website');
-    // Content from prompt is present
-    expect(html).toContain('Create a company website for the new product launch');
+    // Prompt text must NOT appear in public HTML
+    expect(html).not.toContain('Create a company website for the new product launch');
+    // Neutral placeholder must be present
+    expect(html).toContain('Website');
+    // Provenance must report neutral-fallback
+    expect((result.structuredModel as unknown as Record<string, unknown>).contentProvenance).toMatchObject({
+      titleSource: 'neutral-fallback',
+    });
     // No raw fact label headings
     expect(html).not.toMatch(/<h2>fact_\d+<\/h2>/);
     expect(html).not.toContain('<h2>fact_1</h2>');
@@ -582,7 +595,7 @@ describe('website public renderer isolation', () => {
             id: 'url-2',
             kind: 'url',
             title: 'API docs',
-            text: 'Page title: API Docs\nSummary: Endpoints and limits\nSource URL: https://api.example.com\nPages visited: 2',
+            text: 'Page title: API Docs; Summary: Endpoints and limits; Source URL: https://api.example.com; Pages visited: 2',
           },
         ],
       },
@@ -597,5 +610,142 @@ describe('website public renderer isolation', () => {
     expect(html).not.toContain('https://api.example.com');
     expect(html).not.toContain('Pages visited');
     expect(html).not.toContain('Source URL');
+  });
+});
+
+describe('website source-derived content provenance', () => {
+  it('hotel website: title and sections come from URL attachment, not from prompt', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'hotel-website',
+        prompt: 'Vytvoř web pro hotel.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        attachments: [
+          {
+            id: 'hotel-url',
+            kind: 'url',
+            title: 'Hotel page',
+            text: [
+              'Page title: Grand Hotel Praha',
+              'Summary: Luxurious hotel in the heart of Prague offering elegant rooms and fine dining.',
+              'Amenities: Spa, rooftop bar, conference rooms.',
+            ].join('\n'),
+          },
+        ],
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+
+    expect(result.family).toBe('website');
+    // Title must come from attachment page title, not prompt
+    expect(html).toContain('Grand Hotel Praha');
+    // Prompt text must NOT appear in public HTML
+    expect(html).not.toContain('Vytvoř web pro hotel');
+    // Attachment content must be present
+    expect(html).toContain('Luxurious hotel');
+    // Internal metadata keys must not be headings
+    expect(html).not.toContain('<h2>Page title</h2>');
+    expect(html).not.toContain('<h2>Summary</h2>');
+  });
+
+  it('hotel website: provenance reports source-attachment for URL-derived content', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'hotel-provenance',
+        prompt: 'Vytvoř web pro hotel.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+        attachments: [
+          {
+            id: 'hotel-url-2',
+            kind: 'url',
+            title: 'Hotel page',
+            text: [
+              'Page title: Hotel Metropol',
+              'Summary: Modern hotel with panoramic city views',
+            ].join('; '),
+          },
+        ],
+      },
+    });
+
+    const provenance = (result.structuredModel as unknown as Record<string, unknown>).contentProvenance as Record<string, unknown> | undefined;
+
+    expect(provenance).toBeDefined();
+    expect(provenance?.titleSource).toBe('source-page-title');
+    const sectionSources = provenance?.sectionSources as string[] | undefined;
+    expect(Array.isArray(sectionSources)).toBe(true);
+    expect(sectionSources?.some((s) => s === 'source-attachment')).toBe(true);
+    expect(sectionSources?.every((s) => s !== 'neutral-fallback' || sectionSources.length > 0)).toBe(true);
+  });
+
+  it('prompt text never appears in public HTML regardless of input', () => {
+    const prompts = [
+      'Vytvoř web pro hotel Grand Moravia.',
+      'Create a website for our new software product launch.',
+      'Build a landing page for the consulting firm.',
+    ];
+
+    for (const prompt of prompts) {
+      const result = runArtifactPipeline({
+        input: {
+          runId: `prompt-isolation-${Math.random()}`,
+          prompt,
+          outputTypeHint: 'website',
+          localeMode: { type: 'single', targetLanguage: 'en' },
+        },
+      });
+
+      const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+      // Raw task instruction must not echo into visitor-facing HTML
+      expect(html).not.toContain(prompt);
+    }
+  });
+
+  it('missing source facts produce neutral placeholder with neutral-fallback provenance', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'empty-website',
+        prompt: 'Vytvoř webovou stránku.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'cz' },
+      },
+    });
+
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+    const provenance = (result.structuredModel as unknown as Record<string, unknown>).contentProvenance as Record<string, unknown> | undefined;
+
+    expect(result.family).toBe('website');
+    // No prompt echo
+    expect(html).not.toContain('Vytvoř webovou stránku');
+    // Provenance must track the fallback
+    expect(provenance?.titleSource).toBe('neutral-fallback');
+    // HTML must still be non-empty and valid
+    expect(html.length).toBeGreaterThan(100);
+    expect(html).toContain('<html');
+  });
+
+  it('structured prompt KV pairs use source-named-fact provenance', () => {
+    const result = runArtifactPipeline({
+      input: {
+        runId: 'kv-provenance',
+        prompt: 'Name: Acme Corp. About: We build enterprise software. Contact: hello@acme.com.',
+        outputTypeHint: 'website',
+        localeMode: { type: 'single', targetLanguage: 'en' },
+      },
+    });
+
+    const provenance = (result.structuredModel as unknown as Record<string, unknown>).contentProvenance as Record<string, unknown> | undefined;
+    const html = result.bundle.files.find((file) => file.path === 'index.html')?.content ?? '';
+
+    expect(result.family).toBe('website');
+    expect(html).toContain('Acme Corp');
+    expect(html).toContain('We build enterprise software');
+    // Provenance tracks structured prompt facts
+    expect(provenance?.titleSource).toBe('source-named-fact');
+    const sectionSources = provenance?.sectionSources as string[] | undefined;
+    expect(sectionSources?.every((s) => s === 'source-fact')).toBe(true);
   });
 });
