@@ -79,6 +79,7 @@ import {
   mergeVerifiedWebsiteContent,
   type VerifiedWebsiteContent,
   type WebsiteCopySections,
+  type WebsiteSectionHeadingOverrides,
 } from '@/lib/deterministicWebsiteBuilder';
 import {
   getLatestArtifactContentWithinWindow,
@@ -1600,6 +1601,24 @@ function hasSegmentedWebsiteCrossRunRisk(tasks: Task[], snapshot: ExecutionSnaps
       minGeneratedAt: snapshot.createdAt,
     })
   );
+}
+
+function resolveWebsiteSectionHeadingOverrides(
+  schema: WebsiteSchemaSelection | undefined
+): WebsiteSectionHeadingOverrides | undefined {
+  if (!schema) return undefined;
+
+  const lookup = new Map(schema.sections.map((section) => [section.slot, section.copyTaskLabel] as const));
+
+  return {
+    heroSectionLabel: lookup.get('hero'),
+    aboutHeading: lookup.get('about'),
+    approachHeading: lookup.get('approach'),
+    topicsHeading: lookup.get('topics'),
+    servicesPricingHeading: lookup.get('servicesPricing'),
+    contactHeading: lookup.get('contact'),
+    mapHeading: lookup.get('map'),
+  };
 }
 
 function hasWebsiteAttachmentSignals(project: Project): boolean {
@@ -5985,6 +6004,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               }
 
               const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(project.tasks, snapshot);
+              const sectionHeadingOverrides = resolveWebsiteSectionHeadingOverrides(websiteModel?.schema);
               const crossRunRisk = hasSegmentedWebsiteCrossRunRisk(project.tasks, snapshot);
 
               if (artifact.path === 'index.html') {
@@ -5992,6 +6012,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   projectName: project.name,
                   verified: verifiedContent,
                   copySections: sectionOverrides,
+                  sectionHeadingOverrides,
                   language: project.language,
                   crossRunContamination: crossRunRisk,
                 });
@@ -6012,6 +6033,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 projectDescription: project.description,
                 verified: verifiedContent,
                 copySections: sectionOverrides,
+                sectionHeadingOverrides,
                 language: project.language,
                 portraitImage: (() => {
                   const portraitPlan = buildPortraitAssetPlan(snapshot);

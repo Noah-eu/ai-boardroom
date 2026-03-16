@@ -8,7 +8,35 @@ import {
   hasSufficientVerifiedWebsiteContent,
   mergeVerifiedWebsiteContent,
   validatePublicWebsiteHtml,
+  type WebsiteSectionHeadingOverrides,
 } from './deterministicWebsiteBuilder';
+import { createWebsiteCopyTaskPlan, selectWebsiteSectionSchema } from './websiteSectionSchema';
+
+function sectionHeadingOverridesFromSchema(taskIntentText: string, language: 'en' | 'cz', prompt: string): {
+  overrides: WebsiteSectionHeadingOverrides;
+  taskPlan: Array<{ slot: string; artifactPath: string; taskTitleLabel: string }>;
+} {
+  const verified = deriveVerifiedWebsiteContentFromPrompt({
+    projectName: 'Schema Probe',
+    projectPrompt: prompt,
+  });
+  const schema = selectWebsiteSectionSchema({ taskIntentText, language, verifiedFacts: verified });
+  const taskPlan = createWebsiteCopyTaskPlan(schema);
+
+  const lookup = new Map(taskPlan.map((entry) => [entry.slot, entry.taskTitleLabel] as const));
+  return {
+    overrides: {
+      heroSectionLabel: lookup.get('hero'),
+      aboutHeading: lookup.get('about'),
+      approachHeading: lookup.get('approach'),
+      topicsHeading: lookup.get('topics'),
+      servicesPricingHeading: lookup.get('servicesPricing'),
+      contactHeading: lookup.get('contact'),
+      mapHeading: lookup.get('map'),
+    },
+    taskPlan,
+  };
+}
 
 describe('deterministicWebsiteBuilder', () => {
   it('builds deployable artifacts from verified structured snapshot', () => {
@@ -575,5 +603,118 @@ describe('deterministicWebsiteBuilder', () => {
     expect(diagnostics.firstCorruptionPoint).toBe('raw-extracted-source-facts');
     expect(diagnostics.phases[0].issues.crossRunContamination).toBe(true);
     expect(Object.values(diagnostics.phases[0].issues).some(Boolean)).toBe(true);
+  });
+
+  it('keeps company/service schema headings in final HTML', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Harbor Suites',
+      projectPrompt: [
+        'About us: Boutique accommodation with premium service.',
+        'Services: Deluxe room, Family room, Airport transfer',
+        'Pricing: From 220 EUR per night',
+        'Contact: reservations@harbor.example, +420 777 100 200',
+        'Address: Riverside 12, Prague',
+      ].join('\n'),
+    });
+
+    const schemaInput = sectionHeadingOverridesFromSchema(
+      [
+        'Create a public company website for Harbor Suites.',
+        'Use neutral service-business structure for visitors.',
+      ].join('\n'),
+      'en',
+      'Company website content with offerings, pricing, contact and location.'
+    );
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Harbor Suites',
+      projectDescription: 'Company website',
+      verified,
+      language: 'en',
+      sectionHeadingOverrides: schemaInput.overrides,
+    });
+
+    expect(artifacts.indexHtml).toContain('<h2>Overview</h2>');
+    expect(artifacts.indexHtml).toContain('<h2>Value Proposition</h2>');
+    expect(artifacts.indexHtml).toContain('<h2>Offerings</h2>');
+    expect(artifacts.indexHtml).toContain('<h2>Location</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>About</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Approach and Education</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Topics</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Map</h2>');
+  });
+
+  it('keeps personal/profile schema headings in final HTML', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Personal Practice',
+      projectPrompt: [
+        'About me: I provide individual sessions.',
+        'My approach: structured and empathetic.',
+        'Services: Individual sessions',
+        'Pricing: From 90 EUR',
+        'Contact: hello@practice.example',
+      ].join('\n'),
+    });
+
+    const schemaInput = sectionHeadingOverridesFromSchema(
+      [
+        'Create my personal profile website.',
+        'About me and my approach are primary sections.',
+      ].join('\n'),
+      'en',
+      'Personal profile with about me and my approach.'
+    );
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Personal Practice',
+      projectDescription: 'Personal profile website',
+      verified,
+      language: 'en',
+      sectionHeadingOverrides: schemaInput.overrides,
+    });
+
+    expect(artifacts.indexHtml).toContain('<h2>About</h2>');
+    expect(artifacts.indexHtml).toContain('<h2>Approach and Education</h2>');
+    expect(artifacts.indexHtml).toContain('<h2>Topics</h2>');
+    expect(artifacts.indexHtml).toContain('<h2>Map</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Overview</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Value Proposition</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Offerings</h2>');
+    expect(artifacts.indexHtml).not.toContain('<h2>Location</h2>');
+  });
+
+  it('keeps section artifact labels semantically aligned with final headings', () => {
+    const verified = deriveVerifiedWebsiteContentFromPrompt({
+      projectName: 'Service Studio',
+      projectPrompt: [
+        'About us: Advisory studio for business clients.',
+        'Services: Audit, Consulting, Support',
+        'Pricing: From 120 EUR',
+        'Contact: hello@service.example',
+        'Address: Main 10, Prague',
+      ].join('\n'),
+    });
+
+    const schemaInput = sectionHeadingOverridesFromSchema(
+      'Build a neutral company website for Service Studio with offerings and location.',
+      'en',
+      'Company profile with services and pricing.'
+    );
+
+    const artifacts = buildDeterministicWebsiteArtifacts({
+      projectName: 'Service Studio',
+      projectDescription: 'Company website',
+      verified,
+      language: 'en',
+      sectionHeadingOverrides: schemaInput.overrides,
+    });
+
+    schemaInput.taskPlan.forEach((entry) => {
+      if (entry.slot === 'hero') {
+        expect(artifacts.indexHtml).toContain(`section-label">${entry.taskTitleLabel}<`);
+        return;
+      }
+      expect(artifacts.indexHtml).toContain(`<h2>${entry.taskTitleLabel}</h2>`);
+    });
   });
 });

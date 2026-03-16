@@ -54,6 +54,16 @@ export type WebsiteCopySections = {
   };
 };
 
+export type WebsiteSectionHeadingOverrides = Partial<{
+  heroSectionLabel: string;
+  aboutHeading: string;
+  approachHeading: string;
+  topicsHeading: string;
+  servicesPricingHeading: string;
+  contactHeading: string;
+  mapHeading: string;
+}>;
+
 export type PromptWebsiteExtractionInput = {
   projectName?: string;
   projectDescription?: string;
@@ -212,6 +222,24 @@ function getLocalizedWebsiteLabels(language: AppLanguage): LocalizedWebsiteLabel
     mapLinkLabel: 'Otevřít mapu',
     emptyListNote: 'Detaily budou doplněny po ověření zdrojů.',
     noContactNote: 'Kontaktní údaje zatím nejsou veřejně uvedeny.',
+  };
+}
+
+function applySectionHeadingOverrides(
+  base: LocalizedWebsiteLabels,
+  overrides?: WebsiteSectionHeadingOverrides
+): LocalizedWebsiteLabels {
+  if (!overrides) return base;
+
+  return {
+    ...base,
+    heroSectionLabel: sanitizePublicText(overrides.heroSectionLabel) ?? base.heroSectionLabel,
+    aboutHeading: sanitizePublicText(overrides.aboutHeading) ?? base.aboutHeading,
+    approachHeading: sanitizePublicText(overrides.approachHeading) ?? base.approachHeading,
+    topicsHeading: sanitizePublicText(overrides.topicsHeading) ?? base.topicsHeading,
+    servicesPricingHeading: sanitizePublicText(overrides.servicesPricingHeading) ?? base.servicesPricingHeading,
+    contactHeading: sanitizePublicText(overrides.contactHeading) ?? base.contactHeading,
+    mapHeading: sanitizePublicText(overrides.mapHeading) ?? base.mapHeading,
   };
 }
 
@@ -651,9 +679,13 @@ function buildPublicWebsiteViewModel(params: {
   verified: VerifiedWebsiteContent;
   copySections?: Partial<WebsiteCopySections>;
   language?: AppLanguage;
+  sectionHeadingOverrides?: WebsiteSectionHeadingOverrides;
 }): PublicWebsiteViewModel {
   const language = params.language ?? 'cz';
-  const labels = getLocalizedWebsiteLabels(language);
+  const labels = applySectionHeadingOverrides(
+    getLocalizedWebsiteLabels(language),
+    params.sectionHeadingOverrides
+  );
   const title = humanTitle(sanitizePublicText(params.verified.pageTitle) || params.projectName || 'Website');
 
   const sanitizedNavigationLabels = sanitizePublicList(params.verified.navigationLabels, 30, {
@@ -1219,6 +1251,7 @@ export function buildDeterministicWebsiteRenderDiagnostics(params: {
   copySections?: Partial<WebsiteCopySections>;
   language?: AppLanguage;
   crossRunContamination?: boolean;
+  sectionHeadingOverrides?: WebsiteSectionHeadingOverrides;
 }): WebsiteRenderDiagnostics {
   const language = params.language ?? 'cz';
   const model = buildPublicWebsiteViewModel({
@@ -1226,6 +1259,7 @@ export function buildDeterministicWebsiteRenderDiagnostics(params: {
     verified: params.verified,
     copySections: params.copySections,
     language,
+    sectionHeadingOverrides: params.sectionHeadingOverrides,
   });
 
   const rawFacts = [
@@ -1452,12 +1486,14 @@ export function buildDeterministicWebsiteArtifacts(params: {
   portraitImage?: WebsitePortraitImage | null;
   copySections?: Partial<WebsiteCopySections>;
   language?: AppLanguage;
+  sectionHeadingOverrides?: WebsiteSectionHeadingOverrides;
 }): DeterministicWebsiteArtifacts {
   const model = buildPublicWebsiteViewModel({
     projectName: params.projectName,
     verified: params.verified,
     copySections: params.copySections,
     language: params.language,
+    sectionHeadingOverrides: params.sectionHeadingOverrides,
   });
 
   const indexHtml = buildPublicHtml({
