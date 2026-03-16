@@ -62,6 +62,12 @@ import {
   shouldRouteGeneratedFilesThroughArtifactPipeline,
 } from '@/lib/artifactPipeline/runtime';
 import {
+  buildAttachmentRuntimeEntries,
+  getAttachmentIngestionBlockers,
+  resolveAttachmentRuntimeState,
+  sanitizeAttachmentIngestionForMerge,
+} from '@/lib/artifactPipeline/attachmentIngestionState';
+import {
   deriveDocumentTableIntent,
   isDocumentColumnValueMissing,
   resolveDocumentColumnValue,
@@ -2809,20 +2815,16 @@ function appReducer(state: AppState, action: Action): AppState {
         attachments: project.attachments.map((attachment) =>
           attachment.id === action.attachmentId
             ? (() => {
-                const merged = {
-                  ...attachment.ingestion,
-                  ...action.ingestion,
-                };
-                const mergedStatus = merged.status;
-                if (!mergedStatus) {
+                const merged = sanitizeAttachmentIngestionForMerge({
+                  current: attachment.ingestion,
+                  patch: action.ingestion,
+                });
+                if (!merged?.status) {
                   return attachment;
                 }
                 return {
                   ...attachment,
-                  ingestion: {
-                    ...merged,
-                    status: mergedStatus,
-                  },
+                  ingestion: merged,
                 };
               })()
             : attachment
@@ -3132,6 +3134,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const runtimeState = resolveAttachmentRuntimeState(attachment);
       let included = false;
 
       const hasValidImageUrl = attachment.kind === 'image' ? resolveAttachmentImageUrl(attachment) : null;
@@ -3157,7 +3160,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         included = true;
       }
 
-      if (ingestion?.extractedText) {
+      if (runtimeState === 'parsed' && ingestion?.extractedText) {
         textSections.push({
           title: attachment.title,
           kind: attachment.kind,
@@ -3165,7 +3168,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           text: ingestion.extractedText,
         });
         included = true;
-      } else if (attachment.kind === 'zip' && ingestion?.zipFileTree) {
+      } else if (runtimeState === 'parsed' && attachment.kind === 'zip' && ingestion?.zipFileTree) {
         const zipSummary = [
           `File tree:\n${ingestion.zipFileTree.slice(0, 80).join('\n')}`,
           ingestion.zipKeyFiles?.length
@@ -3232,6 +3235,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const runtimeState = resolveAttachmentRuntimeState(attachment);
 
       if (attachment.kind === 'image') {
         const resolvedUrl = resolveAttachmentImageUrl(attachment);
@@ -3249,7 +3253,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'pdf') {
-        if (ingestion?.extractedText?.trim()) {
+        if (runtimeState === 'parsed' && ingestion?.extractedText?.trim()) {
           pdfTexts.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -3257,12 +3261,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             text: shorten(ingestion.extractedText, 24_000),
           });
         } else {
-          missingInputNotes.push(`PDF text missing or unreadable: ${attachment.title}`);
+          const reason = runtimeState === 'failed' ? 'failed ingest' : 'pending ingest';
+          missingInputNotes.push(`PDF text missing or unreadable (${reason}): ${attachment.title}`);
         }
       }
 
       if (attachment.kind === 'zip') {
-        if (ingestion?.zipFileTree?.length) {
+        if (runtimeState === 'parsed' && ingestion?.zipFileTree?.length) {
           const zipPdfFiles = (ingestion.zipPdfFiles ?? []).map((file) => ({
             path: file.path,
             status: file.status,
@@ -3299,12 +3304,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             pdfFiles: zipPdfFiles,
           });
         } else {
-          missingInputNotes.push(`ZIP tree missing or unreadable: ${attachment.title}`);
+          const reason = runtimeState === 'failed' ? 'failed ingest' : 'pending ingest';
+          missingInputNotes.push(`ZIP tree missing or unreadable (${reason}): ${attachment.title}`);
         }
       }
 
       if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
+        if (runtimeState === 'parsed' && (ingestion?.extractedText || ingestion?.urlPages?.length)) {
           siteSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -3320,7 +3326,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             })),
           });
         } else {
-          missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
+          if (runtimeState === 'failed') {
+            missingInputNotes.push(`URL attachment failed ingest: ${attachment.title}`);
+          } else {
+            missingInputNotes.push(`URL attachment parsed content pending: ${attachment.title}`);
+          }
         }
       }
     }
@@ -6413,6 +6423,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearInterval(previous);
       }
 
+      const attachmentRuntimeEntries = buildAttachmentRuntimeEntries(project.attachments);
+      const urlEntries = attachmentRuntimeEntries.filter((entry) => entry.kind === 'url');
+      const urlParsed = urlEntries.filter((entry) => entry.state === 'parsed');
+      const urlBlockers = getAttachmentIngestionBlockers(attachmentRuntimeEntries, ['url']);
+
+      if (urlEntries.length > 0) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          message:
+            `URL attachment states: parsed=${urlParsed.length}, ` +
+            `pending=${urlBlockers.pending.length}, failed=${urlBlockers.failed.length}`,
+        });
+      }
+
+      if (urlBlockers.failed.length > 0 || urlBlockers.pending.length > 0) {
+        const failedTitles = urlBlockers.failed.map((entry) => entry.title).join(', ');
+        const pendingTitles = urlBlockers.pending.map((entry) => entry.title).join(', ');
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          message:
+            'Execution blocked: URL attachments are not ready for verified source facts. ' +
+            (failedTitles ? `failed=[${failedTitles}] ` : '') +
+            (pendingTitles ? `pending=[${pendingTitles}]` : ''),
+        });
+        return;
+      }
+
       const taskGraph = generateExecutionTaskGraph(project);
       const selectedPipeline = decideExecutionPipeline(project);
 
@@ -6603,6 +6642,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
+        dispatch({
+          type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+          projectId,
+          attachmentId: attachment.id,
+          ingestion: {
+            status: 'uploaded',
+            summary: 'Ingestion in progress.',
+          },
+        });
+
         if (attachment.kind === 'url') {
           dispatch({
             type: 'ADD_LOG',
@@ -6629,10 +6678,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }),
         });
 
-        const body = (await response.json()) as AttachmentIngestApiResponse;
+        const rawBody = await response.text();
+        let body: AttachmentIngestApiResponse | null = null;
+        try {
+          body = JSON.parse(rawBody) as AttachmentIngestApiResponse;
+        } catch {
+          body = null;
+        }
+
+        if (!body) {
+          throw new Error(
+            `Attachment ingestion returned non-JSON payload (HTTP ${response.status}). ` +
+              `Body preview: ${rawBody.slice(0, 200).replace(/\s+/g, ' ')}`
+          );
+        }
+
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
           throw new Error(body.error ?? 'Attachment ingestion failed');
+        }
+
+        if (attachment.kind === 'url') {
+          const runtimeState = resolveAttachmentRuntimeState({
+            kind: attachment.kind,
+            ingestion: ingest,
+          });
+
+          if (runtimeState !== 'parsed') {
+            throw new Error('URL ingestion finished without parsed content.');
+          }
         }
 
         if (attachment.kind === 'url') {
@@ -6653,6 +6727,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             type: 'ADD_LOG',
             level: 'info',
             message: `Readable text extracted: ${ingest.extractedText?.length ?? 0} chars`,
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            message: `URL attachment state: successfully parsed`,
           });
         }
 
@@ -6732,6 +6811,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             type: 'ADD_LOG',
             level: 'error',
             message: `URL fetch failure: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title} (${detail})`,
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            message: `URL attachment state: failed`,
           });
         }
         dispatch({
