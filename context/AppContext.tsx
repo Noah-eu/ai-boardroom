@@ -55,7 +55,7 @@ import {
 } from '@/orchestrator';
 import { createTask, patchTask } from '@/tasks';
 import { Language, TranslationKey, translate, translateWithVars } from '@/i18n';
-import { buildDeterministicDocumentExecutionBundle } from '@/lib/documentExporter';
+import { runArtifactPipeline, selectArtifactFamily } from '@/lib/artifactPipeline';
 import {
   deriveDocumentTableIntent,
   isDocumentColumnValueMissing,
@@ -2191,34 +2191,13 @@ function isFailureTerminalStatus(status: Task['status']): boolean {
 type ExecutionPipelineKind = 'document' | 'code';
 
 function decideExecutionPipeline(project: Project): ExecutionPipelineKind {
-  const combinedText = [project.name, project.description, project.latestRevisionFeedback ?? '']
-    .join(' ')
-    .toLowerCase();
-
-  const documentSignals =
-    /\binvoice\b|\binvoices\b|\bpdf\b|\bcsv\b|\bxlsx\b|\bextract\b|\breport\b|\bsummary\b|\bfaktur\b|\buctenk\b|\bvyuctovan/i.test(
-      combinedText
-    );
-  const codeSignals =
-    /\bapp\b|\bweb\b|\bwebsite\b|\bgame\b|\bpong\b|\btodo\b|\bhtml\b|\bcss\b|\bjavascript\b|\bjs\b|\btypescript\b|\bcode\b|\bfrontend\b|\bui\b/.test(
-      combinedText
-    );
-
-  const attachments = project.attachments ?? [];
-  const pdfLikeAttachments = attachments.filter((attachment) => attachment.kind === 'pdf').length;
-  const zipCodeSignals = attachments.some((attachment) => {
-    if (attachment.kind !== 'zip') return false;
-    const tree = attachment.ingestion?.zipFileTree ?? [];
-    return tree.some((entry) => /\.(html|css|js|ts|tsx|jsx|json|md)$/i.test(entry));
+  const family = selectArtifactFamily({
+    prompt: [project.name, project.description, project.latestRevisionFeedback ?? ''].join(' '),
+    outputTypeHint: project.outputType,
+    attachmentKinds: (project.attachments ?? []).map((attachment) => attachment.kind),
   });
 
-  if (project.outputType === 'document') return 'document';
-  if (project.outputType === 'app' || project.outputType === 'website') return 'code';
-
-  if (documentSignals && !codeSignals) return 'document';
-  if (codeSignals && !documentSignals) return 'code';
-  if (pdfLikeAttachments > 0 && !zipCodeSignals) return 'document';
-
+  if (family === 'document') return 'document';
   return 'code';
 }
 
@@ -5239,11 +5218,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             const validatedRowsRaw = getLatestArtifactContent(project.tasks, 'validated-rows.json');
             const summaryMetadataRaw = getLatestArtifactContent(project.tasks, 'summary-metadata.json');
 
-            const deterministicExport = buildDeterministicDocumentExecutionBundle({
-              validatedRowsRaw,
-              summaryMetadataRaw,
-              language: project.language,
-              requestedOutputPrompt: snapshot.projectPrompt,
+            const deterministicExport = runArtifactPipeline({
+              input: {
+                runId: `${project.id}-cycle-${snapshot.cycleNumber}-builder`,
+                prompt: snapshot.projectPrompt,
+                outputTypeHint: 'document',
+                localeMode: { type: 'single', targetLanguage: project.language },
+                sourceArtifacts: {
+                  validatedRowsRaw,
+                  summaryMetadataRaw,
+                },
+              },
             });
 
             updatedArtifacts[index] = {
@@ -5261,7 +5246,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               agent: task.agent,
               message:
                 `${task.agent}: deterministic export bundle ready ` +
-                `(${deterministicExport.invoiceSummary.summary.invoiceCount} row(s), ${deterministicExport.bundle.files.length} file(s)).`,
+                `(${deterministicExport.metadata.factCount} verified fact(s), ${deterministicExport.bundle.files.length} file(s)).`,
             });
             continue;
           }

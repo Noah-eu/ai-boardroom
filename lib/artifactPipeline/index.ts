@@ -1,0 +1,15 @@
+export {
+  buildStructuredModel,
+  extractVerifiedFacts,
+  normalizeInput,
+  runArtifactPipeline,
+  selectArtifactFamily,
+  validateInvariants,
+  type ArtifactFamily,
+  type ArtifactPipelineAttachmentInput,
+  type ArtifactPipelineInput,
+  type ArtifactPipelineResult,
+  type ArtifactStructuredModel,
+  type LocaleMode,
+  type VerifiedFact,
+} from './core';
