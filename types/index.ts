@@ -224,6 +224,31 @@ export type AttachmentIngestionStatus =
   | 'parsed'
   | 'indexed';
 
+export type UrlIngestFailureCode =
+  | 'invalid_url'
+  | 'timeout'
+  | 'tls_error'
+  | 'dns_error'
+  | 'network_error'
+  | 'http_error'
+  | 'blocked_or_bot_protected'
+  | 'non_html_response'
+  | 'empty_content'
+  | 'crawl_no_readable_pages'
+  | 'parse_error'
+  | 'unknown';
+
+export interface UrlIngestFailureReason {
+  code: UrlIngestFailureCode;
+  stage: 'normalize' | 'fetch' | 'crawl' | 'parse';
+  message: string;
+  retryable: boolean;
+  url?: string;
+  finalUrl?: string;
+  statusCode?: number;
+  contentType?: string;
+}
+
 export interface AttachmentIngestion {
   status: AttachmentIngestionStatus;
   summary?: string;
@@ -255,6 +280,7 @@ export interface AttachmentIngestion {
     error?: string;
   }>;
   error?: string;
+  failureReason?: UrlIngestFailureReason;
   includedInContext?: boolean;
   linkedToAi?: boolean;
   linkedToAiAt?: Date;

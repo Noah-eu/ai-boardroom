@@ -6695,7 +6695,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
-          throw new Error(body.error ?? 'Attachment ingestion failed');
+          if (ingest) {
+            dispatch({
+              type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+              projectId,
+              attachmentId: attachment.id,
+              ingestion: ingest,
+            });
+          }
+          const reason = ingest?.failureReason;
+          const reasonText = reason
+            ? `code=${reason.code} stage=${reason.stage}${reason.statusCode ? ` status=${reason.statusCode}` : ''} message=${reason.message}`
+            : null;
+          throw new Error(body.error ?? reasonText ?? 'Attachment ingestion failed');
         }
 
         if (attachment.kind === 'url') {
@@ -6705,7 +6717,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           });
 
           if (runtimeState !== 'parsed') {
-            throw new Error('URL ingestion finished without parsed content.');
+            const reason = ingest.failureReason;
+            const reasonText = reason
+              ? `code=${reason.code} stage=${reason.stage}${reason.statusCode ? ` status=${reason.statusCode}` : ''} message=${reason.message}`
+              : 'URL ingestion finished without parsed content.';
+            throw new Error(reasonText);
           }
         }
 

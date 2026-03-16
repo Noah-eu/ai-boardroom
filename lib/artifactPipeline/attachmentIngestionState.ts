@@ -121,6 +121,7 @@ export function sanitizeAttachmentIngestionForMerge(params: {
       ...clearParsedPayload,
       status: 'uploaded',
       error: undefined,
+      failureReason: undefined,
       includedInContext: false,
       linkedToAi: false,
       linkedToAiAt: undefined,
