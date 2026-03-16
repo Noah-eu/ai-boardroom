@@ -3,6 +3,7 @@ import {
   ArtifactFamily,
   ArtifactPipelineAttachmentInput,
   ArtifactPipelineInput,
+  DocumentArtifactIntent,
   selectArtifactFamily,
 } from './core';
 
@@ -99,28 +100,78 @@ export function resolveProjectArtifactFamily(project: Pick<Project, 'name' | 'de
   });
 }
 
+export function resolveDocumentIntentHint(params: {
+  prompt: string;
+  attachmentKinds: ArtifactPipelineAttachmentInput['kind'][];
+}): DocumentArtifactIntent {
+  const normalized = params.prompt.toLowerCase();
+  const invoiceSignals = [
+    /\binvoice\b/,
+    /\binvoices\b/,
+    /\bfaktur\w*/,
+    /\bextract\b/,
+    /\bextraction\b/,
+    /\bcsv\b/,
+    /\bxlsx\b/,
+    /\baccounting\b/,
+    /\bledger\b/,
+    /\bvariable symbol\b/,
+  ];
+  const summarySignals = [
+    /\bdescribe\b/,
+    /\bdescription\b/,
+    /\bsummarize\b/,
+    /\bsummary\b/,
+    /\bpage\b/,
+    /\bwebsite\b/,
+    /\burl\b/,
+    /\bpopi[sš]\b/,
+    /\bpopis\b/,
+    /\bshrn\w*/,
+  ];
+
+  if (invoiceSignals.some((pattern) => pattern.test(normalized))) {
+    return 'invoice-extraction';
+  }
+
+  if (summarySignals.some((pattern) => pattern.test(normalized))) {
+    return 'summary-description';
+  }
+
+  if (params.attachmentKinds.includes('url') && !params.attachmentKinds.includes('pdf')) {
+    return 'summary-description';
+  }
+
+  return 'invoice-extraction';
+}
+
 export function buildArtifactPipelineExecutionInput(params: {
   project: Pick<Project, 'id' | 'outputType' | 'language' | 'name' | 'description' | 'latestRevisionFeedback' | 'latestStableFiles'>;
   snapshot: Pick<ExecutionSnapshot, 'cycleNumber' | 'projectPrompt' | 'revisionPrompt' | 'approvedDebateSummary' | 'missingInputNotes' | 'pdfTexts' | 'siteSnapshots' | 'zipSnapshots' | 'imageInputs'>;
   family?: ArtifactFamily;
+  runtimeBuildCommitHash?: string;
   sourceArtifacts?: {
     validatedRowsRaw?: string | null;
     summaryMetadataRaw?: string | null;
   };
 }): ArtifactPipelineInput {
   const currentRunPrompt = resolveCurrentRunPrompt(params.snapshot);
+  const attachments = buildSnapshotAttachments(params.snapshot as ExecutionSnapshot);
 
   const family = params.family ?? selectArtifactFamily({
     prompt: currentRunPrompt.prompt,
     outputTypeHint: params.project.outputType,
   });
 
+  const commitHash = (params.runtimeBuildCommitHash ?? process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ?? 'local').toString();
+  const source = params.runtimeBuildCommitHash || process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ? 'env' : 'local';
+
   return {
     runId: `${params.project.id}-cycle-${params.snapshot.cycleNumber}-${family}`,
     prompt: currentRunPrompt.prompt,
     outputTypeHint: params.project.outputType,
     localeMode: { type: 'single', targetLanguage: params.project.language as AppLanguage },
-    attachments: buildSnapshotAttachments(params.snapshot as ExecutionSnapshot),
+    attachments,
     sourceArtifacts: params.sourceArtifacts,
     packaging: {
       mode: 'replace',
@@ -130,6 +181,18 @@ export function buildArtifactPipelineExecutionInput(params: {
       promptSource: currentRunPrompt.source,
       cycleNumber: params.snapshot.cycleNumber,
       requestedFamily: family,
+      documentIntentHint:
+        family === 'document'
+          ? resolveDocumentIntentHint({
+              prompt: currentRunPrompt.prompt,
+              attachmentKinds: attachments.map((attachment) => attachment.kind),
+            })
+          : undefined,
+      build: {
+        commitHash,
+        commitShort: commitHash.slice(0, 7),
+        source,
+      },
       orchestration: {
         approvedDebateSummary: params.snapshot.approvedDebateSummary,
         missingInputNotes: params.snapshot.missingInputNotes,

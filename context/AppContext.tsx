@@ -110,12 +110,11 @@ const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
-const REAL_PLANNER_BUILD_MARKER =
+const REAL_PLANNER_BUILD_COMMIT_HASH =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
     process.env.NEXT_PUBLIC_BUILD_MARKER ||
-    'local')
-    .toString()
-    .slice(0, 7);
+    'local').toString();
+const REAL_PLANNER_BUILD_MARKER = REAL_PLANNER_BUILD_COMMIT_HASH.slice(0, 7);
 
 function resolveExecutionTaskTimeoutMs(): number {
   const raw = process.env.NEXT_PUBLIC_EXECUTION_TASK_TIMEOUT_MS;
@@ -2970,6 +2969,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
   const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
+  const [runtimeBuildCommitHash, setRuntimeBuildCommitHash] = useState<string>(REAL_PLANNER_BUILD_COMMIT_HASH);
   const [language, setLanguage] = useState<Language>('cz');
   const [executionSpeed, setExecutionSpeed] = useState<ExecutionSpeed>('normal');
   const [autoPauseCheckpoints, setAutoPauseCheckpoints] = useState(true);
@@ -3004,6 +3004,31 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     executionSpeedRef.current = executionSpeed;
   }, [executionSpeed]);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/build-info')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!isMounted || !data) return;
+        const commitFull = typeof data.commitFull === 'string' ? data.commitFull.trim() : '';
+        const commitShort = typeof data.commit === 'string' ? data.commit.trim() : '';
+        if (commitFull && commitFull !== 'unknown') {
+          setRuntimeBuildCommitHash(commitFull);
+          return;
+        }
+        if (commitShort && commitShort !== 'unknown') {
+          setRuntimeBuildCommitHash(commitShort);
+        }
+      })
+      .catch(() => {
+        // Keep env-based build marker fallback.
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let unsubAuth: (() => void) | undefined;
@@ -5150,6 +5175,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   project,
                   snapshot,
                   family,
+                  runtimeBuildCommitHash,
                   sourceArtifacts:
                     family === 'document'
                       ? {
@@ -5176,6 +5202,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 message:
                   `${task.agent}: artifact-pipeline-v2 bundle ready ` +
                   `(${generatedArtifact.family}, ${generatedArtifact.metadata.factCount} verified fact(s), ${generatedArtifact.bundle.files.length} file(s)).`,
+              });
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message:
+                  `${task.agent}: artifact-pipeline-v2 audit ` +
+                  `(commit=${generatedArtifact.metadata.runtimeCommitHash}, ` +
+                  `family=${generatedArtifact.metadata.selection.selectedArtifactFamily}, ` +
+                  `intent=${generatedArtifact.metadata.selection.selectedDocumentIntent ?? 'n/a'}, ` +
+                  `outputContract=${generatedArtifact.metadata.selection.selectedOutputContract ?? 'n/a'}, ` +
+                  `renderer=${generatedArtifact.metadata.selection.selectedRendererExporter}, ` +
+                  `source=${generatedArtifact.metadata.selection.selectionSource}).`,
               });
               continue;
             }
@@ -5837,6 +5876,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       callAiRespond,
       completeTask,
       executionTaskTimeoutMs,
+      runtimeBuildCommitHash,
       validatePlannerStructuredPlan,
     ]
   );

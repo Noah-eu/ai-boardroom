@@ -14,16 +14,20 @@ export async function GET() {
   const branch =
     process.env.VERCEL_GIT_COMMIT_REF ??
     process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_REF ??
+    process.env.BRANCH ??
+    process.env.HEAD ??
     readGit('git rev-parse --abbrev-ref HEAD', 'unknown');
 
   const commitFull =
     process.env.VERCEL_GIT_COMMIT_SHA ??
     process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ??
-    readGit('git rev-parse --short HEAD', 'unknown');
+    process.env.COMMIT_REF ??
+    readGit('git rev-parse HEAD', 'unknown');
 
   return NextResponse.json({
     branch,
     commit: commitFull.slice(0, 7),
+    commitFull,
     openaiModelDefault: resolveOpenAiModel(process.env.OPENAI_MODEL),
   });
 }

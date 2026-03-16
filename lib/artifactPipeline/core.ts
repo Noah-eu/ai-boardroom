@@ -38,6 +38,12 @@ export interface ArtifactPipelineInput {
     promptSource?: 'projectPrompt' | 'revisionPrompt';
     cycleNumber?: number;
     requestedFamily?: ArtifactFamily;
+    documentIntentHint?: DocumentArtifactIntent;
+    build?: {
+      commitHash: string;
+      commitShort: string;
+      source: 'env' | 'local';
+    };
     orchestration?: {
       approvedDebateSummary?: string;
       missingInputNotes?: string[];
@@ -126,6 +132,14 @@ export interface ArtifactPipelineResult {
     factCount: number;
     planningSummary: string;
     validationWarnings: string[];
+    runtimeCommitHash: string;
+    selection: {
+      selectedArtifactFamily: ArtifactFamily;
+      selectedDocumentIntent: DocumentArtifactIntent | null;
+      selectedOutputContract: DocumentStructuredModel['outputContract'] | null;
+      selectedRendererExporter: string;
+      selectionSource: string;
+    };
   };
 }
 
@@ -334,8 +348,12 @@ function buildSchemaId(runId: string, family: ArtifactFamily, facts: VerifiedFac
 
 function resolveDocumentIntent(params: {
   promptFacts: VerifiedFact[];
-  sourceArtifacts?: ArtifactPipelineInput['sourceArtifacts'];
+  runtimeIntentHint?: DocumentArtifactIntent;
 }): DocumentArtifactIntent {
+  if (params.runtimeIntentHint) {
+    return params.runtimeIntentHint;
+  }
+
   const promptText = params.promptFacts
     .map((fact) => `${fact.key} ${fact.value}`)
     .join(' ')
@@ -355,12 +373,7 @@ function resolveDocumentIntent(params: {
   ];
 
   const hasExtractionSignal = extractionSignals.some((pattern) => pattern.test(promptText));
-  const hasStructuredArtifacts = Boolean(
-    (params.sourceArtifacts?.validatedRowsRaw ?? '').trim() ||
-      (params.sourceArtifacts?.summaryMetadataRaw ?? '').trim()
-  );
-
-  if (hasExtractionSignal || hasStructuredArtifacts) {
+  if (hasExtractionSignal) {
     return 'invoice-extraction';
   }
 
@@ -373,6 +386,7 @@ export function buildStructuredModel(params: {
   localeMode: LocaleMode;
   facts: VerifiedFact[];
   sourceArtifacts?: ArtifactPipelineInput['sourceArtifacts'];
+  runtimeMetadata?: ArtifactPipelineInput['runtimeMetadata'];
 }): ArtifactStructuredModel {
   const facts = params.facts.length > 0 ? params.facts : [fallbackFact(params.localeMode)];
   const schemaId = buildSchemaId(params.runId, params.family, facts);
@@ -414,7 +428,7 @@ export function buildStructuredModel(params: {
     const promptFacts = facts.filter((fact) => fact.source === 'prompt');
     const intent = resolveDocumentIntent({
       promptFacts,
-      sourceArtifacts: params.sourceArtifacts,
+      runtimeIntentHint: params.runtimeMetadata?.documentIntentHint,
     });
     return {
       family: 'document',
@@ -523,6 +537,11 @@ function packageArtifactBundle(params: {
   bundle: ExecutionOutputBundle;
   runId: string;
   family: ArtifactFamily;
+  selectedDocumentIntent: DocumentArtifactIntent | null;
+  selectedOutputContract: DocumentStructuredModel['outputContract'] | null;
+  selectedRendererExporter: string;
+  selectionSource: string;
+  buildCommitHash: string;
   localeMode: LocaleMode;
   schemaId: string;
   factCount: number;
@@ -541,6 +560,12 @@ function packageArtifactBundle(params: {
       {
         runId: params.runId,
         family: params.family,
+        selectedArtifactFamily: params.family,
+        selectedDocumentIntent: params.selectedDocumentIntent,
+        selectedOutputContract: params.selectedOutputContract,
+        selectedRendererExporter: params.selectedRendererExporter,
+        selectionSource: params.selectionSource,
+        buildCommitHash: params.buildCommitHash,
         schemaId: params.schemaId,
         localeMode: params.localeMode,
         factCount: params.factCount,
@@ -573,6 +598,54 @@ function packageArtifactBundle(params: {
       ])
     ),
     removePaths: Array.from(new Set([...inheritedRemovePaths, ...replaceRemovePaths])),
+  };
+}
+
+function resolveRendererSelection(params: {
+  family: ArtifactFamily;
+  model: ArtifactStructuredModel;
+}): {
+  selectedRendererExporter: string;
+  selectionSource: string;
+  selectedDocumentIntent: DocumentArtifactIntent | null;
+  selectedOutputContract: DocumentStructuredModel['outputContract'] | null;
+} {
+  if (params.family === 'website') {
+    return {
+      selectedRendererExporter: 'renderWebsiteArtifact',
+      selectionSource: 'lib/artifactPipeline/core.ts:renderFamilyBundle',
+      selectedDocumentIntent: null,
+      selectedOutputContract: null,
+    };
+  }
+
+  if (params.family === 'app') {
+    return {
+      selectedRendererExporter: 'renderAppArtifact',
+      selectionSource: 'lib/artifactPipeline/core.ts:renderFamilyBundle',
+      selectedDocumentIntent: null,
+      selectedOutputContract: null,
+    };
+  }
+
+  if (params.family === 'plan') {
+    return {
+      selectedRendererExporter: 'renderPlanArtifact',
+      selectionSource: 'lib/artifactPipeline/core.ts:renderFamilyBundle',
+      selectedDocumentIntent: null,
+      selectedOutputContract: null,
+    };
+  }
+
+  const model = params.model as DocumentStructuredModel;
+  return {
+    selectedRendererExporter:
+      model.intent === 'invoice-extraction'
+        ? 'buildDeterministicDocumentExecutionBundle'
+        : 'buildFallbackDocumentBundle',
+    selectionSource: 'lib/artifactPipeline/adapters/document.ts:renderDocumentArtifact',
+    selectedDocumentIntent: model.intent,
+    selectedOutputContract: model.outputContract,
   };
 }
 
@@ -628,6 +701,12 @@ export function runArtifactPipeline(params: {
     localeMode: normalizedInput.localeMode,
     facts,
     sourceArtifacts: normalizedInput.sourceArtifacts,
+    runtimeMetadata: normalizedInput.runtimeMetadata,
+  });
+
+  const selection = resolveRendererSelection({
+    family,
+    model: structuredModel,
   });
 
   const validationWarnings = validateInvariants({
@@ -652,6 +731,11 @@ export function runArtifactPipeline(params: {
     bundle: renderedBundle,
     runId: normalizedInput.runId,
     family,
+    selectedDocumentIntent: selection.selectedDocumentIntent,
+    selectedOutputContract: selection.selectedOutputContract,
+    selectedRendererExporter: selection.selectedRendererExporter,
+    selectionSource: selection.selectionSource,
+    buildCommitHash: normalizedInput.runtimeMetadata?.build?.commitHash ?? 'unknown',
     localeMode: normalizedInput.localeMode,
     schemaId: structuredModel.schemaId,
     factCount: facts.length,
@@ -678,6 +762,14 @@ export function runArtifactPipeline(params: {
       factCount: facts.length,
       planningSummary,
       validationWarnings,
+      runtimeCommitHash: normalizedInput.runtimeMetadata?.build?.commitHash ?? 'unknown',
+      selection: {
+        selectedArtifactFamily: family,
+        selectedDocumentIntent: selection.selectedDocumentIntent,
+        selectedOutputContract: selection.selectedOutputContract,
+        selectedRendererExporter: selection.selectedRendererExporter,
+        selectionSource: selection.selectionSource,
+      },
     },
   };
 }

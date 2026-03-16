@@ -384,10 +384,16 @@ describe('artifactPipeline core invariants', () => {
             text: 'Page title: Product API docs. Summary: This page explains endpoints and limits.',
           },
         ],
+        sourceArtifacts: {
+          validatedRowsRaw: JSON.stringify({ rows: [{ sourceFileName: 'url-page', value: 'endpoint summary' }] }),
+          summaryMetadataRaw: JSON.stringify({ invoiceCount: 0, warnings: [] }),
+        },
       },
     });
 
     expect(result.family).toBe('document');
+    expect(result.metadata.selection.selectedDocumentIntent).toBe('summary-description');
+    expect(result.metadata.selection.selectedRendererExporter).toBe('buildFallbackDocumentBundle');
     expect(result.bundle.files.some((file) => file.path === 'summary.md')).toBe(true);
     expect(result.bundle.files.some((file) => file.path === 'invoice-summary.csv')).toBe(false);
     expect(result.bundle.files.some((file) => file.path === 'requested-table.csv')).toBe(false);

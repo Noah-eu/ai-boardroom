@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildArtifactPipelineExecutionInput, resolveProjectArtifactFamily, shouldRouteGeneratedFilesThroughArtifactPipeline } from './runtime';
+import {
+  buildArtifactPipelineExecutionInput,
+  resolveDocumentIntentHint,
+  resolveProjectArtifactFamily,
+  shouldRouteGeneratedFilesThroughArtifactPipeline,
+} from './runtime';
 
 describe('artifactPipeline runtime routing', () => {
   it('routes production website generated-files stage through the new common core', () => {
@@ -109,5 +114,44 @@ describe('artifactPipeline runtime routing', () => {
     expect(input.prompt).toBe('Uprav copy pro aktualni launch.');
     expect(input.runtimeMetadata?.promptSource).toBe('revisionPrompt');
     expect(input.runtimeMetadata?.orchestration?.approvedDebateSummary).toContain('Pouzit fakta z priloh');
+  });
+
+  it('resolves URL description prompts to summary-description intent hint', () => {
+    expect(
+      resolveDocumentIntentHint({
+        prompt: 'Describe the attached URL page and summarize the key content.',
+        attachmentKinds: ['url'],
+      })
+    ).toBe('summary-description');
+  });
+
+  it('includes runtime build commit metadata in execution input', () => {
+    const input = buildArtifactPipelineExecutionInput({
+      project: {
+        id: 'proj-build-1',
+        outputType: 'document',
+        language: 'en',
+        name: 'Runtime audit',
+        description: 'Describe URL page',
+        latestRevisionFeedback: null,
+        latestStableFiles: [],
+      },
+      snapshot: {
+        cycleNumber: 1,
+        projectPrompt: 'Describe attached URL page and summarize content.',
+        revisionPrompt: '',
+        approvedDebateSummary: '',
+        missingInputNotes: [],
+        pdfTexts: [],
+        siteSnapshots: [],
+        zipSnapshots: [],
+        imageInputs: [],
+      },
+      family: 'document',
+      runtimeBuildCommitHash: '562eb3c21e035a75d9876a034c5f7630d681db63',
+    });
+
+    expect(input.runtimeMetadata?.build?.commitHash).toBe('562eb3c21e035a75d9876a034c5f7630d681db63');
+    expect(input.runtimeMetadata?.build?.commitShort).toBe('562eb3c');
   });
 });
