@@ -64,8 +64,8 @@ type UrlPageSnapshot = {
   rendered?: boolean;
 };
 
-const DEFAULT_CRAWL_MAX_PAGES = 5;
-const DEFAULT_CRAWL_MAX_DEPTH = 1;
+const DEFAULT_CRAWL_MAX_PAGES = 12;
+const DEFAULT_CRAWL_MAX_DEPTH = 2;
 const MIN_TEXT_LENGTH_FOR_STATIC = 220;
 
 function trimText(value: string, max = 12000): string {

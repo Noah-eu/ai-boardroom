@@ -48,14 +48,9 @@ If the user does not explicitly pick a model for a run, the app falls back to `O
 	- `OPENAI_MODEL` = `gpt-4.1-mini`
 3. Redeploy the site so the new variables are applied.
 
-## Simulation Mode
+## OpenAI execution
 
-Each project has a `Simulation mode` toggle in the sidebar.
-
-- `ON` (default): fully simulated behavior.
-- `OFF`: uses real OpenAI calls for debate agents (`Strategist`, `Skeptic`, `Pragmatist`) and planner task-graph generation.
-
-If an OpenAI call fails, the app writes a readable error to the Execution Log and falls back to simulation for that step.
+Debate agents (`Strategist`, `Skeptic`, `Pragmatist`), the orchestrator summary, and execution tasks call OpenAI on the server. If a call fails, the Execution Log records the error; debate rounds show an explicit failure note instead of silent canned text.
 
 ## Execute Mode Output
 

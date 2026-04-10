@@ -334,7 +334,6 @@ export interface Project {
   language: AppLanguage;
   provider: AIProvider;
   model: OpenAIModel;
-  simulationMode: boolean;
   debateRounds: number;
   debateMode: DebateMode;
   maxWordsPerAgent: number;

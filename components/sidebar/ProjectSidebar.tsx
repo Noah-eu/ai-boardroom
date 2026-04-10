@@ -440,7 +440,6 @@ export function ProjectSidebar({ mode = 'desktop', onProjectActivated }: Project
         projectLanguage,
         model,
         outputType,
-        false,
         debateRounds,
         debateMode,
         maxWordsPerAgent,

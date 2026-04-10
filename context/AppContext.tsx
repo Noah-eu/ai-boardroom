@@ -1821,7 +1821,6 @@ type Action =
       provider: AIProvider;
       model: OpenAIModel;
       outputType: OutputType;
-      simulationMode: boolean;
       debateRounds: number;
       debateMode: DebateMode;
       maxWordsPerAgent: number;
@@ -1845,11 +1844,6 @@ type Action =
       projectId: string;
       taskId: string;
       patch: Partial<Omit<Task, 'id' | 'createdAt'>>;
-    }
-  | {
-      type: 'SET_PROJECT_SIMULATION_MODE';
-      projectId: string;
-      simulationMode: boolean;
     }
   | {
       type: 'SET_PROJECT_DEBATE_ROUNDS';
@@ -2412,7 +2406,6 @@ function appReducer(state: AppState, action: Action): AppState {
         action.description,
         action.language,
         action.outputType,
-        action.simulationMode,
         action.debateRounds,
         action.debateMode,
         action.maxWordsPerAgent,
@@ -2722,13 +2715,6 @@ function appReducer(state: AppState, action: Action): AppState {
       });
     }
 
-    case 'SET_PROJECT_SIMULATION_MODE': {
-      return syncProjectById(state, action.projectId, (project) => ({
-        ...project,
-        simulationMode: action.simulationMode,
-        updatedAt: new Date(),
-      }));
-    }
     case 'SET_PROJECT_DEBATE_ROUNDS': {
       return syncProjectById(state, action.projectId, (project) => ({
         ...project,
@@ -2927,7 +2913,6 @@ interface AppContextValue {
     projectLanguage: AppLanguage,
     model: OpenAIModel,
     outputType: OutputType,
-    simulationMode: boolean,
     debateRounds: number,
     debateMode: DebateMode,
     maxWordsPerAgent: number,
@@ -2945,7 +2930,6 @@ interface AppContextValue {
   addUserMessage: (content: string, attachmentIds?: string[]) => void;
   attachToProject: (projectId: string, attachment: DraftAttachmentInput) => Promise<ProjectAttachment>;
   addLog: (message: string, level: LogEntry['level'], agent?: AgentName) => void;
-  setProjectSimulationMode: (projectId: string, simulationMode: boolean) => void;
   setProjectDebateRounds: (projectId: string, debateRounds: number) => void;
   schedulerState: {
     isPaused: boolean;
@@ -3024,7 +3008,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       dispatch({
         type: 'ADD_LOG',
         level: 'error',
-        message: `Firebase: ${message}. Continuing in simulation mode.`,
+        message: `Firebase: ${message}. Cloud persistence and uploads may be unavailable until this is fixed.`,
       });
     };
 
@@ -3798,7 +3782,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       projectLanguage: AppLanguage,
       model: OpenAIModel,
       outputType: OutputType,
-      simulationMode: boolean,
       debateRounds: number,
       debateMode: DebateMode,
       maxWordsPerAgent: number,
@@ -3810,7 +3793,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         description,
         projectLanguage,
         outputType,
-        simulationMode,
         debateRounds,
         debateMode,
         maxWordsPerAgent,
@@ -3828,7 +3810,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         provider: 'openai',
         model,
         outputType,
-        simulationMode,
         debateRounds,
         debateMode,
         maxWordsPerAgent,
@@ -4104,6 +4085,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           'You are Builder. Revise the current project baseline; do not restart from scratch unless requested.',
           'Return JSON only. Do not wrap the response in markdown fences.',
           'Prefer a minimal working static website bundle using index.html and optional style.css and script.js.',
+          'If the user wants to clone or mirror an existing site, use site snapshots and attachment summaries: reproduce obvious navigation with multiple .html files when needed (e.g. index.html, help.html) and real relative href links—never a single dead page with no working navigation.',
+          'Buttons and links must do something in static preview: use relative pages, hash anchors to sections in the same file, or client-side JS in a local .js file. Avoid empty href="#" placeholders unless you attach a working onclick.',
+          'When the source is a client-rendered SPA (React/Vite etc.), you cannot rely on their build; output a faithful static multi-file approximation with working interactions, not a blank shell.',
           'Never finish with only patch notes or prose when the user asked to build something.',
           'JSON contract:',
           '{"status":"success","summary":"short summary","files":[{"path":"index.html","content":"<!doctype html>..."}],"notes":["optional note"],"removePaths":["obsolete.js"]}',
@@ -4539,15 +4523,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const lang = project.language;
       const retryCount = task.retryCount ?? 0;
       const maxRetries = task.maxRetries ?? project.taskGraph?.maxRetries ?? 2;
-      const failProbability = options?.skipFailure
-        ? 0
-        : project.simulationMode
-        ? task.agent === 'Tester'
-          ? 0.25
-          : task.agent === 'Reviewer'
-          ? 0.15
-          : 0
-        : 0;
+      const failProbability = options?.skipFailure ? 0 : 0;
       const shouldFail = failProbability > 0 && retryCount < maxRetries && Math.random() < failProbability;
 
       if (shouldFail) {
@@ -5836,9 +5812,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           type: 'ADD_LOG',
           level: 'warning',
           agent: 'Planner',
-          message:
-            `REAL PLANNER PATH REACHED ${REAL_PLANNER_BUILD_MARKER} ` +
-            `(startTask -> ${project.simulationMode ? 'simulation' : 'runLiveTaskExecution'})`,
+          message: `REAL PLANNER PATH REACHED ${REAL_PLANNER_BUILD_MARKER} (startTask -> runLiveTaskExecution)`,
         });
       }
 
@@ -5873,27 +5847,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
       }
 
-      if (!project.simulationMode) {
-        setTimeout(() => {
-          void runLiveTaskExecution(project.id, task.id);
-        }, 0);
-        return;
-      }
-
-      if (task.agent === 'Planner') {
-        dispatch({
-          type: 'ADD_LOG',
-          level: 'warning',
-          agent: 'Planner',
-          message: 'planner final status: simulation_branch_no_openai',
-        });
-      }
-
-      const speed = executionSpeedRef.current;
-      const config = SPEED_CONFIG[speed];
-      const durationMs =
-        config.minTaskMs + Math.round(Math.random() * (config.maxTaskMs - config.minTaskMs));
-      taskTimersRef.current[task.id] = setTimeout(() => completeTask(project.id, task.id), durationMs);
+      setTimeout(() => {
+        void runLiveTaskExecution(project.id, task.id);
+      }, 0);
     },
     [agentStartLogKey, completeTask, runLiveTaskExecution, translateProject, translateProjectWithVars]
   );
@@ -6218,7 +6174,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const generateExecutionTaskGraph = useCallback(
     (project: Project): TaskGraph => {
-      const maxRetries = project.simulationMode ? 2 : 1;
+      const maxRetries = 1;
       const statusFor = (dependsOn: string[]): Task['status'] => (dependsOn.length === 0 ? 'queued' : 'blocked');
       const taskModel = resolveOpenAiModel(project.model);
       const pipeline = decideExecutionPipeline(project);
@@ -7121,10 +7077,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  const setProjectSimulationMode = useCallback((projectId: string, simulationMode: boolean) => {
-    dispatch({ type: 'SET_PROJECT_SIMULATION_MODE', projectId, simulationMode });
-  }, []);
-  
   const setProjectDebateRounds = useCallback((projectId: string, debateRounds: number) => {
     dispatch({ type: 'SET_PROJECT_DEBATE_ROUNDS', projectId, debateRounds });
   }, []);
@@ -7139,91 +7091,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return messages
         .map((message) => `${message.agent}: ${message.content.slice(0, 220)}`)
         .join('\n');
-    },
-    []
-  );
-
-  const buildSimulatedRoundMessage = useCallback(
-    (
-      language: AppLanguage,
-      agent: AgentName,
-      round: number,
-      previousRoundMessages: Array<{ agent: AgentName; content: string }>,
-      mode: DebateTaskType
-    ) => {
-      if (mode === 'observational' && round === 1) {
-        if (language === 'cz') {
-          if (agent === 'Strategist') {
-            return 'Vidim vstupni obsah a popisuji primo to, co je citelne nebo viditelne. Pokud casti chybi, jasne uvedu co nelze potvrdit.';
-          }
-          if (agent === 'Skeptic') {
-            return 'Opatrny popis: uvedu pouze skutecne viditelne prvky a nejistoty oznacim explicitne bez spekulaci.';
-          }
-          return 'Strucna odpoved pro uzivatele: co je na vstupu videt/cist + kratka poznamka o nejistote jen pokud je potreba.';
-        }
-
-        if (agent === 'Strategist') {
-          return 'Direct factual description of visible/readable input only. If anything is missing, I clearly say what cannot be verified.';
-        }
-        if (agent === 'Skeptic') {
-          return 'Cautious direct description: only observable facts, and uncertainties stated explicitly when needed.';
-        }
-        return 'Concise user-ready answer describing what is visible/readable, with a short uncertainty note only if needed.';
-      }
-
-      if (language === 'cz') {
-        if (round === 1 && agent === 'Strategist') {
-          return 'Navrhuji smer: nejdrive dorucit jasne MVP s merenim dopadu, pak rozsireni po validaci. Priorita je rychla hodnota pro uzivatele a stabilni zaklad pro dalsi iterace.';
-        }
-        if (round === 1 && agent === 'Skeptic') {
-          return 'Rizika: nejasny rozsah, podceneni integraci a pozdni overeni kvality. Chci explicitni checkpointy, jasna akceptacni kriteria a omezeni scope creep.';
-        }
-        if (round === 1 && agent === 'Pragmatist') {
-          return 'MVP: jen klicovy tok, minimalni UX polish, jasna metrika uspechu. Prakticke omezeni: kratky cas, omezeny rozpočet a potreba rychle zpetne vazby od uzivatelu.';
-        }
-        if (round === 2 && agent === 'Strategist') {
-          return `Reaguji na Skeptic: "${previousRoundMessages.find((m) => m.agent === 'Skeptic')?.content.slice(0, 70) ?? ''}". Doplnuji rizikove checkpointy a gate po kazdem milniku, aby byl plan kontrolovatelny.`;
-        }
-        if (round === 2 && agent === 'Skeptic') {
-          return `Reaguji na Pragmatist: "${previousRoundMessages.find((m) => m.agent === 'Pragmatist')?.content.slice(0, 70) ?? ''}". Souhlasim s uzkym MVP, ale jen s povinnymi testy a seznamem zavislosti pred realizaci.`;
-        }
-        if (round === 2 && agent === 'Pragmatist') {
-          return `Reaguji na Strategist: "${previousRoundMessages.find((m) => m.agent === 'Strategist')?.content.slice(0, 70) ?? ''}". Plan upravuji na kratke iterace s dorucenim po malych funkcich a rychlym QA.`;
-        }
-        if (agent === 'Strategist') {
-          return 'Finalni plan: 1) potvrdit scope a metriky, 2) postavit zakladni implementaci, 3) provest validaci, 4) dorucit MVP a pripravit iteraci v2.';
-        }
-        if (agent === 'Skeptic') {
-          return 'Top rizika + mitigace: nejasne zadani -> explicitni acceptance criteria; technicky dluh -> code review gate; casovy skluz -> pevne milniky a scope lock pro v1.';
-        }
-        return 'MVP deliverables + timeline: den 1-2 scope+navrh, den 3-5 implementace, den 6 QA+opravy, den 7 doruceni MVP a seznam navazujicich kroku.';
-      }
-
-      if (round === 1 && agent === 'Strategist') {
-        return 'Proposed direction: deliver a focused MVP first with measurable outcomes, then expand based on validation. Prioritize fast user value and a stable foundation for iteration.';
-      }
-      if (round === 1 && agent === 'Skeptic') {
-        return 'Key risks: unclear scope, underestimated integrations, and late quality validation. We need explicit checkpoints, acceptance criteria, and controls for scope creep.';
-      }
-      if (round === 1 && agent === 'Pragmatist') {
-        return 'MVP scope: core user flow only, minimal polish, clear success metric. Practical constraints: short timeline, limited resources, and need for rapid feedback.';
-      }
-      if (round === 2 && agent === 'Strategist') {
-        return `Responding to Skeptic: "${previousRoundMessages.find((m) => m.agent === 'Skeptic')?.content.slice(0, 70) ?? ''}". I am adding risk checkpoints and milestone gates so the plan remains controlled.`;
-      }
-      if (round === 2 && agent === 'Skeptic') {
-        return `Responding to Pragmatist: "${previousRoundMessages.find((m) => m.agent === 'Pragmatist')?.content.slice(0, 70) ?? ''}". Narrow MVP is fine, but only with mandatory testing and dependency checks before execution.`;
-      }
-      if (round === 2 && agent === 'Pragmatist') {
-        return `Responding to Strategist: "${previousRoundMessages.find((m) => m.agent === 'Strategist')?.content.slice(0, 70) ?? ''}". I refine execution into short iterations with incremental delivery and quick QA loops.`;
-      }
-      if (agent === 'Strategist') {
-        return 'Final plan: 1) confirm scope and metrics, 2) build core implementation, 3) validate quality and behavior, 4) ship MVP and prepare v2 iteration.';
-      }
-      if (agent === 'Skeptic') {
-        return 'Top risks + mitigations: unclear requirements -> explicit acceptance criteria; technical debt -> review gates; schedule slippage -> fixed milestones and strict v1 scope.';
-      }
-      return 'MVP deliverables + timeline: day 1-2 scope+design, day 3-5 implementation, day 6 QA+fixes, day 7 MVP release and prioritized follow-ups.';
     },
     []
   );
@@ -7324,16 +7191,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               dispatch({ type: 'UPDATE_AGENT_STATUS', agent, status: 'thinking' });
 
               let content = '';
-              if (refreshedProject.simulationMode) {
-                content = buildSimulatedRoundMessage(
-                  language,
-                  agent,
-                  round,
-                  previousRoundMessages,
-                  isOneRoundDescriptive ? 'observational' : 'planning'
-                );
-              } else {
-                const roleInstruction = isOneRoundDescriptive
+              const roleInstruction = isOneRoundDescriptive
                   ? language === 'cz'
                     ? agent === 'Strategist'
                       ? 'Role: Strategist. Dej primy fakticky popis toho, co je skutecne videt/cist.'
@@ -7472,16 +7330,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     roundAttachmentSnapshot
                   );
                   content = response.text;
-                } catch {
-                  content = buildSimulatedRoundMessage(
-                    language,
+                } catch (error) {
+                  const detail = error instanceof Error ? error.message : 'Unknown error';
+                  dispatch({
+                    type: 'ADD_LOG',
+                    level: 'error',
                     agent,
-                    round,
-                    previousRoundMessages,
-                    isOneRoundDescriptive ? 'observational' : 'planning'
-                  );
+                    message: translateProjectWithVars(language, 'workflow.openai.callError', {
+                      error: detail,
+                    }),
+                  });
+                  content =
+                    language === 'cz'
+                      ? `[OpenAI selhalo: ${detail}]`
+                      : `[OpenAI failed: ${detail}]`;
                 }
-              }
 
               dispatch({ type: 'AGENT_SPEAK', agent, content });
               roundMessages.push({ round, agent, content });
@@ -7515,52 +7378,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             .join('\n');
 
           let summary = '';
-          if (refreshedProject.simulationMode) {
-            if (isOneRoundDescriptive) {
-              summary =
-                language === 'cz'
-                  ? [
-                      'Final answer:',
-                      'Pri tomto vstupu davam primy popis toho, co je skutecne videt nebo citelne.',
-                      'Uncertainty (optional):',
-                      'Pokud je cast vstupu nejasna nebo chybi, uvadim to explicitne.',
-                    ].join('\n')
-                  : [
-                      'Final answer:',
-                      'Direct description of what is actually visible/readable in the provided input.',
-                      'Uncertainty (optional):',
-                      'Any missing or unclear part is stated explicitly.',
-                    ].join('\n');
-            } else {
-              summary =
-                language === 'cz'
-                  ? [
-                      '1) Recommended plan',
-                      '- Potvrdit scope a metriky, dorucit MVP v kratkych iteracich, potom rozsireni podle dopadu.',
-                      '2) Tradeoffs',
-                      '- V1 omezuje rozsah funkcionality, ale zrychluje doruceni a snizuje riziko.',
-                      '3) Risks + mitigations',
-                      '- Nejasne pozadavky -> acceptance criteria; skluz terminu -> milniky a scope lock; kvalita -> povinne QA gate.',
-                      '4) MVP scope',
-                      '- Klicovy uzivatelsky tok, zakladni validace, minimalni UX polish.',
-                      '5) Next steps',
-                      '- Schvalit plan, spustit realizaci, monitorovat metriky a pripravit backlog pro v2.',
-                    ].join('\n')
-                  : [
-                      '1) Recommended plan',
-                      '- Confirm scope and metrics, deliver MVP in short iterations, then expand based on outcomes.',
-                      '2) Tradeoffs',
-                      '- v1 limits feature breadth but improves delivery speed and risk control.',
-                      '3) Risks + mitigations',
-                      '- Unclear requirements -> acceptance criteria; schedule slip -> milestones and scope lock; quality -> mandatory QA gates.',
-                      '4) MVP scope',
-                      '- Core user flow, baseline validation, and minimal UX polish.',
-                      '5) Next steps',
-                      '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
-                    ].join('\n');
-            }
-          } else {
-            const summaryPrompt = isOneRoundDescriptive
+          const summaryPrompt = isOneRoundDescriptive
               ? [
                   language === 'cz' ? 'Pis cesky.' : 'Write in English.',
                   language === 'cz'
@@ -7593,70 +7411,69 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     : `Debate excerpts:\n${summaryContext}`,
                 ].join('\n\n');
 
-            try {
-              const response = await callAiRespond(
-                {
-                  projectId,
-                  language,
-                  agentRole: 'Orchestrator',
-                  model: refreshedProject.model,
-                  inputText: summaryPrompt,
-                  context: {
-                    projectName: refreshedProject.name,
-                    task,
-                    debateRunRound,
-                    rounds,
-                    revisionFeedback,
-                  },
+          try {
+            const response = await callAiRespond(
+              {
+                projectId,
+                language,
+                agentRole: 'Orchestrator',
+                model: refreshedProject.model,
+                inputText: summaryPrompt,
+                context: {
+                  projectName: refreshedProject.name,
+                  task,
+                  debateRunRound,
+                  rounds,
+                  revisionFeedback,
                 },
-                {},
-                buildAttachmentContext(refreshedProject)
-              );
-              summary = response.text;
-            } catch {
-              if (isOneRoundDescriptive) {
-                summary =
-                  language === 'cz'
-                    ? [
-                        'Final answer:',
-                        'Primy popis toho, co je skutecne videt nebo citelne ve vstupu.',
-                        'Uncertainty (optional):',
-                        'Nejasne nebo chybejici casti vstupu jsou uvedeny explicitne.',
-                      ].join('\n')
-                    : [
-                        'Final answer:',
-                        'Direct description of what is actually visible/readable in the input.',
-                        'Uncertainty (optional):',
-                        'Any unclear or missing input parts are stated explicitly.',
-                      ].join('\n');
-              } else {
-                summary =
-                  language === 'cz'
-                    ? [
-                        '1) Recommended plan',
-                        '- Potvrdit scope a metriky, dorucit MVP v kratkych iteracich, potom rozsireni podle dopadu.',
-                        '2) Tradeoffs',
-                        '- V1 omezuje rozsah funkcionality, ale zrychluje doruceni a snizuje riziko.',
-                        '3) Risks + mitigations',
-                        '- Nejasne pozadavky -> acceptance criteria; skluz terminu -> milniky a scope lock; kvalita -> povinne QA gate.',
-                        '4) MVP scope',
-                        '- Klicovy uzivatelsky tok, zakladni validace, minimalni UX polish.',
-                        '5) Next steps',
-                        '- Schvalit plan, spustit realizaci, monitorovat metriky a pripravit backlog pro v2.',
-                      ].join('\n')
-                    : [
-                        '1) Recommended plan',
-                        '- Confirm scope and metrics, deliver MVP in short iterations, then expand based on outcomes.',
-                        '2) Tradeoffs',
-                        '- v1 limits feature breadth but improves delivery speed and risk control.',
-                        '3) Risks + mitigations',
-                        '- Unclear requirements -> acceptance criteria; schedule slip -> milestones and scope lock; quality -> mandatory QA gates.',
-                        '4) MVP scope',
-                        '- Core user flow, baseline validation, and minimal UX polish.',
-                        '5) Next steps',
-                        '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
-                      ].join('\n');
-              }
+              },
+              {},
+              buildAttachmentContext(refreshedProject)
+            );
+            summary = response.text;
+          } catch {
+            if (isOneRoundDescriptive) {
+              summary =
+                language === 'cz'
+                  ? [
+                      'Final answer:',
+                      'Primy popis toho, co je skutecne videt nebo citelne ve vstupu.',
+                      'Uncertainty (optional):',
+                      'Nejasne nebo chybejici casti vstupu jsou uvedeny explicitne.',
+                    ].join('\n')
+                  : [
+                      'Final answer:',
+                      'Direct description of what is actually visible/readable in the input.',
+                      'Uncertainty (optional):',
+                      'Any unclear or missing input parts are stated explicitly.',
+                    ].join('\n');
+            } else {
+              summary =
+                language === 'cz'
+                  ? [
+                      '1) Recommended plan',
+                      '- Potvrdit scope a metriky, dorucit MVP v kratkych iteracich, potom rozsireni podle dopadu.',
+                      '2) Tradeoffs',
+                      '- V1 omezuje rozsah funkcionality, ale zrychluje doruceni a snizuje riziko.',
+                      '3) Risks + mitigations',
+                      '- Nejasne pozadavky -> acceptance criteria; skluz terminu -> milniky a scope lock; kvalita -> povinne QA gate.',
+                      '4) MVP scope',
+                      '- Klicovy uzivatelsky tok, zakladni validace, minimalni UX polish.',
+                      '5) Next steps',
+                      '- Schvalit plan, spustit realizaci, monitorovat metriky a pripravit backlog pro v2.',
+                    ].join('\n')
+                  : [
+                      '1) Recommended plan',
+                      '- Confirm scope and metrics, deliver MVP in short iterations, then expand based on outcomes.',
+                      '2) Tradeoffs',
+                      '- v1 limits feature breadth but improves delivery speed and risk control.',
+                      '3) Risks + mitigations',
+                      '- Unclear requirements -> acceptance criteria; schedule slip -> milestones and scope lock; quality -> mandatory QA gates.',
+                      '4) MVP scope',
+                      '- Core user flow, baseline validation, and minimal UX polish.',
+                      '5) Next steps',
+                      '- Approve plan, start execution, monitor metrics, and prepare prioritized v2 backlog.',
+                    ].join('\n');
             }
           }
 
@@ -7685,7 +7502,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [
       callAiRespond,
       buildAttachmentContext,
-      buildSimulatedRoundMessage,
       clampDebateRounds,
       formatRoundExcerpts,
       translateProject,
@@ -7762,7 +7578,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       provider: demoProject.provider,
       model: demoProject.model,
       outputType: demoProject.outputType,
-      simulationMode: demoProject.simulationMode,
       debateRounds: demoProject.debateRounds,
       debateMode: demoProject.debateMode,
       maxWordsPerAgent: demoProject.maxWordsPerAgent,
@@ -7881,7 +7696,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     addUserMessage,
     attachToProject,
     addLog,
-    setProjectSimulationMode,
     setProjectDebateRounds,
     schedulerState,
     setExecutionSpeed,
