@@ -58,6 +58,7 @@ describe('codeBundleStabilizer', () => {
     expect(paths).toContain('run-instructions.md');
     expect(paths).toContain('deploy-instructions.md');
     expect(paths).toContain('app-manifest.json');
+    expect(paths).toContain('site-metadata.json');
     expect(stabilized.entryPoint).toBe('index.html');
     expect(stabilized.bundle.summary).toContain('mode=landing-page');
   });

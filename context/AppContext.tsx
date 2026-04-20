@@ -98,6 +98,7 @@ const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
+const SEGMENTED_WEBSITE_NO_SCRIPT_MARKER = '__NO_SCRIPT__';
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
@@ -1378,6 +1379,14 @@ function taskRequiresHtmlEntry(task: Task, project: Project): boolean {
   return /\b(html|website|web app|webapp|landing page|homepage|page|site)\b/.test(combined);
 }
 
+function isSegmentedWebsiteSourceArtifactPath(artifactPath: string): boolean {
+  return artifactPath === 'index.html' || artifactPath === 'styles.css' || artifactPath === 'script.js';
+}
+
+function shouldUseSegmentedWebsiteBuild(project: Project): boolean {
+  return decideExecutionPipeline(project) === 'code' && project.outputType === 'website';
+}
+
 function isCodeGeneratedFilesStage(project: Project, task: Task, artifactPath: string): boolean {
   if (task.agent !== 'Builder' || artifactPath !== 'generated-files.json') return false;
   if (isDocumentGeneratedFilesStage(project, task, artifactPath)) return false;
@@ -1477,6 +1486,9 @@ function artifactCanBeGeneratedLocally(
   artifact: Task['producesArtifacts'][number]
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+    return true;
+  }
   if (decideExecutionPipeline(project) !== 'code') return false;
   if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') return true;
   if (task.agent === 'Integrator' && artifact.path === 'final-summary.md') return true;
@@ -1975,7 +1987,18 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
   if (!primaryArtifact) return [];
 
   const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
-  const isCodePipelineTask = /CodePlanner|AppArchitect|FileBuilder|QA|BundleExporter/i.test(task.title);
+  const isCodePipelineTask =
+    /CodePlanner|AppArchitect|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
+      task.title
+    );
+
+  if (primaryArtifact === 'styles.css') {
+    return [{ path: 'index.html' }];
+  }
+
+  if (primaryArtifact === 'script.js') {
+    return [{ path: 'index.html' }, { path: 'styles.css' }];
+  }
 
   if (primaryArtifact === 'normalized-rows.json') {
     return [{ path: 'extracted-rows.json' }];
@@ -1994,6 +2017,15 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
       ];
     }
     if (isCodePipelineTask) {
+      if (/WebBundleAssembler/i.test(task.title)) {
+        return [
+          { path: 'execution-plan.md' },
+          { path: 'architecture-review.md' },
+          { path: 'index.html' },
+          { path: 'styles.css' },
+          { path: 'script.js' },
+        ];
+      }
       return [
         { path: 'execution-plan.md' },
         { path: 'architecture-review.md' },
@@ -4049,6 +4081,63 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         shorten(findArtifactText(artifactPath) ?? '{}', maxChars);
       const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
+      if (shouldUseSegmentedWebsiteBuild(project) && isSegmentedWebsiteSourceArtifactPath(artifact.path)) {
+        const baselineByPath = snapshot.latestStableFiles.find(
+          (file) => normalizeExecutionFilePath(file.path) === artifact.path
+        );
+        const executionPlanExcerpt = shortenArtifact('execution-plan.md', 2200);
+        const architectureExcerpt = shortenArtifact('architecture-review.md', 2200);
+        const indexHtml = shorten(findArtifactText('index.html') ?? baselineByPath?.content ?? '', 5000);
+        const stylesCss = shorten(findArtifactText('styles.css') ?? '', 5000);
+
+        if (artifact.path === 'index.html') {
+          return [
+            'You are WebHtmlBuilder (step 1/3).',
+            'Return only raw HTML for index.html. No markdown fences, no explanations.',
+            'Generate a complete semantic page with accessible structure, responsive layout, and links to styles.css and optional script.js.',
+            'Keep output focused and runnable as static website source.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            'Execution plan excerpt:',
+            executionPlanExcerpt,
+            'Architecture review excerpt:',
+            architectureExcerpt,
+            baselineByPath ? `Previous index.html baseline:\n${shorten(baselineByPath.content, 2200)}` : 'Previous index.html baseline: none.',
+          ].join('\n\n');
+        }
+
+        if (artifact.path === 'styles.css') {
+          return [
+            'You are WebStyleBuilder (step 2/3).',
+            'Return only raw CSS for styles.css. No markdown fences, no explanations.',
+            'Style the provided index.html structure and keep responsive behavior for desktop and mobile.',
+            'Prefer maintainable selectors and avoid unused boilerplate.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            'Execution plan excerpt:',
+            executionPlanExcerpt,
+            'Architecture review excerpt:',
+            architectureExcerpt,
+            `Current index.html:\n${indexHtml || '<!doctype html><html><body></body></html>'}`,
+          ].join('\n\n');
+        }
+
+        return [
+          'You are WebScriptBuilder (step 3/3).',
+          'Return only raw JavaScript for script.js. No markdown fences, no explanations.',
+          `If no JavaScript is needed, return exactly ${SEGMENTED_WEBSITE_NO_SCRIPT_MARKER} and nothing else.`,
+          'If JavaScript is needed, keep it framework-free and compatible with the current HTML/CSS.',
+          `Project prompt:\n${snapshot.projectPrompt}`,
+          snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+          'Execution plan excerpt:',
+          executionPlanExcerpt,
+          'Architecture review excerpt:',
+          architectureExcerpt,
+          `Current index.html:\n${indexHtml || '<!doctype html><html><body></body></html>'}`,
+          `Current styles.css:\n${stylesCss || '/* no styles yet */'}`,
+        ].join('\n\n');
+      }
+
       if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
         const isExporterStage = isDocumentGeneratedFilesStage(project, task, artifact.path);
         if (isExporterStage) {
@@ -5125,6 +5214,68 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               continue;
             }
 
+            if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+              const indexHtml = getLatestArtifactContent(project.tasks, 'index.html');
+              const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css');
+              const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js');
+
+              if (!indexHtml?.trim()) {
+                failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty index.html.`);
+                return;
+              }
+              if (!stylesCss?.trim()) {
+                failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty styles.css.`);
+                return;
+              }
+
+              const includeScript = Boolean(
+                scriptJsRaw?.trim() && scriptJsRaw.trim() !== SEGMENTED_WEBSITE_NO_SCRIPT_MARKER
+              );
+
+              const seedBundle: ExecutionOutputBundle = {
+                status: 'success',
+                summary: 'Segmented website artifacts assembled into deterministic bundle.',
+                files: [
+                  { path: 'index.html', content: indexHtml },
+                  { path: 'styles.css', content: stylesCss },
+                  ...(includeScript ? [{ path: 'script.js', content: scriptJsRaw as string }] : []),
+                ],
+                notes: [
+                  'generated-files.json assembled locally from segmented website artifacts (index/styles/script).',
+                  includeScript ? 'script.js included.' : 'script.js omitted (no script needed).',
+                ],
+                removePaths: [],
+              };
+
+              const stabilized = stabilizeCodeExecutionBundle({
+                bundle: seedBundle,
+                projectName: project.name,
+                projectDescription: project.description,
+                latestRevisionFeedback: project.latestRevisionFeedback,
+                outputType: project.outputType,
+                language: project.language,
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: stabilized.bundle.summary,
+                rawContent: JSON.stringify(stabilized.bundle, null, 2),
+                executionOutput: stabilized.bundle,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: task.agent,
+                message:
+                  `${task.agent}: assembled deterministic website bundle from segmented artifacts ` +
+                  `(${stabilized.bundle.files.length} file(s)).`,
+              });
+              continue;
+            }
+
             if (!builderBundle) {
               failLiveTask(task.agent, `${task.agent}: local packaging requires Builder generated-files execution bundle.`);
               return;
@@ -5251,7 +5402,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
           const compactContext = buildExecutionAgentContext(task, snapshot);
-          const promptSize = estimatePromptSize(prompt, compactContext);
+          const lightweightContext = {
+            snapshotId: snapshot.id,
+            cycleNumber: snapshot.cycleNumber,
+            projectPrompt: shorten(snapshot.projectPrompt, 1200),
+            revisionPrompt: shorten(snapshot.revisionPrompt ?? '', 600),
+            executionPlan: shorten(getLatestArtifactContent(project.tasks, 'execution-plan.md') ?? '', 1200),
+            architectureReview: shorten(getLatestArtifactContent(project.tasks, 'architecture-review.md') ?? '', 1200),
+          };
+          const modelContext = isSegmentedWebsiteSourceArtifactPath(artifact.path)
+            ? lightweightContext
+            : compactContext;
+          const promptSize = estimatePromptSize(prompt, modelContext);
           const requiresStructuredOutput = artifactRequiresStructuredExecutionOutput(task, artifact);
           const shouldChunkPdfExtraction = shouldChunkBuilderPdfExtraction(task, artifact.path, snapshot, project);
           const structuredOnlyStage = shouldUseStructuredOnlyStage(artifact.path);
@@ -5615,7 +5777,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     inputText: finalPrompt,
                     context: {
                       artifactPath: artifact.path,
-                      ...compactContext,
+                      ...modelContext,
                       chunking: {
                         chunkCount: pdfChunks.length,
                         maxFilesPerChunk,
@@ -5663,7 +5825,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   inputText: prompt,
                   context: {
                     artifactPath: artifact.path,
-                    ...compactContext,
+                    ...modelContext,
                   },
                 },
                 { agent: task.agent },
@@ -6208,6 +6370,111 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           status: statusFor([codePlanner.id]),
           producesArtifacts: [{ path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' }],
         });
+
+        if (shouldUseSegmentedWebsiteBuild(project)) {
+          const webHtmlBuilder = createTask({
+            title: `WebHtmlBuilder: Generate index.html (${codeModeLabel})`,
+            description: 'Generate only index.html as focused website shell output.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [appArchitect.id],
+            status: statusFor([appArchitect.id]),
+            producesArtifacts: [{ path: 'index.html', label: 'Website HTML', kind: 'doc' }],
+          });
+
+          const webStyleBuilder = createTask({
+            title: `WebStyleBuilder: Generate styles.css (${codeModeLabel})`,
+            description: 'Generate only styles.css using current index.html as input.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webHtmlBuilder.id],
+            status: statusFor([webHtmlBuilder.id]),
+            producesArtifacts: [{ path: 'styles.css', label: 'Website Styles', kind: 'doc' }],
+          });
+
+          const webScriptBuilder = createTask({
+            title: `WebScriptBuilder: Generate script.js (${codeModeLabel})`,
+            description:
+              'Generate only script.js for interaction, or return no-script marker when JavaScript is unnecessary.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webStyleBuilder.id],
+            status: statusFor([webStyleBuilder.id]),
+            producesArtifacts: [{ path: 'script.js', label: 'Website Script', kind: 'doc' }],
+          });
+
+          const webBundleAssembler = createTask({
+            title: `WebBundleAssembler: Assemble generated-files.json (${codeModeLabel})`,
+            description:
+              'Assemble deterministic generated-files bundle locally from index.html, styles.css, and optional script.js.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webScriptBuilder.id],
+            status: statusFor([webScriptBuilder.id]),
+            producesArtifacts: [
+              { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
+              { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
+            ],
+          });
+
+          const qaReviewer = createTask({
+            title: `QA: Quality and risk review (${codeModeLabel})`,
+            description:
+              'Review assembled website source set for requirement coverage, structural contract completeness, and risks.',
+            agent: 'Reviewer',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webBundleAssembler.id],
+            status: statusFor([webBundleAssembler.id]),
+            producesArtifacts: [{ path: 'review-notes.md', label: 'Review Notes', kind: 'report' }],
+            retryCount: 0,
+            maxRetries,
+          });
+
+          const bundleExporter = createTask({
+            title: `BundleExporter: Packaging notes (${codeModeLabel})`,
+            description: 'Prepare deterministic packaging notes from generated source set and QA feedback.',
+            agent: 'Tester',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [qaReviewer.id],
+            status: statusFor([qaReviewer.id]),
+            producesArtifacts: [{ path: 'bundle-export.md', label: 'Bundle Export', kind: 'report' }],
+            retryCount: 0,
+            maxRetries,
+          });
+
+          const integrator = createTask({
+            title: `Integrator: Final combined result (${codeModeLabel})`,
+            description: 'Assemble deterministic final result summary from shared generated source set and stage notes.',
+            agent: 'Integrator',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [bundleExporter.id],
+            status: statusFor([bundleExporter.id]),
+            producesArtifacts: [{ path: 'final-summary.md', label: 'Final Summary', kind: 'doc' }],
+          });
+
+          return {
+            tasks: [
+              codePlanner,
+              appArchitect,
+              webHtmlBuilder,
+              webStyleBuilder,
+              webScriptBuilder,
+              webBundleAssembler,
+              qaReviewer,
+              bundleExporter,
+              integrator,
+            ],
+            concurrencyLimit: 2,
+            maxRetries,
+          };
+        }
 
         const fileBuilder = createTask({
           title: `FileBuilder: Generate runnable files (${codeModeLabel})`,

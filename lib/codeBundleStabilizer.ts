@@ -47,7 +47,7 @@ function hasExt(filePath: string, exts: string[]): boolean {
 function isCodeSourceFile(filePath: string): boolean {
   const lower = normalizePath(filePath).toLowerCase();
   if (!lower) return false;
-  if (['readme.md', 'run-instructions.md', 'deploy-instructions.md', 'app-manifest.json'].includes(lower)) {
+  if (['readme.md', 'run-instructions.md', 'deploy-instructions.md', 'app-manifest.json', 'site-metadata.json'].includes(lower)) {
     return false;
   }
   return hasExt(lower, ['.html', '.css', '.js', '.jsx', '.ts', '.tsx', '.json']);
@@ -206,6 +206,28 @@ function buildManifest(params: {
   return JSON.stringify(payload, null, 2);
 }
 
+export function buildWebsiteMetadata(params: {
+  mode: CodeGenerationMode;
+  entryPoint: string;
+  projectName: string;
+  projectDescription: string;
+  sourceFiles: ExecutionOutputFile[];
+}): string {
+  const payload = {
+    schemaVersion: 1,
+    type: 'ai-boardroom-website-metadata',
+    mode: params.mode,
+    entryPoint: params.entryPoint,
+    projectName: params.projectName || 'Generated Website',
+    projectDescription: params.projectDescription || '',
+    sourceFiles: params.sourceFiles
+      .map((file) => normalizePath(file.path))
+      .filter((path) => isCodeSourceFile(path)),
+    generatedAt: new Date().toISOString(),
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
 function upsertFile(files: ExecutionOutputFile[], path: string, content: string): ExecutionOutputFile[] {
   const normalizedPath = normalizePath(path);
   const next = [...files];
@@ -257,6 +279,19 @@ export function stabilizeCodeExecutionBundle(input: StabilizeInput): {
       projectName: input.projectName,
     })
   );
+  if (input.outputType === 'website') {
+    files = upsertFile(
+      files,
+      'site-metadata.json',
+      buildWebsiteMetadata({
+        mode,
+        entryPoint,
+        projectName: input.projectName,
+        projectDescription: input.projectDescription,
+        sourceFiles: files,
+      })
+    );
+  }
 
   const notes = Array.from(
     new Set([
