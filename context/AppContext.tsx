@@ -68,7 +68,13 @@ import {
   classifyCodeGenerationMode,
   getModeLabel,
   stabilizeCodeExecutionBundle,
+  validateWebsiteBundleSourceFiles,
 } from '@/lib/codeBundleStabilizer';
+import {
+  buildDeterministicWebsiteArtifacts,
+  deriveVerifiedWebsiteContent,
+  hasSufficientVerifiedWebsiteContent,
+} from '@/lib/deterministicWebsiteBuilder';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -98,6 +104,7 @@ const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
+const SEGMENTED_WEBSITE_NO_SCRIPT_MARKER = '__NO_SCRIPT__';
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
@@ -552,6 +559,7 @@ function buildSnapshotAttachmentContext(
     text: [
       entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
       entry.summary ? `Summary: ${entry.summary}` : '',
+      entry.structuredData ? `Structured snapshot:\n${JSON.stringify(entry.structuredData, null, 2)}` : '',
       entry.extractedText ?? '',
     ]
       .filter(Boolean)
@@ -1378,6 +1386,107 @@ function taskRequiresHtmlEntry(task: Task, project: Project): boolean {
   return /\b(html|website|web app|webapp|landing page|homepage|page|site)\b/.test(combined);
 }
 
+function isSegmentedWebsiteSourceArtifactPath(artifactPath: string): boolean {
+  return artifactPath === 'index.html' || artifactPath === 'styles.css' || artifactPath === 'script.js';
+}
+
+function shouldUseSegmentedWebsiteBuild(project: Project): boolean {
+  return decideExecutionPipeline(project) === 'code' && project.outputType === 'website';
+}
+
+function resolvePrimaryWebsiteSourceUrl(project: Project, snapshot: ExecutionSnapshot): string | null {
+  const fromProjectAttachment = project.attachments
+    .find((attachment) => attachment.kind === 'url' && typeof attachment.sourceUrl === 'string' && attachment.sourceUrl.trim())
+    ?.sourceUrl;
+  if (fromProjectAttachment?.trim()) {
+    return fromProjectAttachment.trim();
+  }
+
+  const fromSnapshotPages = snapshot.siteSnapshots
+    .flatMap((entry) => entry.pages ?? [])
+    .map((page) => page.url?.trim())
+    .find((url) => Boolean(url));
+  if (fromSnapshotPages) {
+    return fromSnapshotPages;
+  }
+
+  const fromStructured = snapshot.siteSnapshots
+    .map((entry) => entry.structuredData?.sourceUrl?.trim())
+    .find((url): url is string => Boolean(url));
+  if (fromStructured) {
+    return fromStructured;
+  }
+
+  return null;
+}
+
+function buildWebsiteAttachmentHints(snapshot: ExecutionSnapshot): string {
+  const structuredSnapshots = snapshot.siteSnapshots
+    .map((entry) => entry.structuredData)
+    .filter((entry): entry is NonNullable<ExecutionSnapshot['siteSnapshots'][number]['structuredData']> => Boolean(entry));
+
+  const urls = snapshot.siteSnapshots
+    .flatMap((entry) => entry.pages ?? [])
+    .map((page) => page.url?.trim())
+    .filter((url): url is string => Boolean(url));
+
+  const structuredUrls = structuredSnapshots
+    .map((entry) => entry.sourceUrl?.trim())
+    .filter((url): url is string => Boolean(url));
+
+  const emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+  const priceRegex = /(?:\b\d+[\s.,]?\d*\s?(?:CZK|EUR|USD|Kc|Kč|€|\$)\b|\b(?:price|cen[a-y]|tariff|fee)\b[^\n]{0,60})/i;
+
+  const sources = [
+    ...snapshot.siteSnapshots.map((entry) => entry.extractedText ?? ''),
+    ...snapshot.pdfTexts.map((entry) => entry.text ?? ''),
+  ]
+    .join('\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 400);
+
+  const emailLines = sources.filter((line) => emailRegex.test(line)).slice(0, 5);
+  const priceLines = sources.filter((line) => priceRegex.test(line)).slice(0, 8);
+
+  const structuredEmails = structuredSnapshots.flatMap((entry) => entry.contactFields.emails).slice(0, 10);
+  const structuredPhones = structuredSnapshots.flatMap((entry) => entry.contactFields.phones).slice(0, 10);
+  const structuredAddresses = structuredSnapshots.flatMap((entry) => entry.contactFields.addresses).slice(0, 6);
+  const structuredPrices = structuredSnapshots.flatMap((entry) => entry.pricingFields).slice(0, 10);
+  const structuredCtas = structuredSnapshots.flatMap((entry) => entry.ctaTexts).slice(0, 10);
+  const structuredMissing = Array.from(new Set(structuredSnapshots.flatMap((entry) => entry.missingFields))).slice(0, 10);
+
+  const uniqueUrls = Array.from(new Set([...structuredUrls, ...urls])).slice(0, 8);
+
+  return [
+    'Approved late-added inputs from attachments (use when relevant):',
+    uniqueUrls.length ? `- Source URLs:\n${uniqueUrls.map((url) => `  - ${url}`).join('\n')}` : '- Source URLs: none detected',
+    structuredEmails.length
+      ? `- Emails:\n${structuredEmails.map((line) => `  - ${shorten(line, 160)}`).join('\n')}`
+      : emailLines.length
+      ? `- Emails:\n${emailLines.map((line) => `  - ${shorten(line, 160)}`).join('\n')}`
+      : '- Emails: none detected',
+    structuredPhones.length
+      ? `- Phones:\n${structuredPhones.map((line) => `  - ${shorten(line, 120)}`).join('\n')}`
+      : '- Phones: none detected',
+    structuredAddresses.length
+      ? `- Addresses:\n${structuredAddresses.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : '- Addresses: none detected',
+    structuredPrices.length
+      ? `- Prices/tariffs:\n${structuredPrices.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : priceLines.length
+      ? `- Prices/tariffs:\n${priceLines.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : '- Prices/tariffs: none detected',
+    structuredCtas.length
+      ? `- CTA texts:\n${structuredCtas.map((line) => `  - ${shorten(line, 120)}`).join('\n')}`
+      : '- CTA texts: none detected',
+    structuredMissing.length
+      ? `- Missing fields reported by ingestion:\n${structuredMissing.map((line) => `  - ${line}`).join('\n')}`
+      : '- Missing fields reported by ingestion: none',
+  ].join('\n');
+}
+
 function isCodeGeneratedFilesStage(project: Project, task: Task, artifactPath: string): boolean {
   if (task.agent !== 'Builder' || artifactPath !== 'generated-files.json') return false;
   if (isDocumentGeneratedFilesStage(project, task, artifactPath)) return false;
@@ -1477,6 +1586,12 @@ function artifactCanBeGeneratedLocally(
   artifact: Task['producesArtifacts'][number]
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (task.agent === 'Builder' && isSegmentedWebsiteSourceArtifactPath(artifact.path) && shouldUseSegmentedWebsiteBuild(project)) {
+    return true;
+  }
+  if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+    return true;
+  }
   if (decideExecutionPipeline(project) !== 'code') return false;
   if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') return true;
   if (task.agent === 'Integrator' && artifact.path === 'final-summary.md') return true;
@@ -1975,7 +2090,18 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
   if (!primaryArtifact) return [];
 
   const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
-  const isCodePipelineTask = /CodePlanner|AppArchitect|FileBuilder|QA|BundleExporter/i.test(task.title);
+  const isCodePipelineTask =
+    /CodePlanner|AppArchitect|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
+      task.title
+    );
+
+  if (primaryArtifact === 'styles.css') {
+    return [{ path: 'index.html' }];
+  }
+
+  if (primaryArtifact === 'script.js') {
+    return [{ path: 'index.html' }, { path: 'styles.css' }];
+  }
 
   if (primaryArtifact === 'normalized-rows.json') {
     return [{ path: 'extracted-rows.json' }];
@@ -1994,6 +2120,15 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
       ];
     }
     if (isCodePipelineTask) {
+      if (/WebBundleAssembler/i.test(task.title)) {
+        return [
+          { path: 'execution-plan.md' },
+          { path: 'architecture-review.md' },
+          { path: 'index.html' },
+          { path: 'styles.css' },
+          { path: 'script.js' },
+        ];
+      }
       return [
         { path: 'execution-plan.md' },
         { path: 'architecture-review.md' },
@@ -3126,6 +3261,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const fallbackSourceUrl =
+        attachment.kind === 'url'
+          ? (attachment.sourceUrl ?? attachment.downloadUrl ?? ingestion?.sourceUrl)?.trim()
+          : '';
       let included = false;
 
       const hasValidImageUrl = attachment.kind === 'image' ? resolveAttachmentImageUrl(attachment) : null;
@@ -3151,12 +3290,40 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         included = true;
       }
 
+      if (attachment.kind === 'url' && fallbackSourceUrl) {
+        textSections.push({
+          title: `${attachment.title} (source URL)`,
+          kind: attachment.kind,
+          source,
+          text: [`Primary source URL: ${fallbackSourceUrl}`, ingestion?.summary ? `Ingestion status: ${ingestion.summary}` : '']
+            .filter(Boolean)
+            .join('\n'),
+        });
+        included = true;
+      }
+
       if (ingestion?.extractedText) {
         textSections.push({
           title: attachment.title,
           kind: attachment.kind,
           source,
           text: ingestion.extractedText,
+        });
+        included = true;
+        if (attachment.kind === 'url' && ingestion.urlStructuredData) {
+          textSections.push({
+            title: `${attachment.title} (structured snapshot)`,
+            kind: attachment.kind,
+            source,
+            text: JSON.stringify(ingestion.urlStructuredData, null, 2),
+          });
+        }
+      } else if (attachment.kind === 'url' && ingestion?.urlStructuredData) {
+        textSections.push({
+          title: `${attachment.title} (structured snapshot)`,
+          kind: attachment.kind,
+          source,
+          text: JSON.stringify(ingestion.urlStructuredData, null, 2),
         });
         included = true;
       } else if (attachment.kind === 'zip' && ingestion?.zipFileTree) {
@@ -3298,20 +3465,37 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
+        const fallbackSourceUrl = (attachment.sourceUrl ?? attachment.downloadUrl ?? ingestion?.sourceUrl)?.trim();
+        if (ingestion?.extractedText || ingestion?.urlPages?.length || ingestion?.urlStructuredData || fallbackSourceUrl) {
+          const fallbackPages = fallbackSourceUrl
+            ? [
+                {
+                  url: fallbackSourceUrl,
+                  title: 'Attached source URL',
+                  summary: 'Source URL attached; crawl content may still be processing.',
+                  excerpt: 'Source URL attached; crawl content may still be processing.',
+                },
+              ]
+            : undefined;
+          const fallbackText = fallbackSourceUrl
+            ? `Primary source URL: ${fallbackSourceUrl}`
+            : undefined;
           siteSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
             source,
             pageTitle: ingestion?.pageTitle,
-            summary: ingestion?.summary,
-            extractedText: shorten(ingestion?.extractedText, 24_000),
+            summary: ingestion?.summary ?? (fallbackSourceUrl ? `Attached source URL: ${fallbackSourceUrl}` : undefined),
+            extractedText: ingestion?.extractedText?.trim()
+              ? shorten(ingestion.extractedText, 24_000)
+              : fallbackText,
             pages: ingestion?.urlPages?.slice(0, 10).map((page) => ({
               url: page.url,
               title: page.title,
               summary: page.summary,
               excerpt: shorten(page.excerpt, 700),
-            })),
+            })) ?? fallbackPages,
+            structuredData: ingestion?.urlStructuredData,
           });
         } else {
           missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
@@ -4049,6 +4233,71 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         shorten(findArtifactText(artifactPath) ?? '{}', maxChars);
       const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
+      if (shouldUseSegmentedWebsiteBuild(project) && isSegmentedWebsiteSourceArtifactPath(artifact.path)) {
+        const baselineByPath = snapshot.latestStableFiles.find(
+          (file) => normalizeExecutionFilePath(file.path) === artifact.path
+        );
+        const executionPlanExcerpt = shortenArtifact('execution-plan.md', 2200);
+        const architectureExcerpt = shortenArtifact('architecture-review.md', 2200);
+        const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
+        const attachmentHints = buildWebsiteAttachmentHints(snapshot);
+        const indexHtml = shorten(findArtifactText('index.html') ?? baselineByPath?.content ?? '', 5000);
+        const stylesCss = shorten(findArtifactText('styles.css') ?? '', 5000);
+
+        if (artifact.path === 'index.html') {
+          return [
+            'You are WebHtmlBuilder (step 1/3).',
+            'Return only raw HTML for index.html. No markdown fences, no explanations.',
+            'Generate a complete semantic page with accessible structure, responsive layout, and links to styles.css and optional script.js.',
+            'Keep output focused and runnable as static website source.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+            attachmentHints,
+            'Execution plan excerpt:',
+            executionPlanExcerpt,
+            'Architecture review excerpt:',
+            architectureExcerpt,
+            baselineByPath ? `Previous index.html baseline:\n${shorten(baselineByPath.content, 2200)}` : 'Previous index.html baseline: none.',
+          ].join('\n\n');
+        }
+
+        if (artifact.path === 'styles.css') {
+          return [
+            'You are WebStyleBuilder (step 2/3).',
+            'Return only raw CSS for styles.css. No markdown fences, no explanations.',
+            'Style the provided index.html structure and keep responsive behavior for desktop and mobile.',
+            'Prefer maintainable selectors and avoid unused boilerplate.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+            attachmentHints,
+            'Execution plan excerpt:',
+            executionPlanExcerpt,
+            'Architecture review excerpt:',
+            architectureExcerpt,
+            `Current index.html:\n${indexHtml || '<!doctype html><html><body></body></html>'}`,
+          ].join('\n\n');
+        }
+
+        return [
+          'You are WebScriptBuilder (step 3/3).',
+          'Return only raw JavaScript for script.js. No markdown fences, no explanations.',
+          `If no JavaScript is needed, return exactly ${SEGMENTED_WEBSITE_NO_SCRIPT_MARKER} and nothing else.`,
+          'If JavaScript is needed, keep it framework-free and compatible with the current HTML/CSS.',
+          `Project prompt:\n${snapshot.projectPrompt}`,
+          snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+          sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+          attachmentHints,
+          'Execution plan excerpt:',
+          executionPlanExcerpt,
+          'Architecture review excerpt:',
+          architectureExcerpt,
+          `Current index.html:\n${indexHtml || '<!doctype html><html><body></body></html>'}`,
+          `Current styles.css:\n${stylesCss || '/* no styles yet */'}`,
+        ].join('\n\n');
+      }
+
       if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
         const isExporterStage = isDocumentGeneratedFilesStage(project, task, artifact.path);
         if (isExporterStage) {
@@ -4315,6 +4564,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           pageTitle: entry.pageTitle,
           summary: shorten(entry.summary, 600),
           extractedExcerpt: shorten(entry.extractedText, 1_000),
+          structured: entry.structuredData
+            ? {
+                sourceUrl: entry.structuredData.sourceUrl,
+                missingFields: entry.structuredData.missingFields,
+                warnings: entry.structuredData.extractionWarnings,
+                contacts: {
+                  emails: entry.structuredData.contactFields.emails.slice(0, 8),
+                  phones: entry.structuredData.contactFields.phones.slice(0, 8),
+                  addresses: entry.structuredData.contactFields.addresses.slice(0, 5),
+                },
+                pricing: entry.structuredData.pricingFields.slice(0, 10),
+                ctas: entry.structuredData.ctaTexts.slice(0, 10),
+              }
+            : null,
           pages: (entry.pages ?? []).slice(0, 5).map((page) => ({
             title: page.title,
             url: page.url,
@@ -5100,6 +5363,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           if (artifactCanBeGeneratedLocally(project, task, artifact)) {
             const builderBundle = findBuilderExecutionBundle(project.tasks);
 
+            if (
+              task.agent === 'Builder' &&
+              shouldUseSegmentedWebsiteBuild(project) &&
+              isSegmentedWebsiteSourceArtifactPath(artifact.path)
+            ) {
+              const verifiedContent = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+              if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: verified source content is insufficient for deterministic website generation.`
+                );
+                return;
+              }
+
+              const websiteArtifacts = buildDeterministicWebsiteArtifacts({
+                projectName: project.name,
+                projectDescription: project.description,
+                verified: verifiedContent,
+              });
+
+              const selectedContent =
+                artifact.path === 'index.html'
+                  ? websiteArtifacts.indexHtml
+                  : artifact.path === 'styles.css'
+                  ? websiteArtifacts.stylesCss
+                  : websiteArtifacts.scriptJs;
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: selectedContent,
+                rawContent: selectedContent,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: deterministic website file generated locally (${artifact.path}) from verified structured content.`,
+              });
+              continue;
+            }
+
             if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') {
               const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
               const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
@@ -5122,6 +5429,83 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 producedBy: task.agent,
                 generatedAt: new Date(),
               };
+              continue;
+            }
+
+            if (task.agent === 'Builder' && artifact.path === 'generated-files.json' && shouldUseSegmentedWebsiteBuild(project)) {
+              const indexHtml = getLatestArtifactContent(project.tasks, 'index.html');
+              const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css');
+              const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js');
+              const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
+
+              if (!indexHtml?.trim()) {
+                failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty index.html.`);
+                return;
+              }
+              if (!stylesCss?.trim()) {
+                failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty styles.css.`);
+                return;
+              }
+
+              const includeScript = Boolean(
+                scriptJsRaw?.trim() && scriptJsRaw.trim() !== SEGMENTED_WEBSITE_NO_SCRIPT_MARKER
+              );
+
+              const sourceValidation = validateWebsiteBundleSourceFiles({
+                files: [
+                  { path: 'index.html', content: indexHtml },
+                  { path: 'styles.css', content: stylesCss },
+                  ...(includeScript ? [{ path: 'script.js', content: scriptJsRaw as string }] : []),
+                ],
+                sourceUrl,
+              });
+
+              if (!sourceValidation.ok) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: segmented website artifacts failed integrity validation: ${sourceValidation.errors.join(' | ')}`
+                );
+                return;
+              }
+
+              const seedBundle: ExecutionOutputBundle = {
+                status: 'success',
+                summary: 'Segmented website artifacts assembled into deterministic bundle.',
+                files: sourceValidation.files,
+                notes: [
+                  'generated-files.json assembled locally from segmented website artifacts (index/styles/script).',
+                  includeScript ? 'script.js included.' : 'script.js omitted (no script needed).',
+                ],
+                removePaths: [],
+              };
+
+              const stabilized = stabilizeCodeExecutionBundle({
+                bundle: seedBundle,
+                projectName: project.name,
+                projectDescription: project.description,
+                latestRevisionFeedback: project.latestRevisionFeedback,
+                outputType: project.outputType,
+                language: project.language,
+                sourceUrl,
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: stabilized.bundle.summary,
+                rawContent: JSON.stringify(stabilized.bundle, null, 2),
+                executionOutput: stabilized.bundle,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: task.agent,
+                message:
+                  `${task.agent}: assembled deterministic website bundle from segmented artifacts ` +
+                  `(${stabilized.bundle.files.length} file(s)).`,
+              });
               continue;
             }
 
@@ -5251,7 +5635,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
           const compactContext = buildExecutionAgentContext(task, snapshot);
-          const promptSize = estimatePromptSize(prompt, compactContext);
+          const lightweightContext = {
+            snapshotId: snapshot.id,
+            cycleNumber: snapshot.cycleNumber,
+            projectPrompt: shorten(snapshot.projectPrompt, 1200),
+            revisionPrompt: shorten(snapshot.revisionPrompt ?? '', 600),
+            executionPlan: shorten(getLatestArtifactContent(project.tasks, 'execution-plan.md') ?? '', 1200),
+            architectureReview: shorten(getLatestArtifactContent(project.tasks, 'architecture-review.md') ?? '', 1200),
+          };
+          const modelContext = isSegmentedWebsiteSourceArtifactPath(artifact.path)
+            ? lightweightContext
+            : compactContext;
+          const promptSize = estimatePromptSize(prompt, modelContext);
           const requiresStructuredOutput = artifactRequiresStructuredExecutionOutput(task, artifact);
           const shouldChunkPdfExtraction = shouldChunkBuilderPdfExtraction(task, artifact.path, snapshot, project);
           const structuredOnlyStage = shouldUseStructuredOnlyStage(artifact.path);
@@ -5615,7 +6010,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     inputText: finalPrompt,
                     context: {
                       artifactPath: artifact.path,
-                      ...compactContext,
+                      ...modelContext,
                       chunking: {
                         chunkCount: pdfChunks.length,
                         maxFilesPerChunk,
@@ -5663,7 +6058,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   inputText: prompt,
                   context: {
                     artifactPath: artifact.path,
-                    ...compactContext,
+                    ...modelContext,
                   },
                 },
                 { agent: task.agent },
@@ -6209,6 +6604,111 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           producesArtifacts: [{ path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' }],
         });
 
+        if (shouldUseSegmentedWebsiteBuild(project)) {
+          const webHtmlBuilder = createTask({
+            title: `WebHtmlBuilder: Generate index.html (${codeModeLabel})`,
+            description: 'Generate only index.html as focused website shell output.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [appArchitect.id],
+            status: statusFor([appArchitect.id]),
+            producesArtifacts: [{ path: 'index.html', label: 'Website HTML', kind: 'doc' }],
+          });
+
+          const webStyleBuilder = createTask({
+            title: `WebStyleBuilder: Generate styles.css (${codeModeLabel})`,
+            description: 'Generate only styles.css using current index.html as input.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webHtmlBuilder.id],
+            status: statusFor([webHtmlBuilder.id]),
+            producesArtifacts: [{ path: 'styles.css', label: 'Website Styles', kind: 'doc' }],
+          });
+
+          const webScriptBuilder = createTask({
+            title: `WebScriptBuilder: Generate script.js (${codeModeLabel})`,
+            description:
+              'Generate only script.js for interaction, or return no-script marker when JavaScript is unnecessary.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webStyleBuilder.id],
+            status: statusFor([webStyleBuilder.id]),
+            producesArtifacts: [{ path: 'script.js', label: 'Website Script', kind: 'doc' }],
+          });
+
+          const webBundleAssembler = createTask({
+            title: `WebBundleAssembler: Assemble generated-files.json (${codeModeLabel})`,
+            description:
+              'Assemble deterministic generated-files bundle locally from index.html, styles.css, and optional script.js.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webScriptBuilder.id],
+            status: statusFor([webScriptBuilder.id]),
+            producesArtifacts: [
+              { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
+              { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
+            ],
+          });
+
+          const qaReviewer = createTask({
+            title: `QA: Quality and risk review (${codeModeLabel})`,
+            description:
+              'Review assembled website source set for requirement coverage, structural contract completeness, and risks.',
+            agent: 'Reviewer',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webBundleAssembler.id],
+            status: statusFor([webBundleAssembler.id]),
+            producesArtifacts: [{ path: 'review-notes.md', label: 'Review Notes', kind: 'report' }],
+            retryCount: 0,
+            maxRetries,
+          });
+
+          const bundleExporter = createTask({
+            title: `BundleExporter: Packaging notes (${codeModeLabel})`,
+            description: 'Prepare deterministic packaging notes from generated source set and QA feedback.',
+            agent: 'Tester',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [qaReviewer.id],
+            status: statusFor([qaReviewer.id]),
+            producesArtifacts: [{ path: 'bundle-export.md', label: 'Bundle Export', kind: 'report' }],
+            retryCount: 0,
+            maxRetries,
+          });
+
+          const integrator = createTask({
+            title: `Integrator: Final combined result (${codeModeLabel})`,
+            description: 'Assemble deterministic final result summary from shared generated source set and stage notes.',
+            agent: 'Integrator',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [bundleExporter.id],
+            status: statusFor([bundleExporter.id]),
+            producesArtifacts: [{ path: 'final-summary.md', label: 'Final Summary', kind: 'doc' }],
+          });
+
+          return {
+            tasks: [
+              codePlanner,
+              appArchitect,
+              webHtmlBuilder,
+              webStyleBuilder,
+              webScriptBuilder,
+              webBundleAssembler,
+              qaReviewer,
+              bundleExporter,
+              integrator,
+            ],
+            concurrencyLimit: 2,
+            maxRetries,
+          };
+        }
+
         const fileBuilder = createTask({
           title: `FileBuilder: Generate runnable files (${codeModeLabel})`,
           description:
@@ -6557,12 +7057,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
+        const projectContext = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        const isWebsiteProject = projectContext?.outputType === 'website';
+
         if (attachment.kind === 'url') {
           dispatch({
             type: 'ADD_LOG',
             level: 'info',
             message: `URL fetch started: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
           });
+          if (isWebsiteProject) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: 'Website source ingestion: running structured URL extraction before debate/execution.',
+            });
+          }
         }
 
         const response = await fetch('/api/attachments/ingest', {
@@ -6576,8 +7086,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             mimeType: attachment.mimeType,
             ...(attachment.kind === 'url'
               ? {
-                  maxPages: 5,
-                  maxDepth: 1,
+                  maxPages: isWebsiteProject ? 8 : 5,
+                  maxDepth: isWebsiteProject ? 2 : 1,
                 }
               : {}),
           }),
