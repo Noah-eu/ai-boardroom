@@ -55,7 +55,18 @@ import {
 } from '@/orchestrator';
 import { createTask, patchTask } from '@/tasks';
 import { Language, TranslationKey, translate, translateWithVars } from '@/i18n';
-import { buildDeterministicDocumentExecutionBundle } from '@/lib/documentExporter';
+import { runArtifactPipeline } from '@/lib/artifactPipeline';
+import {
+  buildArtifactPipelineExecutionInput,
+  resolveProjectArtifactFamily,
+  shouldRouteGeneratedFilesThroughArtifactPipeline,
+} from '@/lib/artifactPipeline/runtime';
+import {
+  buildAttachmentRuntimeEntries,
+  getAttachmentIngestionBlockers,
+  resolveAttachmentRuntimeState,
+  sanitizeAttachmentIngestionForMerge,
+} from '@/lib/artifactPipeline/attachmentIngestionState';
 import {
   deriveDocumentTableIntent,
   isDocumentColumnValueMissing,
@@ -99,12 +110,11 @@ const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
 const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
-const REAL_PLANNER_BUILD_MARKER =
+const REAL_PLANNER_BUILD_COMMIT_HASH =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
     process.env.NEXT_PUBLIC_BUILD_MARKER ||
-    'local')
-    .toString()
-    .slice(0, 7);
+    'local').toString();
+const REAL_PLANNER_BUILD_MARKER = REAL_PLANNER_BUILD_COMMIT_HASH.slice(0, 7);
 
 function resolveExecutionTaskTimeoutMs(): number {
   const raw = process.env.NEXT_PUBLIC_EXECUTION_TASK_TIMEOUT_MS;
@@ -1476,6 +1486,16 @@ function artifactCanBeGeneratedLocally(
   task: Task,
   artifact: Task['producesArtifacts'][number]
 ): boolean {
+  if (
+    shouldRouteGeneratedFilesThroughArtifactPipeline({
+      project,
+      task,
+      artifactPath: artifact.path,
+      documentGeneratedFilesStage: isDocumentGeneratedFilesStage(project, task, artifact.path),
+    })
+  ) {
+    return true;
+  }
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
   if (decideExecutionPipeline(project) !== 'code') return false;
   if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') return true;
@@ -2185,34 +2205,9 @@ function isFailureTerminalStatus(status: Task['status']): boolean {
 type ExecutionPipelineKind = 'document' | 'code';
 
 function decideExecutionPipeline(project: Project): ExecutionPipelineKind {
-  const combinedText = [project.name, project.description, project.latestRevisionFeedback ?? '']
-    .join(' ')
-    .toLowerCase();
+  const family = resolveProjectArtifactFamily(project);
 
-  const documentSignals =
-    /\binvoice\b|\binvoices\b|\bpdf\b|\bcsv\b|\bxlsx\b|\bextract\b|\breport\b|\bsummary\b|\bfaktur\b|\buctenk\b|\bvyuctovan/i.test(
-      combinedText
-    );
-  const codeSignals =
-    /\bapp\b|\bweb\b|\bwebsite\b|\bgame\b|\bpong\b|\btodo\b|\bhtml\b|\bcss\b|\bjavascript\b|\bjs\b|\btypescript\b|\bcode\b|\bfrontend\b|\bui\b/.test(
-      combinedText
-    );
-
-  const attachments = project.attachments ?? [];
-  const pdfLikeAttachments = attachments.filter((attachment) => attachment.kind === 'pdf').length;
-  const zipCodeSignals = attachments.some((attachment) => {
-    if (attachment.kind !== 'zip') return false;
-    const tree = attachment.ingestion?.zipFileTree ?? [];
-    return tree.some((entry) => /\.(html|css|js|ts|tsx|jsx|json|md)$/i.test(entry));
-  });
-
-  if (project.outputType === 'document') return 'document';
-  if (project.outputType === 'app' || project.outputType === 'website') return 'code';
-
-  if (documentSignals && !codeSignals) return 'document';
-  if (codeSignals && !documentSignals) return 'code';
-  if (pdfLikeAttachments > 0 && !zipCodeSignals) return 'document';
-
+  if (family === 'document') return 'document';
   return 'code';
 }
 
@@ -2805,20 +2800,16 @@ function appReducer(state: AppState, action: Action): AppState {
         attachments: project.attachments.map((attachment) =>
           attachment.id === action.attachmentId
             ? (() => {
-                const merged = {
-                  ...attachment.ingestion,
-                  ...action.ingestion,
-                };
-                const mergedStatus = merged.status;
-                if (!mergedStatus) {
+                const merged = sanitizeAttachmentIngestionForMerge({
+                  current: attachment.ingestion,
+                  patch: action.ingestion,
+                });
+                if (!merged?.status) {
                   return attachment;
                 }
                 return {
                   ...attachment,
-                  ingestion: {
-                    ...merged,
-                    status: mergedStatus,
-                  },
+                  ingestion: merged,
                 };
               })()
             : attachment
@@ -2962,6 +2953,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, createInitialAppState);
   const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
+  const [runtimeBuildCommitHash, setRuntimeBuildCommitHash] = useState<string>(REAL_PLANNER_BUILD_COMMIT_HASH);
   const [language, setLanguage] = useState<Language>('cz');
   const [executionSpeed, setExecutionSpeed] = useState<ExecutionSpeed>('normal');
   const [autoPauseCheckpoints, setAutoPauseCheckpoints] = useState(true);
@@ -2996,6 +2988,31 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     executionSpeedRef.current = executionSpeed;
   }, [executionSpeed]);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetch('/api/build-info')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!isMounted || !data) return;
+        const commitFull = typeof data.commitFull === 'string' ? data.commitFull.trim() : '';
+        const commitShort = typeof data.commit === 'string' ? data.commit.trim() : '';
+        if (commitFull && commitFull !== 'unknown') {
+          setRuntimeBuildCommitHash(commitFull);
+          return;
+        }
+        if (commitShort && commitShort !== 'unknown') {
+          setRuntimeBuildCommitHash(commitShort);
+        }
+      })
+      .catch(() => {
+        // Keep env-based build marker fallback.
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let unsubAuth: (() => void) | undefined;
@@ -3126,6 +3143,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const runtimeState = resolveAttachmentRuntimeState(attachment);
       let included = false;
 
       const hasValidImageUrl = attachment.kind === 'image' ? resolveAttachmentImageUrl(attachment) : null;
@@ -3151,7 +3169,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         included = true;
       }
 
-      if (ingestion?.extractedText) {
+      if (runtimeState === 'parsed' && ingestion?.extractedText) {
         textSections.push({
           title: attachment.title,
           kind: attachment.kind,
@@ -3159,7 +3177,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           text: ingestion.extractedText,
         });
         included = true;
-      } else if (attachment.kind === 'zip' && ingestion?.zipFileTree) {
+      } else if (runtimeState === 'parsed' && attachment.kind === 'zip' && ingestion?.zipFileTree) {
         const zipSummary = [
           `File tree:\n${ingestion.zipFileTree.slice(0, 80).join('\n')}`,
           ingestion.zipKeyFiles?.length
@@ -3226,6 +3244,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const runtimeState = resolveAttachmentRuntimeState(attachment);
 
       if (attachment.kind === 'image') {
         const resolvedUrl = resolveAttachmentImageUrl(attachment);
@@ -3243,7 +3262,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'pdf') {
-        if (ingestion?.extractedText?.trim()) {
+        if (runtimeState === 'parsed' && ingestion?.extractedText?.trim()) {
           pdfTexts.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -3251,12 +3270,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             text: shorten(ingestion.extractedText, 24_000),
           });
         } else {
-          missingInputNotes.push(`PDF text missing or unreadable: ${attachment.title}`);
+          const reason = runtimeState === 'failed' ? 'failed ingest' : 'pending ingest';
+          missingInputNotes.push(`PDF text missing or unreadable (${reason}): ${attachment.title}`);
         }
       }
 
       if (attachment.kind === 'zip') {
-        if (ingestion?.zipFileTree?.length) {
+        if (runtimeState === 'parsed' && ingestion?.zipFileTree?.length) {
           const zipPdfFiles = (ingestion.zipPdfFiles ?? []).map((file) => ({
             path: file.path,
             status: file.status,
@@ -3293,12 +3313,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             pdfFiles: zipPdfFiles,
           });
         } else {
-          missingInputNotes.push(`ZIP tree missing or unreadable: ${attachment.title}`);
+          const reason = runtimeState === 'failed' ? 'failed ingest' : 'pending ingest';
+          missingInputNotes.push(`ZIP tree missing or unreadable (${reason}): ${attachment.title}`);
         }
       }
 
       if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
+        if (runtimeState === 'parsed' && (ingestion?.extractedText || ingestion?.urlPages?.length)) {
           siteSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
@@ -3314,7 +3335,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             })),
           });
         } else {
-          missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
+          if (runtimeState === 'failed') {
+            missingInputNotes.push(`URL attachment failed ingest: ${attachment.title}`);
+          } else {
+            missingInputNotes.push(`URL attachment parsed content pending: ${attachment.title}`);
+          }
         }
       }
     }
@@ -5100,6 +5125,76 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           if (artifactCanBeGeneratedLocally(project, task, artifact)) {
             const builderBundle = findBuilderExecutionBundle(project.tasks);
 
+            if (
+              shouldRouteGeneratedFilesThroughArtifactPipeline({
+                project,
+                task,
+                artifactPath: artifact.path,
+                documentGeneratedFilesStage: isDocumentGeneratedFilesStage(project, task, artifact.path),
+              })
+            ) {
+              const family = isDocumentGeneratedFilesStage(project, task, artifact.path)
+                ? 'document'
+                : resolveProjectArtifactFamily(project);
+              const validatedRowsRaw = getLatestArtifactContent(project.tasks, 'validated-rows.json');
+              const summaryMetadataRaw = getLatestArtifactContent(project.tasks, 'summary-metadata.json');
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: generating ${artifact.path} through artifact-pipeline-v2 core (${family})`,
+              });
+
+              const generatedArtifact = runArtifactPipeline({
+                input: buildArtifactPipelineExecutionInput({
+                  project,
+                  snapshot,
+                  family,
+                  runtimeBuildCommitHash,
+                  sourceArtifacts:
+                    family === 'document'
+                      ? {
+                          validatedRowsRaw,
+                          summaryMetadataRaw,
+                        }
+                      : undefined,
+                }),
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: generatedArtifact.bundle.summary,
+                rawContent: JSON.stringify(generatedArtifact.bundle, null, 2),
+                executionOutput: generatedArtifact.bundle,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: task.agent,
+                message:
+                  `${task.agent}: artifact-pipeline-v2 bundle ready ` +
+                  `(${generatedArtifact.family}, ${generatedArtifact.metadata.factCount} verified fact(s), ${generatedArtifact.bundle.files.length} file(s)).`,
+              });
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message:
+                  `${task.agent}: artifact-pipeline-v2 audit ` +
+                  `(commit=${generatedArtifact.metadata.runtimeCommitHash}, ` +
+                  `family=${generatedArtifact.metadata.selection.selectedArtifactFamily}, ` +
+                  `intent=${generatedArtifact.metadata.selection.selectedDocumentIntent ?? 'n/a'}, ` +
+                  `outputContract=${generatedArtifact.metadata.selection.selectedOutputContract ?? 'n/a'}, ` +
+                  `renderer=${generatedArtifact.metadata.selection.selectedRendererExporter}, ` +
+                  `source=${generatedArtifact.metadata.selection.selectionSource}).`,
+              });
+              continue;
+            }
+
             if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') {
               const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
               const executionBundle = generatedFilesArtifact?.executionOutput ?? null;
@@ -5196,50 +5291,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
             failLiveTask(task.agent, `${task.agent}: unsupported local artifact generation target ${artifact.path}.`);
             return;
-          }
-
-          const isDeterministicDocumentExporterStage = isDocumentGeneratedFilesStage(
-            project,
-            task,
-            artifact.path
-          );
-
-          if (isDeterministicDocumentExporterStage) {
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'info',
-              agent: task.agent,
-              message: `${task.agent}: generating deterministic document export bundle (no OpenAI call).`,
-            });
-
-            const validatedRowsRaw = getLatestArtifactContent(project.tasks, 'validated-rows.json');
-            const summaryMetadataRaw = getLatestArtifactContent(project.tasks, 'summary-metadata.json');
-
-            const deterministicExport = buildDeterministicDocumentExecutionBundle({
-              validatedRowsRaw,
-              summaryMetadataRaw,
-              language: project.language,
-              requestedOutputPrompt: snapshot.projectPrompt,
-            });
-
-            updatedArtifacts[index] = {
-              ...artifact,
-              content: deterministicExport.bundle.summary,
-              rawContent: JSON.stringify(deterministicExport.bundle, null, 2),
-              executionOutput: deterministicExport.bundle,
-              producedBy: task.agent,
-              generatedAt: new Date(),
-            };
-
-            dispatch({
-              type: 'ADD_LOG',
-              level: 'success',
-              agent: task.agent,
-              message:
-                `${task.agent}: deterministic export bundle ready ` +
-                `(${deterministicExport.invoiceSummary.summary.invoiceCount} row(s), ${deterministicExport.bundle.files.length} file(s)).`,
-            });
-            continue;
           }
 
           dispatch({
@@ -5801,6 +5852,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       callAiRespond,
       completeTask,
       executionTaskTimeoutMs,
+      runtimeBuildCommitHash,
       validatePlannerStructuredPlan,
     ]
   );
@@ -6367,6 +6419,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearInterval(previous);
       }
 
+      const attachmentRuntimeEntries = buildAttachmentRuntimeEntries(project.attachments);
+      const urlEntries = attachmentRuntimeEntries.filter((entry) => entry.kind === 'url');
+      const urlParsed = urlEntries.filter((entry) => entry.state === 'parsed');
+      const urlBlockers = getAttachmentIngestionBlockers(attachmentRuntimeEntries, ['url']);
+
+      if (urlEntries.length > 0) {
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'info',
+          message:
+            `URL attachment states: parsed=${urlParsed.length}, ` +
+            `pending=${urlBlockers.pending.length}, failed=${urlBlockers.failed.length}`,
+        });
+      }
+
+      if (urlBlockers.failed.length > 0 || urlBlockers.pending.length > 0) {
+        const failedTitles = urlBlockers.failed.map((entry) => entry.title).join(', ');
+        const pendingTitles = urlBlockers.pending.map((entry) => entry.title).join(', ');
+        dispatch({
+          type: 'ADD_LOG',
+          level: 'error',
+          message:
+            'Execution blocked: URL attachments are not ready for verified source facts. ' +
+            (failedTitles ? `failed=[${failedTitles}] ` : '') +
+            (pendingTitles ? `pending=[${pendingTitles}]` : ''),
+        });
+        return;
+      }
+
       const taskGraph = generateExecutionTaskGraph(project);
       const selectedPipeline = decideExecutionPipeline(project);
 
@@ -6557,6 +6638,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
+        dispatch({
+          type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+          projectId,
+          attachmentId: attachment.id,
+          ingestion: {
+            status: 'uploaded',
+            summary: 'Ingestion in progress.',
+          },
+        });
+
         if (attachment.kind === 'url') {
           dispatch({
             type: 'ADD_LOG',
@@ -6583,10 +6674,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }),
         });
 
-        const body = (await response.json()) as AttachmentIngestApiResponse;
+        const rawBody = await response.text();
+        let body: AttachmentIngestApiResponse | null = null;
+        try {
+          body = JSON.parse(rawBody) as AttachmentIngestApiResponse;
+        } catch {
+          body = null;
+        }
+
+        if (!body) {
+          throw new Error(
+            `Attachment ingestion returned non-JSON payload (HTTP ${response.status}). ` +
+              `Body preview: ${rawBody.slice(0, 200).replace(/\s+/g, ' ')}`
+          );
+        }
+
         const ingest = body.ingest;
         if (!response.ok || !ingest) {
-          throw new Error(body.error ?? 'Attachment ingestion failed');
+          if (ingest) {
+            dispatch({
+              type: 'UPDATE_PROJECT_ATTACHMENT_INGESTION',
+              projectId,
+              attachmentId: attachment.id,
+              ingestion: ingest,
+            });
+          }
+          const reason = ingest?.failureReason;
+          const reasonText = reason
+            ? `code=${reason.code} stage=${reason.stage}${reason.statusCode ? ` status=${reason.statusCode}` : ''} message=${reason.message}`
+            : null;
+          throw new Error(body.error ?? reasonText ?? 'Attachment ingestion failed');
+        }
+
+        if (attachment.kind === 'url') {
+          const runtimeState = resolveAttachmentRuntimeState({
+            kind: attachment.kind,
+            ingestion: ingest,
+          });
+
+          if (runtimeState !== 'parsed') {
+            const reason = ingest.failureReason;
+            const reasonText = reason
+              ? `code=${reason.code} stage=${reason.stage}${reason.statusCode ? ` status=${reason.statusCode}` : ''} message=${reason.message}`
+              : 'URL ingestion finished without parsed content.';
+            throw new Error(reasonText);
+          }
         }
 
         if (attachment.kind === 'url') {
@@ -6607,6 +6739,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             type: 'ADD_LOG',
             level: 'info',
             message: `Readable text extracted: ${ingest.extractedText?.length ?? 0} chars`,
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            message: `URL attachment state: successfully parsed`,
           });
         }
 
@@ -6686,6 +6823,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             type: 'ADD_LOG',
             level: 'error',
             message: `URL fetch failure: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title} (${detail})`,
+          });
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warning',
+            message: `URL attachment state: failed`,
           });
         }
         dispatch({

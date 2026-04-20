@@ -2,6 +2,17 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { load as loadHtml } from 'cheerio';
 import JSZip from 'jszip';
+import { UrlIngestFailureReason } from '@/types';
+import {
+  UrlIngestError,
+  assessFetchedPage,
+  buildUrlFailedIngestionPayload,
+  buildUrlFailureReason,
+  classifyUrlFetchException,
+  normalizeSourceUrlForIngest,
+  pickDominantUrlFailure,
+  toUrlIngestFailureReason,
+} from '@/lib/urlIngest';
 
 export const runtime = 'nodejs';
 
@@ -49,6 +60,7 @@ type IngestPayload = {
     error?: string;
   }>;
   error?: string;
+  failureReason?: UrlIngestFailureReason;
   crawlEvents?: string[];
 };
 
@@ -67,6 +79,7 @@ type UrlPageSnapshot = {
 const DEFAULT_CRAWL_MAX_PAGES = 12;
 const DEFAULT_CRAWL_MAX_DEPTH = 2;
 const MIN_TEXT_LENGTH_FOR_STATIC = 220;
+const URL_FETCH_TIMEOUT_MS = 15_000;
 
 function trimText(value: string, max = 12000): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
@@ -173,26 +186,49 @@ function shouldSkipInternalUrl(candidateUrl: string): boolean {
 }
 
 async function fetchHtmlPage(url: string): Promise<{ finalUrl: string; html: string }> {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'AI-Boardroom-Ingest/1.0',
-      Accept: 'text/html,application/xhtml+xml',
-    },
-  });
+  const normalizedUrl = normalizeSourceUrlForIngest(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
 
-  if (!response.ok) {
-    throw new Error(`URL fetch failed (${response.status})`);
+  try {
+    const response = await fetch(normalizedUrl, {
+      headers: {
+        'User-Agent': 'AI-Boardroom-Ingest/1.0 (+https://github.com/Noah-eu/ai-boardroom)',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+
+    const finalUrl = response.url || normalizedUrl;
+    const contentType = response.headers.get('content-type') || '';
+    const html = await response.text();
+
+    const assessment = assessFetchedPage({
+      requestUrl: normalizedUrl,
+      finalUrl,
+      statusCode: response.status,
+      contentType,
+      bodyPreview: html.slice(0, 5000),
+      headers: response.headers,
+    });
+
+    if (!assessment.ok) {
+      throw new UrlIngestError(assessment.reason);
+    }
+
+    return {
+      finalUrl,
+      html,
+    };
+  } catch (error) {
+    if (error instanceof UrlIngestError) {
+      throw error;
+    }
+    throw new UrlIngestError(classifyUrlFetchException(normalizedUrl, error));
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.toLowerCase().includes('html')) {
-    throw new Error(`Non-HTML content (${contentType || 'unknown'})`);
-  }
-
-  return {
-    finalUrl: response.url || url,
-    html: await response.text(),
-  };
 }
 
 async function tryRenderHtmlPage(url: string): Promise<{ finalUrl: string; html: string } | null> {
@@ -275,14 +311,16 @@ function buildSiteSnapshotText(sourceUrl: string, pages: UrlPageSnapshot[]): str
 
 async function ingestUrl(sourceUrl: string, maxPages: number, maxDepth: number): Promise<IngestPayload> {
   const crawlEvents: string[] = [];
-  crawlEvents.push(`URL crawl started: source=${sourceUrl} maxPages=${maxPages} maxDepth=${maxDepth}`);
+  const normalizedSourceUrl = normalizeSourceUrlForIngest(sourceUrl);
+  crawlEvents.push(`URL crawl started: source=${normalizedSourceUrl} maxPages=${maxPages} maxDepth=${maxDepth}`);
   console.info(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
 
-  const rootUrl = new URL(sourceUrl);
+  const rootUrl = new URL(normalizedSourceUrl);
   const queue: Array<{ url: string; depth: number }> = [{ url: rootUrl.toString(), depth: 0 }];
   const visited = new Set<string>();
   const indexedPages: UrlPageSnapshot[] = [];
   const importantLinks = new Set<string>();
+  const pageFailures: UrlIngestFailureReason[] = [];
 
   while (queue.length > 0 && indexedPages.length < maxPages) {
     const current = queue.shift();
@@ -339,17 +377,31 @@ async function ingestUrl(sourceUrl: string, maxPages: number, maxDepth: number):
         }
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : 'unknown error';
-      crawlEvents.push(`page fetch failed: depth=${current.depth} url=${current.url} error=${detail}`);
+      const reason = toUrlIngestFailureReason(error, current.url);
+      pageFailures.push(reason);
+      crawlEvents.push(
+        `page fetch failed: depth=${current.depth} url=${current.url} code=${reason.code} stage=${reason.stage} error=${reason.message}`
+      );
       console.warn(`[attachments/ingest] ${crawlEvents[crawlEvents.length - 1]}`);
     }
   }
 
   if (indexedPages.length === 0) {
-    throw new Error('URL crawl produced no readable pages.');
+    const dominant = pickDominantUrlFailure(pageFailures);
+    throw new UrlIngestError(
+      buildUrlFailureReason({
+        ...dominant,
+        code: dominant.code === 'unknown' ? 'crawl_no_readable_pages' : dominant.code,
+        stage: 'crawl',
+        message:
+          dominant.code === 'unknown'
+            ? 'URL crawl produced no readable pages.'
+            : `URL crawl produced no readable pages. Root cause: ${dominant.message}`,
+      })
+    );
   }
 
-  const snapshotText = buildSiteSnapshotText(sourceUrl, indexedPages);
+  const snapshotText = buildSiteSnapshotText(normalizedSourceUrl, indexedPages);
   const primaryTitle = indexedPages[0]?.title || sourceUrl;
   const crawlComplete = `crawl completed: pages=${indexedPages.length}`;
   crawlEvents.push(crawlComplete);
@@ -370,7 +422,7 @@ async function ingestUrl(sourceUrl: string, maxPages: number, maxDepth: number):
     status: 'parsed',
     summary: `Crawled ${indexedPages.length} page(s) and built site snapshot (${primaryTitle}).`,
     pageTitle: primaryTitle,
-    sourceUrl,
+    sourceUrl: normalizedSourceUrl,
     extractedText: snapshotText,
     excerpt: excerpt(snapshotText, 360),
     urlPageCount: indexedPages.length,
@@ -599,15 +651,25 @@ export async function POST(request: Request) {
     };
     return NextResponse.json({ ingest });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown ingestion error';
+    const reason = toUrlIngestFailureReason(error);
+    const statusCode =
+      reason.code === 'invalid_url'
+        ? 400
+        : reason.code === 'blocked_or_bot_protected'
+        ? 403
+        : reason.code === 'timeout'
+        ? 504
+        : reason.code === 'http_error'
+        ? (reason.statusCode ?? 502)
+        : reason.code === 'non_html_response'
+        ? 422
+        : 500;
+
     return NextResponse.json(
       {
-        ingest: {
-          status: 'failed',
-          error: message,
-        },
+        ingest: buildUrlFailedIngestionPayload(reason),
       },
-      { status: 500 }
+      { status: statusCode }
     );
   }
 }
