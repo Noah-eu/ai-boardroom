@@ -69,6 +69,30 @@ import {
   getModeLabel,
   stabilizeCodeExecutionBundle,
 } from '@/lib/codeBundleStabilizer';
+import {
+  buildDeterministicWebsiteArtifacts,
+  buildDeterministicWebsiteCopySections,
+  buildDeterministicWebsiteRenderDiagnostics,
+  deriveVerifiedWebsiteContentFromPrompt,
+  deriveVerifiedWebsiteContent,
+  hasSufficientVerifiedWebsiteContent,
+  mergeVerifiedWebsiteContent,
+  type VerifiedWebsiteContent,
+  type WebsiteCopySections,
+  type WebsiteSectionHeadingOverrides,
+} from '@/lib/deterministicWebsiteBuilder';
+import {
+  getLatestArtifactContentWithinWindow,
+  hasArtifactContentOutsideWindow,
+} from '@/lib/websiteArtifactWindow';
+import { normalizeArchitectureReviewInput } from '@/lib/architectureReviewInput';
+import { assembleSegmentedWebsiteSeedBundle } from '@/lib/segmentedWebsiteBundle';
+import {
+  createWebsiteCopyTaskPlan,
+  selectWebsiteSectionSchema,
+  type WebsiteSchemaSelection,
+} from '@/lib/websiteSectionSchema';
+import { decideWebsiteGraphStrategy } from '@/lib/websiteGraphStrategy';
 
 type ExecutionSpeed = 'slow' | 'normal' | 'fast';
 
@@ -98,7 +122,29 @@ const MAX_AI_ATTACHMENT_SECTION_CHARS = 2_000;
 const MAX_AI_ATTACHMENT_TOTAL_CHARS = 12_000;
 const BUILDER_MAX_PDF_FILES_PER_CHUNK = 3;
 const BUILDER_MAX_MERGED_ROWS_FOR_FINAL_PROMPT = 220;
-const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = ['.html', '.css', '.js', '.json', '.md'] as const;
+const SEGMENTED_WEBSITE_NO_SCRIPT_MARKER = '__NO_SCRIPT__';
+const SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH = 'website-content-model.json';
+const SEGMENTED_WEBSITE_COPY_ARTIFACTS = [
+  { path: 'copy-hero.json', section: 'hero' },
+  { path: 'copy-about.json', section: 'about' },
+  { path: 'copy-approach.json', section: 'approach' },
+  { path: 'copy-topics.json', section: 'topics' },
+  { path: 'copy-services-pricing.json', section: 'servicesPricing' },
+  { path: 'copy-contact.json', section: 'contact' },
+  { path: 'copy-map.json', section: 'map' },
+] as const;
+const EXECUTION_OUTPUT_ALLOWED_EXTENSIONS = [
+  '.html',
+  '.css',
+  '.js',
+  '.json',
+  '.md',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.gif',
+] as const;
 const REAL_PLANNER_BUILD_MARKER =
   (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ||
     process.env.NEXT_PUBLIC_BUILD_MARKER ||
@@ -552,6 +598,7 @@ function buildSnapshotAttachmentContext(
     text: [
       entry.pageTitle ? `Page: ${entry.pageTitle}` : '',
       entry.summary ? `Summary: ${entry.summary}` : '',
+      entry.structuredData ? `Structured snapshot:\n${JSON.stringify(entry.structuredData, null, 2)}` : '',
       entry.extractedText ?? '',
     ]
       .filter(Boolean)
@@ -1378,6 +1425,326 @@ function taskRequiresHtmlEntry(task: Task, project: Project): boolean {
   return /\b(html|website|web app|webapp|landing page|homepage|page|site)\b/.test(combined);
 }
 
+function isSegmentedWebsiteSourceArtifactPath(artifactPath: string): boolean {
+  return artifactPath === 'index.html' || artifactPath === 'styles.css' || artifactPath === 'script.js';
+}
+
+function isSegmentedWebsiteCopyArtifactPath(artifactPath: string): boolean {
+  return SEGMENTED_WEBSITE_COPY_ARTIFACTS.some((entry) => entry.path === artifactPath);
+}
+
+function resolveSegmentedWebsiteCopySectionByPath(
+  artifactPath: string
+): (typeof SEGMENTED_WEBSITE_COPY_ARTIFACTS)[number]['section'] | null {
+  const matched = SEGMENTED_WEBSITE_COPY_ARTIFACTS.find((entry) => entry.path === artifactPath);
+  return matched?.section ?? null;
+}
+
+type SegmentedWebsiteContentModel = {
+  schemaVersion: 1;
+  type: 'ai-boardroom-segmented-website-content-model';
+  generatedAt: string;
+  language: AppLanguage;
+  sourceMode: 'ingestion' | 'prompt-only' | 'hybrid';
+  schema: WebsiteSchemaSelection;
+  verified: VerifiedWebsiteContent;
+  copySections: WebsiteCopySections;
+};
+
+function deriveCurrentVerifiedWebsiteContent(
+  project: Project,
+  snapshot: ExecutionSnapshot
+): {
+  verified: VerifiedWebsiteContent;
+  sourceMode: SegmentedWebsiteContentModel['sourceMode'];
+} {
+  const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+  const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+    projectName: project.name,
+    projectDescription: project.description,
+    projectPrompt: snapshot.projectPrompt,
+    revisionPrompt: snapshot.revisionPrompt,
+    debateSummary: snapshot.approvedDebateSummary,
+  });
+
+  const hasIngestion = hasSufficientVerifiedWebsiteContent(ingestionVerified);
+  const hasPrompt = hasSufficientVerifiedWebsiteContent(promptVerified);
+  const verified = hasIngestion
+    ? hasPrompt
+      ? mergeVerifiedWebsiteContent(ingestionVerified, promptVerified)
+      : ingestionVerified
+    : promptVerified;
+
+  const sourceMode: SegmentedWebsiteContentModel['sourceMode'] = hasIngestion
+    ? hasPrompt
+      ? 'hybrid'
+      : 'ingestion'
+    : 'prompt-only';
+
+  return { verified, sourceMode };
+}
+
+function buildSegmentedWebsiteContentModelPayload(project: Project, snapshot: ExecutionSnapshot): SegmentedWebsiteContentModel | null {
+  const current = deriveCurrentVerifiedWebsiteContent(project, snapshot);
+  const verified = current.verified;
+
+  if (!hasSufficientVerifiedWebsiteContent(verified)) {
+    return null;
+  }
+
+  const schema = selectWebsiteSectionSchema({
+    taskIntentText: buildWebsiteTaskIntentText(project, snapshot),
+    language: project.language,
+    verifiedFacts: verified,
+  });
+
+  return {
+    schemaVersion: 1,
+    type: 'ai-boardroom-segmented-website-content-model',
+    generatedAt: new Date().toISOString(),
+    language: project.language,
+    sourceMode: current.sourceMode,
+    schema,
+    verified,
+    copySections: buildDeterministicWebsiteCopySections({
+      projectName: project.name,
+      verified,
+      language: project.language,
+    }),
+  };
+}
+
+function resolveSegmentedWebsiteContentModelFromTaskArtifacts(
+  tasks: Task[],
+  snapshot?: ExecutionSnapshot
+): SegmentedWebsiteContentModel | null {
+  const raw = getLatestArtifactContentWithinWindow(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, {
+    minGeneratedAt: snapshot?.createdAt,
+  });
+  if (!raw?.trim()) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<SegmentedWebsiteContentModel>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (parsed.type !== 'ai-boardroom-segmented-website-content-model') return null;
+    if (!parsed.verified || !parsed.copySections) return null;
+    return parsed as SegmentedWebsiteContentModel;
+  } catch {
+    return null;
+  }
+}
+
+function resolveWebsiteCopySectionsFromTaskArtifacts(
+  tasks: Task[],
+  snapshot?: ExecutionSnapshot
+): Partial<WebsiteCopySections> {
+  const model = resolveSegmentedWebsiteContentModelFromTaskArtifacts(tasks, snapshot);
+  if (model?.copySections) {
+    return model.copySections;
+  }
+
+  const output: Partial<WebsiteCopySections> = {};
+
+  SEGMENTED_WEBSITE_COPY_ARTIFACTS.forEach((entry) => {
+    const raw = getLatestArtifactContentWithinWindow(tasks, entry.path, {
+      minGeneratedAt: snapshot?.createdAt,
+    });
+    if (!raw?.trim()) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+
+      switch (entry.section) {
+        case 'hero':
+          output.hero = parsed as WebsiteCopySections['hero'];
+          break;
+        case 'about':
+          output.about = parsed as WebsiteCopySections['about'];
+          break;
+        case 'approach':
+          output.approach = parsed as WebsiteCopySections['approach'];
+          break;
+        case 'topics':
+          output.topics = parsed as WebsiteCopySections['topics'];
+          break;
+        case 'servicesPricing':
+          output.servicesPricing = parsed as WebsiteCopySections['servicesPricing'];
+          break;
+        case 'contact':
+          output.contact = parsed as WebsiteCopySections['contact'];
+          break;
+        case 'map':
+          output.map = parsed as WebsiteCopySections['map'];
+          break;
+        default:
+          break;
+      }
+    } catch {
+      // Invalid section payload is ignored; deterministic defaults remain in use.
+    }
+  });
+
+  return output;
+}
+
+function hasSegmentedWebsiteCrossRunRisk(tasks: Task[], snapshot: ExecutionSnapshot): boolean {
+  if (
+    hasArtifactContentOutsideWindow(tasks, SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, {
+      minGeneratedAt: snapshot.createdAt,
+    })
+  ) {
+    return true;
+  }
+
+  return SEGMENTED_WEBSITE_COPY_ARTIFACTS.some((entry) =>
+    hasArtifactContentOutsideWindow(tasks, entry.path, {
+      minGeneratedAt: snapshot.createdAt,
+    })
+  );
+}
+
+function resolveWebsiteSectionHeadingOverrides(
+  schema: WebsiteSchemaSelection | undefined
+): WebsiteSectionHeadingOverrides | undefined {
+  if (!schema) return undefined;
+
+  const lookup = new Map(schema.sections.map((section) => [section.slot, section.copyTaskLabel] as const));
+
+  return {
+    heroSectionLabel: lookup.get('hero'),
+    aboutHeading: lookup.get('about'),
+    approachHeading: lookup.get('approach'),
+    topicsHeading: lookup.get('topics'),
+    servicesPricingHeading: lookup.get('servicesPricing'),
+    contactHeading: lookup.get('contact'),
+    mapHeading: lookup.get('map'),
+  };
+}
+
+function hasWebsiteAttachmentSignals(project: Project): boolean {
+  return project.attachments.some((attachment) => {
+    if (attachment.kind === 'url') return true;
+    if (attachment.kind !== 'zip') return false;
+    const tree = attachment.ingestion?.zipFileTree ?? [];
+    return tree.some((entry) => /\.(html?|css|js|md)$/i.test(entry));
+  });
+}
+
+function shouldUseSegmentedWebsiteBuild(project: Project, snapshot?: ExecutionSnapshot): boolean {
+  if (decideExecutionPipeline(project) !== 'code') {
+    return false;
+  }
+
+  const intentText = buildWebsiteTaskIntentText(project, snapshot);
+
+  const strategy = decideWebsiteGraphStrategy({
+    outputType: project.outputType,
+    projectName: project.name,
+    projectDescription: project.description,
+    projectPrompt: snapshot?.projectPrompt ?? project.description,
+    taskIntentText: intentText,
+    revisionPrompt: snapshot?.revisionPrompt ?? project.latestRevisionFeedback,
+    debateSummary: snapshot?.approvedDebateSummary ?? getLatestOrchestratorSummary(project),
+    hasWebsiteAttachmentSignals: hasWebsiteAttachmentSignals(project),
+    hasStructuredWebsiteSources: Boolean(snapshot?.siteSnapshots?.length),
+  });
+
+  return strategy.kind === 'segmented-website';
+}
+
+function resolvePrimaryWebsiteSourceUrl(project: Project, snapshot: ExecutionSnapshot): string | null {
+  const fromProjectAttachment = project.attachments
+    .find((attachment) => attachment.kind === 'url' && typeof attachment.sourceUrl === 'string' && attachment.sourceUrl.trim())
+    ?.sourceUrl;
+  if (fromProjectAttachment?.trim()) {
+    return fromProjectAttachment.trim();
+  }
+
+  const fromSnapshotPages = snapshot.siteSnapshots
+    .flatMap((entry) => entry.pages ?? [])
+    .map((page) => page.url?.trim())
+    .find((url) => Boolean(url));
+  if (fromSnapshotPages) {
+    return fromSnapshotPages;
+  }
+
+  const fromStructured = snapshot.siteSnapshots
+    .map((entry) => entry.structuredData?.sourceUrl?.trim())
+    .find((url): url is string => Boolean(url));
+  if (fromStructured) {
+    return fromStructured;
+  }
+
+  return null;
+}
+
+function buildWebsiteAttachmentHints(snapshot: ExecutionSnapshot): string {
+  const structuredSnapshots = snapshot.siteSnapshots
+    .map((entry) => entry.structuredData)
+    .filter((entry): entry is NonNullable<ExecutionSnapshot['siteSnapshots'][number]['structuredData']> => Boolean(entry));
+
+  const urls = snapshot.siteSnapshots
+    .flatMap((entry) => entry.pages ?? [])
+    .map((page) => page.url?.trim())
+    .filter((url): url is string => Boolean(url));
+
+  const structuredUrls = structuredSnapshots
+    .map((entry) => entry.sourceUrl?.trim())
+    .filter((url): url is string => Boolean(url));
+
+  const emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+  const priceRegex = /(?:\b\d+[\s.,]?\d*\s?(?:CZK|EUR|USD|Kc|Kč|€|\$)\b|\b(?:price|cen[a-y]|tariff|fee)\b[^\n]{0,60})/i;
+
+  const sources = [
+    ...snapshot.siteSnapshots.map((entry) => entry.extractedText ?? ''),
+    ...snapshot.pdfTexts.map((entry) => entry.text ?? ''),
+  ]
+    .join('\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 400);
+
+  const emailLines = sources.filter((line) => emailRegex.test(line)).slice(0, 5);
+  const priceLines = sources.filter((line) => priceRegex.test(line)).slice(0, 8);
+
+  const structuredEmails = structuredSnapshots.flatMap((entry) => entry.contactFields.emails).slice(0, 10);
+  const structuredPhones = structuredSnapshots.flatMap((entry) => entry.contactFields.phones).slice(0, 10);
+  const structuredAddresses = structuredSnapshots.flatMap((entry) => entry.contactFields.addresses).slice(0, 6);
+  const structuredPrices = structuredSnapshots.flatMap((entry) => entry.pricingFields).slice(0, 10);
+  const structuredCtas = structuredSnapshots.flatMap((entry) => entry.ctaTexts).slice(0, 10);
+  const structuredMissing = Array.from(new Set(structuredSnapshots.flatMap((entry) => entry.missingFields))).slice(0, 10);
+
+  const uniqueUrls = Array.from(new Set([...structuredUrls, ...urls])).slice(0, 8);
+
+  return [
+    'Approved late-added inputs from attachments (use when relevant):',
+    uniqueUrls.length ? `- Source URLs:\n${uniqueUrls.map((url) => `  - ${url}`).join('\n')}` : '- Source URLs: none detected',
+    structuredEmails.length
+      ? `- Emails:\n${structuredEmails.map((line) => `  - ${shorten(line, 160)}`).join('\n')}`
+      : emailLines.length
+      ? `- Emails:\n${emailLines.map((line) => `  - ${shorten(line, 160)}`).join('\n')}`
+      : '- Emails: none detected',
+    structuredPhones.length
+      ? `- Phones:\n${structuredPhones.map((line) => `  - ${shorten(line, 120)}`).join('\n')}`
+      : '- Phones: none detected',
+    structuredAddresses.length
+      ? `- Addresses:\n${structuredAddresses.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : '- Addresses: none detected',
+    structuredPrices.length
+      ? `- Prices/tariffs:\n${structuredPrices.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : priceLines.length
+      ? `- Prices/tariffs:\n${priceLines.map((line) => `  - ${shorten(line, 180)}`).join('\n')}`
+      : '- Prices/tariffs: none detected',
+    structuredCtas.length
+      ? `- CTA texts:\n${structuredCtas.map((line) => `  - ${shorten(line, 120)}`).join('\n')}`
+      : '- CTA texts: none detected',
+    structuredMissing.length
+      ? `- Missing fields reported by ingestion:\n${structuredMissing.map((line) => `  - ${line}`).join('\n')}`
+      : '- Missing fields reported by ingestion: none',
+  ].join('\n');
+}
+
 function isCodeGeneratedFilesStage(project: Project, task: Task, artifactPath: string): boolean {
   if (task.agent !== 'Builder' || artifactPath !== 'generated-files.json') return false;
   if (isDocumentGeneratedFilesStage(project, task, artifactPath)) return false;
@@ -1474,9 +1841,38 @@ function artifactRequiresStructuredExecutionOutput(task: Task, artifact: Task['p
 function artifactCanBeGeneratedLocally(
   project: Project,
   task: Task,
-  artifact: Task['producesArtifacts'][number]
+  artifact: Task['producesArtifacts'][number],
+  snapshot?: ExecutionSnapshot
 ): boolean {
   if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') return true;
+  if (
+    task.agent === 'Builder' &&
+    artifact.path === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
+    return true;
+  }
+  if (
+    task.agent === 'Builder' &&
+    isSegmentedWebsiteCopyArtifactPath(artifact.path) &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
+    return true;
+  }
+  if (
+    task.agent === 'Builder' &&
+    isSegmentedWebsiteSourceArtifactPath(artifact.path) &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
+    return true;
+  }
+  if (
+    task.agent === 'Builder' &&
+    artifact.path === 'generated-files.json' &&
+    shouldUseSegmentedWebsiteBuild(project, snapshot)
+  ) {
+    return true;
+  }
   if (decideExecutionPipeline(project) !== 'code') return false;
   if (task.agent === 'Tester' && artifact.path === 'bundle-export.md') return true;
   if (task.agent === 'Integrator' && artifact.path === 'final-summary.md') return true;
@@ -1754,10 +2150,137 @@ function normalizeAiImageUrl(value?: string): string | null {
 
 function resolveAttachmentImageUrl(attachment: ProjectAttachment): string | null {
   return (
+    normalizeAiImageUrl(attachment.aiImageDataUrl) ??
     normalizeAiImageUrl(attachment.downloadUrl) ??
-    normalizeAiImageUrl(attachment.sourceUrl) ??
-    normalizeAiImageUrl(attachment.aiImageDataUrl)
+    normalizeAiImageUrl(attachment.sourceUrl)
   );
+}
+
+function readFileAsDataUrl(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : null;
+      resolve(value && value.startsWith('data:image/') ? value : null);
+    };
+    try {
+      reader.readAsDataURL(file);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+type PortraitAssetPlan = {
+  sourceUrl: string;
+  assetPath: string;
+  alt: string;
+};
+
+function inferImageExtensionFromUrl(value: string): string {
+  const match = value.toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/);
+  const ext = match?.[1] ?? '';
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+    return ext;
+  }
+  return 'jpg';
+}
+
+function inferImageExtensionFromMime(value: string | null): string {
+  const lower = (value ?? '').toLowerCase();
+  if (lower.includes('image/png')) return 'png';
+  if (lower.includes('image/webp')) return 'webp';
+  if (lower.includes('image/gif')) return 'gif';
+  if (lower.includes('image/jpeg') || lower.includes('image/jpg')) return 'jpg';
+  return 'jpg';
+}
+
+function toBase64FromBytes(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function buildPortraitAssetPlan(snapshot: ExecutionSnapshot): PortraitAssetPlan | null {
+  const portrait = snapshot.imageInputs.find((entry) => typeof entry.url === 'string' && entry.url.trim());
+  if (!portrait) return null;
+  const sourceUrl = portrait.url.trim();
+  if (!sourceUrl) return null;
+
+  const ext = sourceUrl.startsWith('data:image/')
+    ? inferImageExtensionFromMime(sourceUrl.slice(5, sourceUrl.indexOf(';') > 5 ? sourceUrl.indexOf(';') : undefined))
+    : inferImageExtensionFromUrl(sourceUrl);
+
+  const alt = (portrait.description ?? portrait.title ?? 'Portrait').trim() || 'Portrait';
+  return {
+    sourceUrl,
+    assetPath: `assets/portrait.${ext}`,
+    alt,
+  };
+}
+
+async function materializePortraitBundleFile(plan: PortraitAssetPlan): Promise<ExecutionOutputFile | null> {
+  if (plan.sourceUrl.startsWith('data:image/')) {
+    const dataMatch = plan.sourceUrl.match(/^data:image\/[^;]+;base64,(.+)$/i);
+    if (!dataMatch?.[1]) {
+      return null;
+    }
+    return {
+      path: plan.assetPath,
+      content: `base64:${dataMatch[1]}`,
+    };
+  }
+
+  const fromArrayBufferToBundleFile = (buffer: ArrayBuffer): ExecutionOutputFile | null => {
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length === 0) return null;
+    return {
+      path: plan.assetPath,
+      content: `base64:${toBase64FromBytes(bytes)}`,
+    };
+  };
+
+  try {
+    const response = await fetch(plan.sourceUrl);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const mime = response.headers.get('content-type');
+    if (mime && !mime.toLowerCase().startsWith('image/')) {
+      throw new Error('Non-image response');
+    }
+    const buffer = await response.arrayBuffer();
+    const direct = fromArrayBufferToBundleFile(buffer);
+    if (direct) return direct;
+  } catch {
+    // Fallback to server-side proxy materialization to avoid browser CORS failures.
+  }
+
+  try {
+    const proxyResponse = await fetch('/api/attachments/materialize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: plan.sourceUrl }),
+    });
+    if (!proxyResponse.ok) {
+      return null;
+    }
+    const payload = (await proxyResponse.json()) as { base64?: string };
+    if (!payload.base64?.trim()) {
+      return null;
+    }
+    return {
+      path: plan.assetPath,
+      content: `base64:${payload.base64}`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeBucketName(value?: string | null): string | null {
@@ -1975,7 +2498,37 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
   if (!primaryArtifact) return [];
 
   const isDocumentPipelineTask = /DocumentExtractor|Normalizer|Validator|Summarizer|Exporter/i.test(task.title);
-  const isCodePipelineTask = /CodePlanner|AppArchitect|FileBuilder|QA|BundleExporter/i.test(task.title);
+  const isCodePipelineTask =
+    /CodePlanner|AppArchitect|WebContentNormalizer|WebCopyBuilder|FileBuilder|WebHtmlBuilder|WebStyleBuilder|WebScriptBuilder|WebBundleAssembler|QA|BundleExporter/i.test(
+      task.title
+    );
+
+  if (isSegmentedWebsiteCopyArtifactPath(primaryArtifact)) {
+    return [
+      { path: 'execution-plan.md' },
+      { path: 'architecture-review.md' },
+      { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH },
+    ];
+  }
+
+  if (primaryArtifact === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH) {
+    return [{ path: 'execution-plan.md' }, { path: 'architecture-review.md' }];
+  }
+
+  if (primaryArtifact === 'index.html') {
+    return [
+      { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH },
+      ...SEGMENTED_WEBSITE_COPY_ARTIFACTS.map((entry) => ({ path: entry.path })),
+    ];
+  }
+
+  if (primaryArtifact === 'styles.css') {
+    return [{ path: 'index.html' }];
+  }
+
+  if (primaryArtifact === 'script.js') {
+    return [{ path: 'index.html' }, { path: 'styles.css' }];
+  }
 
   if (primaryArtifact === 'normalized-rows.json') {
     return [{ path: 'extracted-rows.json' }];
@@ -1994,6 +2547,16 @@ function getRequiredUpstreamArtifacts(task: Task): Array<{ path: string; require
       ];
     }
     if (isCodePipelineTask) {
+      if (/WebBundleAssembler/i.test(task.title)) {
+        return [
+          { path: 'execution-plan.md' },
+          { path: 'architecture-review.md' },
+          { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH },
+          { path: 'index.html' },
+          { path: 'styles.css' },
+          { path: 'script.js' },
+        ];
+      }
       return [
         { path: 'execution-plan.md' },
         { path: 'architecture-review.md' },
@@ -2324,6 +2887,31 @@ function getLatestOrchestratorSummary(project: Project): string | null {
     .reverse()
     .find((entry) => entry.sender === 'orchestrator' && entry.type === 'system');
   return message?.content ?? null;
+}
+
+function buildWebsiteTaskIntentText(project: Project, snapshot?: ExecutionSnapshot): string {
+  const recentUserMessages = [...project.messages]
+    .reverse()
+    .filter((entry) => entry.sender === 'user' && entry.type === 'chat' && entry.content.trim())
+    .slice(0, 3)
+    .map((entry) => entry.content.trim())
+    .reverse();
+
+  const latestRevisionUserPrompt = [...project.revisionHistory]
+    .reverse()
+    .map((entry) => entry.userPrompt?.trim())
+    .find((entry): entry is string => Boolean(entry));
+
+  return [
+    project.description,
+    snapshot?.projectPrompt ?? '',
+    project.latestRevisionFeedback ?? '',
+    snapshot?.revisionPrompt ?? '',
+    latestRevisionUserPrompt ?? '',
+    ...recentUserMessages,
+  ]
+    .filter((entry) => Boolean(entry && entry.trim()))
+    .join('\n');
 }
 
 function shorten(value: string | undefined, maxChars: number): string {
@@ -3126,6 +3714,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     for (const attachment of project.attachments) {
       const source = (attachment.source ?? 'message') as 'project' | 'message';
       const ingestion = attachment.ingestion;
+      const fallbackSourceUrl =
+        attachment.kind === 'url'
+          ? (attachment.sourceUrl ?? attachment.downloadUrl ?? ingestion?.sourceUrl)?.trim()
+          : '';
       let included = false;
 
       const hasValidImageUrl = attachment.kind === 'image' ? resolveAttachmentImageUrl(attachment) : null;
@@ -3151,12 +3743,40 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         included = true;
       }
 
+      if (attachment.kind === 'url' && fallbackSourceUrl) {
+        textSections.push({
+          title: `${attachment.title} (source URL)`,
+          kind: attachment.kind,
+          source,
+          text: [`Primary source URL: ${fallbackSourceUrl}`, ingestion?.summary ? `Ingestion status: ${ingestion.summary}` : '']
+            .filter(Boolean)
+            .join('\n'),
+        });
+        included = true;
+      }
+
       if (ingestion?.extractedText) {
         textSections.push({
           title: attachment.title,
           kind: attachment.kind,
           source,
           text: ingestion.extractedText,
+        });
+        included = true;
+        if (attachment.kind === 'url' && ingestion.urlStructuredData) {
+          textSections.push({
+            title: `${attachment.title} (structured snapshot)`,
+            kind: attachment.kind,
+            source,
+            text: JSON.stringify(ingestion.urlStructuredData, null, 2),
+          });
+        }
+      } else if (attachment.kind === 'url' && ingestion?.urlStructuredData) {
+        textSections.push({
+          title: `${attachment.title} (structured snapshot)`,
+          kind: attachment.kind,
+          source,
+          text: JSON.stringify(ingestion.urlStructuredData, null, 2),
         });
         included = true;
       } else if (attachment.kind === 'zip' && ingestion?.zipFileTree) {
@@ -3298,20 +3918,37 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (attachment.kind === 'url') {
-        if (ingestion?.extractedText || ingestion?.urlPages?.length) {
+        const fallbackSourceUrl = (attachment.sourceUrl ?? attachment.downloadUrl ?? ingestion?.sourceUrl)?.trim();
+        if (ingestion?.extractedText || ingestion?.urlPages?.length || ingestion?.urlStructuredData || fallbackSourceUrl) {
+          const fallbackPages = fallbackSourceUrl
+            ? [
+                {
+                  url: fallbackSourceUrl,
+                  title: 'Attached source URL',
+                  summary: 'Source URL attached; crawl content may still be processing.',
+                  excerpt: 'Source URL attached; crawl content may still be processing.',
+                },
+              ]
+            : undefined;
+          const fallbackText = fallbackSourceUrl
+            ? `Primary source URL: ${fallbackSourceUrl}`
+            : undefined;
           siteSnapshots.push({
             attachmentId: attachment.id,
             title: attachment.title,
             source,
             pageTitle: ingestion?.pageTitle,
-            summary: ingestion?.summary,
-            extractedText: shorten(ingestion?.extractedText, 24_000),
+            summary: ingestion?.summary ?? (fallbackSourceUrl ? `Attached source URL: ${fallbackSourceUrl}` : undefined),
+            extractedText: ingestion?.extractedText?.trim()
+              ? shorten(ingestion.extractedText, 24_000)
+              : fallbackText,
             pages: ingestion?.urlPages?.slice(0, 10).map((page) => ({
               url: page.url,
               title: page.title,
               summary: page.summary,
               excerpt: shorten(page.excerpt, 700),
-            })),
+            })) ?? fallbackPages,
+            structuredData: ingestion?.urlStructuredData,
           });
         } else {
           missingInputNotes.push(`Site snapshot missing or unreadable: ${attachment.title}`);
@@ -4049,6 +4686,71 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         shorten(findArtifactText(artifactPath) ?? '{}', maxChars);
       const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
+      if (shouldUseSegmentedWebsiteBuild(project, snapshot) && isSegmentedWebsiteSourceArtifactPath(artifact.path)) {
+        const baselineByPath = snapshot.latestStableFiles.find(
+          (file) => normalizeExecutionFilePath(file.path) === artifact.path
+        );
+        const executionPlanExcerpt = shortenArtifact('execution-plan.md', 2200);
+        const architectureExcerpt = shortenArtifact('architecture-review.md', 2200);
+        const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
+        const attachmentHints = buildWebsiteAttachmentHints(snapshot);
+        const indexHtml = shorten(findArtifactText('index.html') ?? baselineByPath?.content ?? '', 5000);
+        const stylesCss = shorten(findArtifactText('styles.css') ?? '', 5000);
+
+        if (artifact.path === 'index.html') {
+          return [
+            'You are WebHtmlBuilder (step 1/3).',
+            'Return only raw HTML for index.html. No markdown fences, no explanations.',
+            'Generate a complete semantic page with accessible structure, responsive layout, and links to styles.css and optional script.js.',
+            'Keep output focused and runnable as static website source.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+            attachmentHints,
+            'Execution plan excerpt:',
+            executionPlanExcerpt,
+            'Architecture review excerpt:',
+            architectureExcerpt,
+            baselineByPath ? `Previous index.html baseline:\n${shorten(baselineByPath.content, 2200)}` : 'Previous index.html baseline: none.',
+          ].join('\n\n');
+        }
+
+        if (artifact.path === 'styles.css') {
+          return [
+            'You are WebStyleBuilder (step 2/3).',
+            'Return only raw CSS for styles.css. No markdown fences, no explanations.',
+            'Style the provided index.html structure and keep responsive behavior for desktop and mobile.',
+            'Prefer maintainable selectors and avoid unused boilerplate.',
+            `Project prompt:\n${snapshot.projectPrompt}`,
+            snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+            sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+            attachmentHints,
+            'Execution plan excerpt:',
+            executionPlanExcerpt,
+            'Architecture review excerpt:',
+            architectureExcerpt,
+            `Current index.html:\n${indexHtml || '<!doctype html><html><body></body></html>'}`,
+          ].join('\n\n');
+        }
+
+        return [
+          'You are WebScriptBuilder (step 3/3).',
+          'Return only raw JavaScript for script.js. No markdown fences, no explanations.',
+          `If no JavaScript is needed, return exactly ${SEGMENTED_WEBSITE_NO_SCRIPT_MARKER} and nothing else.`,
+          'If JavaScript is needed, keep it framework-free and compatible with the current HTML/CSS.',
+          `Project prompt:\n${snapshot.projectPrompt}`,
+          snapshot.revisionPrompt ? `Revision request:\n${snapshot.revisionPrompt}` : 'Revision request: initial implementation.',
+          sourceUrl ? `Primary source URL (replace placeholders with this real URL): ${sourceUrl}` : 'Primary source URL: not provided.',
+          attachmentHints,
+          'Execution plan excerpt:',
+          executionPlanExcerpt,
+          'Architecture review excerpt:',
+          architectureExcerpt,
+          `Current index.html:\n${indexHtml || '<!doctype html><html><body></body></html>'}`,
+          `Current styles.css:\n${stylesCss || '/* no styles yet */'}`,
+        ].join('\n\n');
+      }
+
       if (artifactRequiresStructuredExecutionOutput(task, artifact)) {
         const isExporterStage = isDocumentGeneratedFilesStage(project, task, artifact.path);
         if (isExporterStage) {
@@ -4253,6 +4955,58 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ? `Missing inputs to mention explicitly if relevant:\n- ${snapshot.missingInputNotes.join('\n- ')}`
         : 'Missing inputs: none detected.';
 
+      if (artifact.path === 'architecture-review.md' && decideExecutionPipeline(project) === 'code') {
+        const promptVerified = deriveVerifiedWebsiteContentFromPrompt({
+          projectName: project.name,
+          projectDescription: project.description,
+          projectPrompt: snapshot.projectPrompt,
+          revisionPrompt: snapshot.revisionPrompt,
+          debateSummary: snapshot.approvedDebateSummary,
+        });
+        const ingestionVerified = deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+        const hasPromptVerified = hasSufficientVerifiedWebsiteContent(promptVerified);
+        const hasIngestionVerified = hasSufficientVerifiedWebsiteContent(ingestionVerified);
+        const mergedVerified = hasIngestionVerified
+          ? hasPromptVerified
+            ? mergeVerifiedWebsiteContent(ingestionVerified, promptVerified)
+            : ingestionVerified
+          : promptVerified;
+
+        const normalizedArchitecture = normalizeArchitectureReviewInput({
+          projectName: project.name,
+          outputType: project.outputType,
+          projectDescription: project.description,
+          projectPrompt: snapshot.projectPrompt,
+          revisionPrompt: snapshot.revisionPrompt,
+          debateSummary: snapshot.approvedDebateSummary,
+          maxChars: 4200,
+          websiteFacts: {
+            sourceUrl: mergedVerified.sourceUrl,
+            headings: mergedVerified.headings,
+            bodyTextBlocks: mergedVerified.bodyTextBlocks,
+            serviceNames: mergedVerified.serviceNames,
+            pricingFields: mergedVerified.pricingFields,
+            ctaTexts: mergedVerified.ctaTexts,
+            emails: mergedVerified.emails,
+            phones: mergedVerified.phones,
+            addresses: mergedVerified.addresses,
+          },
+        });
+
+        return [
+          project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
+          `You are ${task.agent}. Produce artifact "${artifact.path}" only in Markdown.`,
+          'Use normalized architecture input below. Do not pass through raw prompt blobs or repeated facts.',
+          'Prioritize deterministic file/module-level design, dependencies, and implementation constraints.',
+          `Required sections:\n- ${sectionList.join('\n- ')}`,
+          missingInputs,
+          'Normalized architecture input:',
+          normalizedArchitecture.normalizedInput,
+          `Normalization stats: raw=${normalizedArchitecture.stats.rawChars} chars, normalized=${normalizedArchitecture.stats.normalizedChars} chars, dedupDropped=${normalizedArchitecture.stats.droppedDuplicates}`,
+          `Snapshot counts: site=${snapshot.siteSnapshots.length}, zip=${snapshot.zipSnapshots.length}, pdf=${snapshot.pdfTexts.length}, images=${snapshot.imageInputs.length}`,
+        ].join('\n\n');
+      }
+
       return [
         project.language === 'cz' ? 'Write in Czech.' : 'Write in English.',
         `You are ${task.agent}. Produce artifact \"${artifact.path}\" only in Markdown.`,
@@ -4273,6 +5027,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const buildExecutionAgentContext = useCallback(
     (task: Task, snapshot: ExecutionSnapshot) => {
+      const primaryArtifact = getPrimaryArtifactPath(task);
+      const isArchitectureReviewTask = task.agent === 'Architect' && primaryArtifact === 'architecture-review.md';
+
+      if (isArchitectureReviewTask) {
+        return {
+          snapshotId: snapshot.id,
+          cycleNumber: snapshot.cycleNumber,
+          revisionPrompt: shorten(snapshot.revisionPrompt ?? '', 700),
+          projectPrompt: shorten(snapshot.projectPrompt, 1400),
+          approvedDebateSummary: shorten(snapshot.approvedDebateSummary, 1400),
+          latestStableSummary: shorten(snapshot.latestStableSummary ?? '', 900),
+          attachmentCounts: {
+            project: snapshot.projectAttachments.length,
+            message: snapshot.messageAttachments.length,
+            zip: snapshot.zipSnapshots.length,
+            site: snapshot.siteSnapshots.length,
+            pdf: snapshot.pdfTexts.length,
+            images: snapshot.imageInputs.length,
+          },
+          missingInputNotes: snapshot.missingInputNotes.slice(0, 10),
+        };
+      }
+
       return {
         snapshotId: snapshot.id,
         cycleNumber: snapshot.cycleNumber,
@@ -4315,6 +5092,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           pageTitle: entry.pageTitle,
           summary: shorten(entry.summary, 600),
           extractedExcerpt: shorten(entry.extractedText, 1_000),
+          structured: entry.structuredData
+            ? {
+                sourceUrl: entry.structuredData.sourceUrl,
+                missingFields: entry.structuredData.missingFields,
+                warnings: entry.structuredData.extractionWarnings,
+                contacts: {
+                  emails: entry.structuredData.contactFields.emails.slice(0, 8),
+                  phones: entry.structuredData.contactFields.phones.slice(0, 8),
+                  addresses: entry.structuredData.contactFields.addresses.slice(0, 5),
+                },
+                pricing: entry.structuredData.pricingFields.slice(0, 10),
+                ctas: entry.structuredData.ctaTexts.slice(0, 10),
+              }
+            : null,
           pages: (entry.pages ?? []).slice(0, 5).map((page) => ({
             title: page.title,
             url: page.url,
@@ -5097,8 +5888,162 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const artifact = updatedArtifacts[index];
           const extractionIntent = deriveDocumentTableIntent(snapshot.projectPrompt, { defaultMode: 'booking' });
 
-          if (artifactCanBeGeneratedLocally(project, task, artifact)) {
+          if (artifactCanBeGeneratedLocally(project, task, artifact, snapshot)) {
             const builderBundle = findBuilderExecutionBundle(project.tasks);
+
+            if (
+              task.agent === 'Builder' &&
+              artifact.path === SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH &&
+              shouldUseSegmentedWebsiteBuild(project, snapshot)
+            ) {
+              const modelPayload = buildSegmentedWebsiteContentModelPayload(project, snapshot);
+              if (!modelPayload) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: verified source content is insufficient for deterministic website model normalization.`
+                );
+                return;
+              }
+
+              const selectedContent = JSON.stringify(modelPayload, null, 2);
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: selectedContent,
+                rawContent: selectedContent,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: normalized verified website content model generated locally (${artifact.path}).`,
+              });
+              continue;
+            }
+
+            if (
+              task.agent === 'Builder' &&
+              shouldUseSegmentedWebsiteBuild(project, snapshot) &&
+              (isSegmentedWebsiteCopyArtifactPath(artifact.path) ||
+                isSegmentedWebsiteSourceArtifactPath(artifact.path))
+            ) {
+              const websiteModel =
+                resolveSegmentedWebsiteContentModelFromTaskArtifacts(project.tasks, snapshot) ??
+                buildSegmentedWebsiteContentModelPayload(project, snapshot);
+              const verifiedContent = websiteModel?.verified ?? deriveVerifiedWebsiteContent(snapshot.siteSnapshots);
+              if (!hasSufficientVerifiedWebsiteContent(verifiedContent)) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: verified source content is insufficient for deterministic website generation.`
+                );
+                return;
+              }
+
+              const copySections =
+                websiteModel?.copySections ??
+                buildDeterministicWebsiteCopySections({
+                  projectName: project.name,
+                  verified: verifiedContent,
+                  language: project.language,
+                });
+
+              if (isSegmentedWebsiteCopyArtifactPath(artifact.path)) {
+                const sectionKey = resolveSegmentedWebsiteCopySectionByPath(artifact.path);
+                if (!sectionKey) {
+                  failLiveTask(
+                    task.agent,
+                    `${task.agent}: unknown website copy artifact mapping for ${artifact.path}.`
+                  );
+                  return;
+                }
+
+                const selectedSection = copySections[sectionKey];
+                const selectedContent = JSON.stringify(selectedSection, null, 2);
+
+                updatedArtifacts[index] = {
+                  ...artifact,
+                  content: selectedContent,
+                  rawContent: selectedContent,
+                  producedBy: task.agent,
+                  generatedAt: new Date(),
+                };
+
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: 'info',
+                  agent: task.agent,
+                  message: `${task.agent}: deterministic website copy section generated locally (${artifact.path}).`,
+                });
+                continue;
+              }
+
+              const sectionOverrides = resolveWebsiteCopySectionsFromTaskArtifacts(project.tasks, snapshot);
+              const sectionHeadingOverrides = resolveWebsiteSectionHeadingOverrides(websiteModel?.schema);
+              const crossRunRisk = hasSegmentedWebsiteCrossRunRisk(project.tasks, snapshot);
+
+              if (artifact.path === 'index.html') {
+                const diagnostics = buildDeterministicWebsiteRenderDiagnostics({
+                  projectName: project.name,
+                  verified: verifiedContent,
+                  copySections: sectionOverrides,
+                  sectionHeadingOverrides,
+                  language: project.language,
+                  crossRunContamination: crossRunRisk,
+                });
+
+                dispatch({
+                  type: 'ADD_LOG',
+                  level: diagnostics.firstCorruptionPoint ? 'warning' : 'info',
+                  agent: task.agent,
+                  message:
+                    `${task.agent}: website pipeline diagnostics (` +
+                    `firstCorruptionPoint=${diagnostics.firstCorruptionPoint ?? 'none'}) ` +
+                    `${JSON.stringify(diagnostics.phases)}`,
+                });
+              }
+
+              const websiteArtifacts = buildDeterministicWebsiteArtifacts({
+                projectName: project.name,
+                projectDescription: project.description,
+                verified: verifiedContent,
+                copySections: sectionOverrides,
+                sectionHeadingOverrides,
+                language: project.language,
+                portraitImage: (() => {
+                  const portraitPlan = buildPortraitAssetPlan(snapshot);
+                  if (!portraitPlan) return null;
+                  return {
+                    src: portraitPlan.assetPath,
+                    alt: portraitPlan.alt,
+                  };
+                })(),
+              });
+
+              const selectedContent =
+                artifact.path === 'index.html'
+                  ? websiteArtifacts.indexHtml
+                  : artifact.path === 'styles.css'
+                  ? websiteArtifacts.stylesCss
+                  : websiteArtifacts.scriptJs;
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: selectedContent,
+                rawContent: selectedContent,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'info',
+                agent: task.agent,
+                message: `${task.agent}: deterministic website file generated locally (${artifact.path}) from verified structured content.`,
+              });
+              continue;
+            }
 
             if (task.agent === 'Builder' && artifact.path === 'patch-plan.md') {
               const generatedFilesArtifact = updatedArtifacts.find((candidate) => candidate.path === 'generated-files.json');
@@ -5122,6 +6067,83 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 producedBy: task.agent,
                 generatedAt: new Date(),
               };
+              continue;
+            }
+
+            if (
+              task.agent === 'Builder' &&
+              artifact.path === 'generated-files.json' &&
+              shouldUseSegmentedWebsiteBuild(project, snapshot)
+            ) {
+              const indexHtml = getLatestArtifactContent(project.tasks, 'index.html');
+              const stylesCss = getLatestArtifactContent(project.tasks, 'styles.css');
+              const scriptJsRaw = getLatestArtifactContent(project.tasks, 'script.js');
+              const sourceUrl = resolvePrimaryWebsiteSourceUrl(project, snapshot);
+
+              if (!indexHtml?.trim()) {
+                failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty index.html.`);
+                return;
+              }
+              if (!stylesCss?.trim()) {
+                failLiveTask(task.agent, `${task.agent}: segmented website bundle assembly requires non-empty styles.css.`);
+                return;
+              }
+
+              const portraitPlan = buildPortraitAssetPlan(snapshot);
+              const portraitBundleFile = portraitPlan
+                ? await materializePortraitBundleFile(portraitPlan)
+                : null;
+
+              const assembled = assembleSegmentedWebsiteSeedBundle({
+                indexHtml,
+                stylesCss,
+                scriptJsRaw,
+                noScriptMarker: SEGMENTED_WEBSITE_NO_SCRIPT_MARKER,
+                sourceUrl,
+                rawProjectPrompt: snapshot.projectPrompt,
+                portraitRequirement: portraitPlan
+                  ? {
+                      assetPath: portraitPlan.assetPath,
+                      materializedFile: portraitBundleFile,
+                    }
+                  : null,
+              });
+
+              if (!assembled.ok) {
+                failLiveTask(
+                  task.agent,
+                  `${task.agent}: ${assembled.error}`
+                );
+                return;
+              }
+
+              const stabilized = stabilizeCodeExecutionBundle({
+                bundle: assembled.bundle,
+                projectName: project.name,
+                projectDescription: project.description,
+                latestRevisionFeedback: project.latestRevisionFeedback,
+                outputType: project.outputType,
+                language: project.language,
+                sourceUrl,
+              });
+
+              updatedArtifacts[index] = {
+                ...artifact,
+                content: stabilized.bundle.summary,
+                rawContent: JSON.stringify(stabilized.bundle, null, 2),
+                executionOutput: stabilized.bundle,
+                producedBy: task.agent,
+                generatedAt: new Date(),
+              };
+
+              dispatch({
+                type: 'ADD_LOG',
+                level: 'success',
+                agent: task.agent,
+                message:
+                  `${task.agent}: assembled deterministic website bundle from segmented artifacts ` +
+                  `(${stabilized.bundle.files.length} file(s)).`,
+              });
               continue;
             }
 
@@ -5186,6 +6208,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   entryPoint: stabilized.entryPoint,
                   reviewNotes,
                   packagingNotes,
+                  rawProjectPrompt: snapshot.projectPrompt,
+                  rawDebateSummary: snapshot.approvedDebateSummary,
                 }),
                 rawContent: '',
                 producedBy: task.agent,
@@ -5242,6 +6266,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             continue;
           }
 
+          if (
+            task.agent === 'Builder' &&
+            artifact.path === 'generated-files.json' &&
+            shouldUseSegmentedWebsiteBuild(project, snapshot)
+          ) {
+            failLiveTask(
+              task.agent,
+              `${task.agent}: website generated-files assembly must be deterministic/local; OpenAI fallback is disabled to avoid timeout-prone monolithic generation.`
+            );
+            return;
+          }
+
           dispatch({
             type: 'ADD_LOG',
             level: 'info',
@@ -5251,7 +6287,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
           const prompt = buildExecutionArtifactPrompt(task, artifact, snapshot, project);
           const compactContext = buildExecutionAgentContext(task, snapshot);
-          const promptSize = estimatePromptSize(prompt, compactContext);
+          const lightweightContext = {
+            snapshotId: snapshot.id,
+            cycleNumber: snapshot.cycleNumber,
+            projectPrompt: shorten(snapshot.projectPrompt, 1200),
+            revisionPrompt: shorten(snapshot.revisionPrompt ?? '', 600),
+            executionPlan: shorten(getLatestArtifactContent(project.tasks, 'execution-plan.md') ?? '', 1200),
+            architectureReview: shorten(getLatestArtifactContent(project.tasks, 'architecture-review.md') ?? '', 1200),
+          };
+          const modelContext = isSegmentedWebsiteSourceArtifactPath(artifact.path)
+            ? lightweightContext
+            : compactContext;
+          const promptSize = estimatePromptSize(prompt, modelContext);
           const requiresStructuredOutput = artifactRequiresStructuredExecutionOutput(task, artifact);
           const shouldChunkPdfExtraction = shouldChunkBuilderPdfExtraction(task, artifact.path, snapshot, project);
           const structuredOnlyStage = shouldUseStructuredOnlyStage(artifact.path);
@@ -5615,7 +6662,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     inputText: finalPrompt,
                     context: {
                       artifactPath: artifact.path,
-                      ...compactContext,
+                      ...modelContext,
                       chunking: {
                         chunkCount: pdfChunks.length,
                         maxFilesPerChunk,
@@ -5663,7 +6710,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   inputText: prompt,
                   context: {
                     artifactPath: artifact.path,
-                    ...compactContext,
+                    ...modelContext,
                   },
                 },
                 { agent: task.agent },
@@ -6209,6 +7256,179 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           producesArtifacts: [{ path: 'architecture-review.md', label: 'Architecture Review', kind: 'doc' }],
         });
 
+        if (shouldUseSegmentedWebsiteBuild(project, project.executionSnapshot ?? undefined)) {
+          const segmentedSnapshot = project.executionSnapshot ?? undefined;
+          let segmentedSchemaSelection: WebsiteSchemaSelection = selectWebsiteSectionSchema({
+            taskIntentText: buildWebsiteTaskIntentText(project, segmentedSnapshot),
+            language: project.language,
+            verifiedFacts: segmentedSnapshot
+              ? deriveCurrentVerifiedWebsiteContent(project, segmentedSnapshot).verified
+              : null,
+          });
+
+          const modelPayload =
+            segmentedSnapshot && buildSegmentedWebsiteContentModelPayload(project, segmentedSnapshot);
+          if (modelPayload?.schema) {
+            segmentedSchemaSelection = modelPayload.schema;
+          }
+
+          const copyTaskPlan = createWebsiteCopyTaskPlan(segmentedSchemaSelection);
+
+          const webContentNormalizer = createTask({
+            title: `WebContentNormalizer: Normalize website content model (${codeModeLabel})`,
+            description:
+              'Normalize verified source facts, slot mapping, pricing/contact/address fields, and public-safe section model before rendering files.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [appArchitect.id],
+            status: statusFor([appArchitect.id]),
+            producesArtifacts: [
+              { path: SEGMENTED_WEBSITE_CONTENT_MODEL_ARTIFACT_PATH, label: 'Website Content Model', kind: 'json' },
+            ],
+          });
+
+          const schemaTaskPreview = copyTaskPlan
+            .map((entry) => `${entry.slot}:${entry.taskTitleLabel}`)
+            .join(', ');
+
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            agent: 'Builder',
+            message:
+              `Builder: website schema selection inputIntent=${JSON.stringify(
+                buildWebsiteTaskIntentText(project, segmentedSnapshot)
+              )} ` +
+              `archetype=${segmentedSchemaSelection.archetype} schema=${segmentedSchemaSelection.schemaId} ` +
+              `sections=${schemaTaskPreview}`,
+          });
+
+          let latestCopyDependencyId = webContentNormalizer.id;
+          const copyTasks = copyTaskPlan.map((entry, sectionIndex) => {
+            const titleLabel = entry.taskTitleLabel;
+
+            const dependencyId = latestCopyDependencyId;
+            const task = createTask({
+              title: `WebCopyBuilder ${sectionIndex + 1}/7: ${titleLabel} (${codeModeLabel})`,
+              description: `Generate rewritten public website copy section for ${titleLabel} only.`,
+              agent: 'Builder',
+              provider: 'openai',
+              model: taskModel,
+              dependsOn: [dependencyId],
+              status: statusFor([dependencyId]),
+              producesArtifacts: [{ path: entry.artifactPath, label: `Website Copy ${titleLabel}`, kind: 'json' }],
+            });
+            latestCopyDependencyId = task.id;
+            return task;
+          });
+
+          const webHtmlBuilder = createTask({
+            title: `WebHtmlBuilder: Generate index.html (${codeModeLabel})`,
+            description: 'Generate only index.html from validated section-level website copy outputs.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [latestCopyDependencyId],
+            status: statusFor([latestCopyDependencyId]),
+            producesArtifacts: [{ path: 'index.html', label: 'Website HTML', kind: 'doc' }],
+          });
+
+          const webStyleBuilder = createTask({
+            title: `WebStyleBuilder: Generate styles.css (${codeModeLabel})`,
+            description: 'Generate only styles.css using current index.html as input.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webHtmlBuilder.id],
+            status: statusFor([webHtmlBuilder.id]),
+            producesArtifacts: [{ path: 'styles.css', label: 'Website Styles', kind: 'doc' }],
+          });
+
+          const webScriptBuilder = createTask({
+            title: `WebScriptBuilder: Generate script.js (${codeModeLabel})`,
+            description:
+              'Generate only script.js for interaction, or return no-script marker when JavaScript is unnecessary.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webStyleBuilder.id],
+            status: statusFor([webStyleBuilder.id]),
+            producesArtifacts: [{ path: 'script.js', label: 'Website Script', kind: 'doc' }],
+          });
+
+          const webBundleAssembler = createTask({
+            title: `WebBundleAssembler: Assemble generated-files.json (${codeModeLabel})`,
+            description:
+              'Assemble deterministic generated-files bundle locally from index.html, styles.css, and optional script.js.',
+            agent: 'Builder',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webScriptBuilder.id],
+            status: statusFor([webScriptBuilder.id]),
+            producesArtifacts: [
+              { path: 'generated-files.json', label: 'Generated Files', kind: 'json' },
+              { path: 'patch-plan.md', label: 'Patch Plan', kind: 'doc' },
+            ],
+          });
+
+          const qaReviewer = createTask({
+            title: `QA: Quality and risk review (${codeModeLabel})`,
+            description:
+              'Review assembled website source set for requirement coverage, structural contract completeness, and risks.',
+            agent: 'Reviewer',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [webBundleAssembler.id],
+            status: statusFor([webBundleAssembler.id]),
+            producesArtifacts: [{ path: 'review-notes.md', label: 'Review Notes', kind: 'report' }],
+            retryCount: 0,
+            maxRetries,
+          });
+
+          const bundleExporter = createTask({
+            title: `BundleExporter: Packaging notes (${codeModeLabel})`,
+            description: 'Prepare deterministic packaging notes from generated source set and QA feedback.',
+            agent: 'Tester',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [qaReviewer.id],
+            status: statusFor([qaReviewer.id]),
+            producesArtifacts: [{ path: 'bundle-export.md', label: 'Bundle Export', kind: 'report' }],
+            retryCount: 0,
+            maxRetries,
+          });
+
+          const integrator = createTask({
+            title: `Integrator: Final combined result (${codeModeLabel})`,
+            description: 'Assemble deterministic final result summary from shared generated source set and stage notes.',
+            agent: 'Integrator',
+            provider: 'openai',
+            model: taskModel,
+            dependsOn: [bundleExporter.id],
+            status: statusFor([bundleExporter.id]),
+            producesArtifacts: [{ path: 'final-summary.md', label: 'Final Summary', kind: 'doc' }],
+          });
+
+          return {
+            tasks: [
+              codePlanner,
+              appArchitect,
+              webContentNormalizer,
+              ...copyTasks,
+              webHtmlBuilder,
+              webStyleBuilder,
+              webScriptBuilder,
+              webBundleAssembler,
+              qaReviewer,
+              bundleExporter,
+              integrator,
+            ],
+            concurrencyLimit: 2,
+            maxRetries,
+          };
+        }
+
         const fileBuilder = createTask({
           title: `FileBuilder: Generate runnable files (${codeModeLabel})`,
           description:
@@ -6557,12 +7777,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ingestAttachment = useCallback(
     async (projectId: string, attachment: ProjectAttachment) => {
       try {
+        const projectContext = stateRef.current.projects.find((candidate) => candidate.id === projectId);
+        const isWebsiteProject = projectContext?.outputType === 'website';
+
         if (attachment.kind === 'url') {
           dispatch({
             type: 'ADD_LOG',
             level: 'info',
             message: `URL fetch started: ${attachment.sourceUrl ?? attachment.downloadUrl ?? attachment.title}`,
           });
+          if (isWebsiteProject) {
+            dispatch({
+              type: 'ADD_LOG',
+              level: 'info',
+              message: 'Website source ingestion: running structured URL extraction before debate/execution.',
+            });
+          }
         }
 
         const response = await fetch('/api/attachments/ingest', {
@@ -6576,8 +7806,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             mimeType: attachment.mimeType,
             ...(attachment.kind === 'url'
               ? {
-                  maxPages: 5,
-                  maxDepth: 1,
+                  maxPages: isWebsiteProject ? 8 : 5,
+                  maxDepth: isWebsiteProject ? 2 : 1,
                 }
               : {}),
           }),
@@ -6876,6 +8106,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const file = attachment.file;
       const derivedKind = detectFileKind(file);
+      const localImageDataUrl = derivedKind === 'image' ? await readFileAsDataUrl(file) : null;
       const safeName = sanitizeFileName(file.name);
       const storagePath = `projects/${projectId}/attachments/${artifactId}/${safeName}`;
 
@@ -6988,14 +8219,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           storagePath,
           downloadUrl,
           sourceUrl: downloadUrl,
+          aiImageDataUrl: localImageDataUrl ?? undefined,
           ingestion: { status: 'uploaded', summary: 'File uploaded, waiting for ingestion.' },
           createdAt,
         };
 
+        const { aiImageDataUrl: _localOnlyAiImageDataUrl, ...persistableArtifact } = uploadedArtifact;
+
         const savedCollection = await persistAttachmentMetadata(
           client,
           {
-          ...uploadedArtifact,
+          ...persistableArtifact,
           createdAt: createdAt.toISOString(),
           createdBy: firebaseUid,
           },
