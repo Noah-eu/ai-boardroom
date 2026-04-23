@@ -5,6 +5,7 @@ import {
   classifyCodeGenerationMode,
   detectEntryPoint,
   stabilizeCodeExecutionBundle,
+  validateWebsiteBundleSourceFiles,
 } from './codeBundleStabilizer';
 
 describe('codeBundleStabilizer', () => {
@@ -58,6 +59,7 @@ describe('codeBundleStabilizer', () => {
     expect(paths).toContain('run-instructions.md');
     expect(paths).toContain('deploy-instructions.md');
     expect(paths).toContain('app-manifest.json');
+    expect(paths).toContain('site-metadata.json');
     expect(stabilized.entryPoint).toBe('index.html');
     expect(stabilized.bundle.summary).toContain('mode=landing-page');
   });
@@ -98,5 +100,37 @@ describe('codeBundleStabilizer', () => {
     });
     expect(finalSummary).toContain('Final Summary');
     expect(finalSummary).toContain('preview and exported bundle use the same generated source set');
+  });
+
+  it('fails validation for truncated index.html', () => {
+    const result = validateWebsiteBundleSourceFiles({
+      files: [
+        { path: 'index.html', content: '<!doctype html><html><body><section><h1>Therapist' },
+        { path: 'styles.css', content: 'body{font-family:sans-serif;}' },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toContain('closing </html>');
+  });
+
+  it('replaces URL placeholders when source URL exists', () => {
+    const sourceUrl = 'https://example-therapy.com';
+    const validation = validateWebsiteBundleSourceFiles({
+      files: [
+        {
+          path: 'index.html',
+          content:
+            '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Therapist</title></head><body><main><h1>Therapist Studio</h1><p>Visit us</p><a href="[SEM VLOŽ URL]">Book</a></main></body></html>',
+        },
+        { path: 'styles.css', content: 'body{margin:0;}' },
+      ],
+      sourceUrl,
+    });
+
+    expect(validation.ok).toBe(true);
+    const html = validation.files.find((file) => file.path === 'index.html')?.content ?? '';
+    expect(html).toContain(sourceUrl);
+    expect(html).not.toContain('[SEM VLOŽ URL]');
   });
 });
