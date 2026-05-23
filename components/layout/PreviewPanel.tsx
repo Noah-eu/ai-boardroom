@@ -156,7 +156,29 @@ function resolveBundlePreviewHtml(bundle: ExecutionOutputBundle): string | null 
     }
   );
 
-  let html = inlineLinkedScripts;
+  const inlineLinkedImages = inlineLinkedScripts.replace(
+    /<img\b([^>]*?)src=["']([^"']+)["']([^>]*)>/gi,
+    (match, before, src, after) => {
+      if (/^(https?:)?\/\//i.test(src) || src.startsWith('data:')) {
+        return match;
+      }
+      const linkedFile = findBundleFile(bundle, src);
+      if (!linkedFile || !isBase64EncodedBundleFileContent(linkedFile.path, linkedFile.content)) {
+        return match;
+      }
+      const lower = linkedFile.path.toLowerCase();
+      const mime = lower.endsWith('.png')
+        ? 'image/png'
+        : lower.endsWith('.webp')
+        ? 'image/webp'
+        : lower.endsWith('.gif')
+        ? 'image/gif'
+        : 'image/jpeg';
+      return `<img${before}src="data:${mime};base64,${decodeBase64BundleFileContent(linkedFile.content)}"${after}>`;
+    }
+  );
+
+  let html = inlineLinkedImages;
   const hasInlineStyle = /<style\b/i.test(html);
   const hasInlineScript = /<script\b/i.test(html);
   const defaultStyle = findBundleFile(bundle, 'style.css');
@@ -765,12 +787,29 @@ function InvoiceSummaryView({
   );
 }
 
-function getPreferredArtifactSelection(tasks: Task[]): { taskId: string; artifactPath: string } | null {
+function getPreferredArtifactSelection(
+  tasks: Task[],
+  options?: { strictPublicOutput?: boolean }
+): { taskId: string; artifactPath: string } | null {
   for (const task of [...tasks].reverse()) {
-    const bundleArtifact = task.producesArtifacts.find((artifact) => artifact.executionOutput?.files.length);
+    const bundleArtifact = task.producesArtifacts.find(
+      (artifact) => artifact.executionOutput?.files.length && (task.status === 'done' || task.status === 'completed_with_fallback')
+    );
     if (bundleArtifact) {
       return { taskId: task.id, artifactPath: bundleArtifact.path };
     }
+  }
+
+  if (options?.strictPublicOutput) {
+    for (const task of [...tasks].reverse()) {
+      if (task.agent !== 'Integrator') continue;
+      if (task.status !== 'done' && task.status !== 'completed_with_fallback') continue;
+      const finalArtifact = task.producesArtifacts.find((artifact) => artifact.path === 'final-summary.md' && artifact.content?.trim());
+      if (finalArtifact) {
+        return { taskId: task.id, artifactPath: finalArtifact.path };
+      }
+    }
+    return null;
   }
 
   for (const task of [...tasks].reverse()) {
@@ -913,11 +952,18 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
       ),
     [tasks]
   );
-  const preferredResultSelection = useMemo(() => getPreferredArtifactSelection(tasks), [tasks]);
+  const isAppProject = useMemo(() => {
+    return project?.outputType === 'app' || project?.outputType === 'website';
+  }, [project]);
+  const preferredResultSelection = useMemo(
+    () => getPreferredArtifactSelection(tasks, { strictPublicOutput: isAppProject }),
+    [isAppProject, tasks]
+  );
   const executionCompletionStatus = useMemo(() => buildExecutionCompletionStatus(tasks), [tasks]);
   const integratorFinalArtifact = useMemo(() => {
     const integratorTask = [...tasks].reverse().find((task) => task.agent === 'Integrator');
     if (!integratorTask) return null;
+    if (integratorTask.status !== 'done' && integratorTask.status !== 'completed_with_fallback') return null;
     const artifact = integratorTask.producesArtifacts.find((item) => item.path === 'final-summary.md') ?? null;
     if (!artifact?.content) return null;
 
@@ -970,10 +1016,6 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
       return acc;
     }, {});
   }, [tasks]);
-
-  const isAppProject = useMemo(() => {
-    return project?.outputType === 'app' || project?.outputType === 'website';
-  }, [project]);
 
   useEffect(() => {
     if (!selectedTaskId && preferredResultSelection) {
@@ -1567,7 +1609,19 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                 <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
                   <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('preview.projectOutput')}</p>
                   <p className="mt-1 text-xs text-gray-100">{project.name}</p>
-                  <p className="mt-1 text-[11px] text-gray-300 leading-relaxed">{project.description}</p>
+                  {isAppProject ? (
+                    stableBaselineBundle ? (
+                      <p className="mt-1 text-[11px] text-gray-300 leading-relaxed">
+                        Public output is sourced from the generated stable baseline bundle.
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-[11px] text-amber-300 leading-relaxed">
+                        Public artifacts were not generated successfully. Input prompt/debate text is intentionally not used as substitute project output.
+                      </p>
+                    )
+                  ) : (
+                    <p className="mt-1 text-[11px] text-gray-300 leading-relaxed">{project.description}</p>
+                  )}
                 </div>
 
                 <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
@@ -1601,10 +1655,12 @@ export function PreviewPanel({ mode = 'desktop' }: PreviewPanelProps) {
                   </p>
                 </div>
 
-                <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
-                  <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('preview.debateDecisions')}</p>
-                  <p className="mt-1 text-[11px] text-gray-200 whitespace-pre-wrap leading-relaxed">{debateSummary}</p>
-                </div>
+                {!isAppProject && (
+                  <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
+                    <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('preview.debateDecisions')}</p>
+                    <p className="mt-1 text-[11px] text-gray-200 whitespace-pre-wrap leading-relaxed">{debateSummary}</p>
+                  </div>
+                )}
 
                 <div className="rounded border border-gray-700 bg-gray-900/70 px-2.5 py-2">
                   <p className="text-[10px] uppercase tracking-wider text-gray-400">{t('preview.keyArtifacts')}</p>
